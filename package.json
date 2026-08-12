@@ -6,6 +6,7 @@
   "description": "zSwarm — coordinate CLI crews in Zellij panes (list, send, dump).",
   "scripts": {
     "build": "pnpm -r run build",
+    "build:plugin": "cd plugin/zswarm-events && cargo build --release --target wasm32-wasip1 && node -e \"require('node:fs').copyFileSync('target/wasm32-wasip1/release/zswarm-events.wasm','../prebuilt/zswarm-bus.wasm')\"",
     "test": "pnpm --dir packages/core test",
     "cli": "pnpm --dir packages/cli exec node dist/cli.js",
     "mcp": "pnpm --dir packages/mcp exec node dist/mcp-server.js"

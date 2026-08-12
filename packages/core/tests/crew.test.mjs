@@ -1,3 +1,4 @@
+process.env.ZSWARM_BUS = "0"; // the bus needs a live Zellij
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";

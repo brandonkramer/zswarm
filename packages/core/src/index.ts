@@ -37,17 +37,40 @@ export {
 export {
   buildClosePaneArgs,
   buildDumpArgs,
+  buildLaunchPluginArgs,
   buildListPanesArgs,
   buildNewPaneArgs,
   buildNewTabArgs,
   buildPasteArgs,
+  buildPipeArgs,
   buildSendEnterArgs,
   buildSendKeysArgs,
   buildWriteCharsArgs,
+  type LaunchPluginInput,
   type NewPaneInput,
   type NewTabInput,
   type PaneDirection,
+  type PipeInput,
 } from "./zellij/args.js";
+export {
+  busPluginUrl,
+  busToPanes,
+  nextConfigKey,
+  parseBusReply,
+  resolveBusPlugin,
+  BUS_PIPE_NAME,
+  DEFAULT_BUS_KEY,
+  DEFAULT_BUS_TIMEOUT_MS,
+  type BusMarker,
+  type BusPane,
+  type BusSnapshot,
+} from "./zellij/bus.js";
+export {
+  busSnapshot,
+  planBus,
+  resetBusCache,
+  type BusPlan,
+} from "./ops/bus.js";
 export {
   createZellijClient,
   type ZellijClient,

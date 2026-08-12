@@ -4,20 +4,25 @@ import {
   buildDumpArgs,
   buildDumpLayoutArgs,
   buildFocusPaneArgs,
+  buildLaunchPluginArgs,
   buildListPanesArgs,
   buildListTabsArgs,
   buildNewPaneArgs,
   buildNewTabArgs,
   buildPasteArgs,
+  buildPipeArgs,
   buildRenamePaneArgs,
   buildRenameTabArgs,
   buildSendEnterArgs,
   buildSendKeysArgs,
   buildStackPanesArgs,
   buildWriteCharsArgs,
+  type LaunchPluginInput,
   type NewPaneInput,
   type NewTabInput,
+  type PipeInput,
 } from "./args.js";
+import { DEFAULT_BUS_TIMEOUT_MS, parseBusReply } from "./bus.js";
 import { parseTabList, resolveTab, type ZellijTab } from "./tabs.js";
 import { createSshExec } from "../exec.js";
 import {
@@ -287,6 +292,34 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     };
   }
 
+  /**
+   * Ask the event-bus plugin, without the usual failure handling: a missing or
+   * unresponsive plugin is an expected outcome the caller falls back from, not
+   * an error worth raising.
+   */
+  async function pipePlugin(
+    input: PipeInput & { timeoutMs?: number },
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    return exec(buildPipeArgs(input), {
+      timeoutMs: input.timeoutMs ?? DEFAULT_BUS_TIMEOUT_MS,
+      // The answer is what we want; the process outliving it is not our problem.
+      until: (stdout) => parseBusReply(stdout) !== null,
+    });
+  }
+
+  async function launchPlugin(
+    input: LaunchPluginInput,
+  ): Promise<{ session: string; paneId: string | null }> {
+    const result = await run(
+      buildLaunchPluginArgs(input),
+      "zellij action launch-or-focus-plugin",
+    );
+    return {
+      session: input.session,
+      paneId: parseCreatedPaneId(result.stdout),
+    };
+  }
+
   /** Visible prefix so peer CLIs can tell zSwarm injects from human prompts. */
   function formatPeerMessage(from: string, body: string): string {
     const sender = from.trim() || "swarm";
@@ -296,6 +329,8 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   return {
     zellijPath,
     selfPaneId,
+    /** A `file:` plugin url only names a path on the machine running Zellij. */
+    remote: ssh !== null,
     listSessions,
     resolveSession,
     listPanes,
@@ -313,6 +348,8 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     listTabs,
     dumpLayout,
     stackPanes,
+    pipePlugin,
+    launchPlugin,
     resolveTab,
     normalizePaneId,
     formatPeerMessage,

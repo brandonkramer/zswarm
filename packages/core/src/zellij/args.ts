@@ -1,4 +1,5 @@
 import { ZellijError } from "../errors.js";
+import { BUS_PIPE_NAME } from "./bus.js";
 import { normalizePaneId } from "./panes.js";
 
 export type PaneDirection = "right" | "left" | "up" | "down";
@@ -25,8 +26,66 @@ export type NewTabInput = {
   closeOnExit?: boolean;
 };
 
+export type PipeInput = {
+  session: string;
+  /** `file:` url of the plugin wasm. */
+  url: string;
+  /** Value of the `instance` configuration key — see buildPipeArgs. */
+  configKey: string;
+  name?: string;
+  payload: string;
+};
+
+export type LaunchPluginInput = {
+  session: string;
+  url: string;
+  configKey: string;
+  floating?: boolean;
+  skipCache?: boolean;
+};
+
 export function sessionPrefix(session: string | undefined): string[] {
   return session ? ["--session", session] : [];
+}
+
+/**
+ * Ask the event-bus plugin a question over a CLI pipe.
+ *
+ * The configuration is not decoration: Zellij treats the same plugin under a
+ * different configuration as a different pipe destination, so a distinct
+ * `instance` key is what stops a dead instance from swallowing the message.
+ */
+export function buildPipeArgs(input: PipeInput): string[] {
+  return [
+    ...sessionPrefix(input.session),
+    "pipe",
+    "--plugin",
+    input.url,
+    "--plugin-configuration",
+    `instance=${input.configKey}`,
+    "--name",
+    input.name ?? BUS_PIPE_NAME,
+    "--",
+    input.payload,
+  ];
+}
+
+/**
+ * Load the plugin in a visible pane. A pipe-launched plugin has no pane, so its
+ * permission prompt cannot be answered — the first load has to be this one.
+ */
+export function buildLaunchPluginArgs(input: LaunchPluginInput): string[] {
+  const args = [
+    ...sessionPrefix(input.session),
+    "action",
+    "launch-or-focus-plugin",
+    "--configuration",
+    `instance=${input.configKey}`,
+  ];
+  if (input.floating) args.push("--floating");
+  if (input.skipCache) args.push("--skip-plugin-cache");
+  args.push(input.url);
+  return args;
 }
 
 export function buildListPanesArgs(session: string): string[] {

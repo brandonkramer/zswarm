@@ -165,6 +165,7 @@ pnpm run cli -- checkpoint --branch review-auth --cwd /path/to/repo --message wi
 | `stack` | Stack a comma list of panes into one stack (≥ 2) |
 | `diff` | Peer worktree changes (`path` / `branch` / `cwd`; `stat`; `max` default 8000) |
 | `checkpoint` | Commit everything in a peer worktree (`message=`); clean → `committed: false` |
+| `bus` | Report the event bus; `install: true` loads it, `clear: true` forgets it |
 
 **Breaking:** `spawn`'s boolean `tab` is now `newTab`. `tab` is a tab **name**
 (used by `broadcast` to target a tab, by `rename` to retitle one, and by `spawn`
@@ -197,6 +198,56 @@ returns the whole screen. Fields: `text`, `reset`, `fresh`, `chars`.
 
 `status` samples each pane twice (`sampleMs`, default 400) → `busy` /
 `waiting` / `idle` / `exited`, plus `free[]`. Optional `to=` for one pane.
+`sampleMs=0` skips sampling: every live pane reports `running`, there is no
+`free[]`, and the answer comes from the event bus when it is installed.
+
+### Event bus
+
+`list` and `status` normally cost one zellij process per question, plus two
+`dump-screen` calls per pane for `status`. A small Zellij plugin can hold that
+state instead: Zellij pushes pane and tab changes into it, and one `zellij pipe`
+call reads the current picture back out of memory.
+
+```bash
+zswarm bus --install   # loads the plugin, approve its permission prompt once
+zswarm bus             # enabled? ready? how many pushes so far?
+zswarm bus --clear     # forget it; everything goes back to polling
+```
+
+Install is remembered in `~/.zswarm/bus.json`, so until you run it the bus is
+off and nothing pays for a pipe that was never going to answer. Every reply
+carries `source: "plugin" | "zellij"` so you can tell which path served it.
+
+The pane `--install` opens exists only to render the permission prompt — close
+it once you have approved. Later calls relaunch the plugin headless, and the
+first one after a relaunch waits for Zellij to push it a manifest.
+
+What the bus can and cannot serve:
+
+```
+  pushed by Zellij            not an event
+  ────────────────            ────────────
+  pane opened / closed        pane output text
+  pane exited                 pane cwd
+  focus moved                 pane command
+  tab added / renamed         floating
+
+  → list, status              → dump, tail, wait, list --verbose
+```
+
+Because the manifest carries no command, a bus-served `list` omits `command`
+rather than reporting it as null, and `status --to <command>` falls back to
+polling. `--verbose` always polls.
+
+Rebuilding the plugin needs Rust; the compiled artifact is committed so users
+do not:
+
+```bash
+cd plugin/zswarm-events
+rustup target add wasm32-wasip1
+cargo build --release --target wasm32-wasip1
+cp target/wasm32-wasip1/release/zswarm-events.wasm ../prebuilt/zswarm-bus.wasm
+```
 
 `signal` / `signals` / `await` use durable channels under `ZSWARM_STATE_DIR`
 (default `~/.zswarm`: `log.jsonl`, `signals.json`, `cursors.json`).
@@ -254,7 +305,9 @@ ssh (`BatchMode=yes` unless you set your own). Optional: `ZSWARM_SSH_BIN`,
 | `ZSWARM_SELF_PANE` | Pane to treat as zSwarm's own (defaults to `ZELLIJ_PANE_ID`; `none` disables the guard) |
 | `ZSWARM_WORKTREE_ROOT` | Directory for linked worktrees (default `<repo>-worktrees` beside the repo) |
 | `ZSWARM_GIT_BIN` | Absolute path to `git` / `git.exe` when not on PATH |
-| `ZSWARM_STATE_DIR` | Durable state dir for log / signals / tail cursors (default `~/.zswarm`) |
+| `ZSWARM_STATE_DIR` | Durable state dir for log / signals / tail cursors / bus marker (default `~/.zswarm`) |
+| `ZSWARM_BUS` | `0` never asks the event bus; `1` asks it without `bus --install` |
+| `ZSWARM_BUS_PLUGIN` | Path to the plugin wasm (default `plugin/prebuilt/zswarm-bus.wasm`) |
 | `ZSWARM_LOG` | Set to `0` to disable the delivery log |
 | `ZSWARM_READONLY` | `1` blocks write ops (see Policy) |
 | `ZSWARM_ALLOW_PANES` | Comma allow-list for pane id / title substring |

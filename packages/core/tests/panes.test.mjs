@@ -1,4 +1,6 @@
 process.env.ZSWARM_LOG = "0";
+// The bus talks to a live Zellij; unit tests take the polling path.
+process.env.ZSWARM_BUS = "0";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

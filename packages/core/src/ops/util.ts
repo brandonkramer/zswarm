@@ -36,6 +36,14 @@ export function paneViewSlim(p: ZellijPane) {
   };
 }
 
+/**
+ * The event-bus view. Zellij's pane manifest carries no command, so the key is
+ * left out rather than reported as null — absent means unknown, not none.
+ */
+export function paneViewBus(p: ZellijPane) {
+  return { id: p.id, title: p.title, tab: p.tabName ?? null };
+}
+
 export function paneViewFull(p: ZellijPane) {
   return {
     ...paneViewSlim(p),

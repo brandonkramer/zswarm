@@ -4,7 +4,7 @@ description: >-
   Coordinate CLI crews in Zellij panes via zSwarm MCP (list, send, dump, tail,
   wait, status, keys, interrupt, spawn, close, broadcast, signal, signals,
   await, log, worktrees, unworktree, rename, focus, tabs, layout, stack, diff,
-  checkpoint). Use when messaging another Codex/Claude/Cursor CLI in a Zellij
+  checkpoint, bus). Use when messaging another Codex/Claude/Cursor CLI in a Zellij
   pane, waiting for one to finish, broadcasting to a crew, signalling barriers,
   interrupting, opening a new crew pane, isolating peers in git worktrees,
   reviewing peer diffs/checkpoints, renaming/focusing panes, or dumping short
@@ -25,7 +25,7 @@ zswarm({ op: "wait", to: "reviewer", for: "idle" })
 ```
 
 Optional: `session` when multiple Zellij sessions exist, or set `ZSWARM_SESSION`.
-CLI backup: `zswarm list|send|dump|tail|wait|status|keys|interrupt|spawn|close|broadcast|signal|signals|await|log|worktrees|unworktree|rename|focus|tabs|layout|stack|diff|checkpoint|sessions`
+CLI backup: `zswarm list|send|dump|tail|wait|status|keys|interrupt|spawn|close|broadcast|signal|signals|await|log|worktrees|unworktree|rename|focus|tabs|layout|stack|diff|checkpoint|bus|sessions`
 (same ops; package `@zswarm/cli`).
 
 ## Ops
@@ -37,7 +37,7 @@ CLI backup: `zswarm list|send|dump|tail|wait|status|keys|interrupt|spawn|close|b
 | `dump` | Full-screen read; capped at 8000 chars (tail) — expensive vs `tail` |
 | `tail` | Cheap incremental read since last cursor; `reset: true` returns whole screen |
 | `wait` | Block until the pane is quiet or prints `match`; returns `reason` + a 2000-char tail |
-| `status` | Classify panes busy / waiting / idle / exited; `free[]` = idle ids |
+| `status` | Classify panes busy / waiting / idle / exited; `free[]` = idle ids. `sampleMs: 0` skips sampling — live panes report `running`, no `free[]`, and the event bus answers it |
 | `keys` | Key specs (`keys: ["Ctrl c"]`) or literal `chars` (+ `enter`) |
 | `interrupt` | `Esc`; `hard: true` sends `Ctrl c` |
 | `spawn` | New pane (`newTab: true` for a fresh tab) with `command`, `cwd`, `name`, `direction`, `floating`; `tab` = tab name to open in; `worktree` isolates on a branch |
@@ -57,6 +57,7 @@ CLI backup: `zswarm list|send|dump|tail|wait|status|keys|interrupt|spawn|close|b
 | `diff` | What a peer changed in its worktree (`path` / `branch` / `cwd`; `stat: true`; `max`) |
 | `checkpoint` | Commit a peer worktree so the pane can close and resume (`message`); clean tree is not an error |
 | `sessions` | Live Zellij session names |
+| `bus` | Event-bus status; `install: true` loads the plugin (once), `clear: true` forgets it |
 
 `submit=auto` (default) checks the paste actually submitted and presses Enter
 again if the text is still sitting in a TUI composer. `submit=double-enter`
@@ -64,6 +65,18 @@ forces the extra Enter; `submit=none` disables. Multi-line prompts used to stay
 queued in the composer while zswarm reported success — check `submitted`.
 
 **Breaking:** `spawn`'s boolean `tab` is now `newTab`; `tab` is a tab **name**.
+
+### Event bus
+
+`zswarm({ op: "bus", install: true })` once per machine loads a Zellij plugin
+that is *pushed* pane and tab changes. After that `list` and `status` read it
+over one pipe instead of polling, and every reply says `source: "plugin"` or
+`source: "zellij"`. It is off until installed, and any failure falls back
+silently — so treat it as speed, never as a dependency.
+
+The manifest Zellij pushes has no pane command, cwd, or output text. A
+bus-served `list` therefore omits `command`; `list` with `verbose`,
+`status --to <command>`, and all of `dump` / `tail` / `wait` keep polling.
 
 ## Crew coordination
 

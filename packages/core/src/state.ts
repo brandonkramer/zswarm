@@ -25,9 +25,21 @@ export type SignalChannel = {
   last: string | null;
 };
 
+/**
+ * Written once by `bus --install`, after the plugin's permission prompt has
+ * been answered. Its presence is what lets later runs try the fast path without
+ * every cold `zswarm status` paying for a pipe that was never going to answer.
+ */
+export type BusMarkerRecord = {
+  plugin: string;
+  configKey: string;
+  installedAt: number;
+};
+
 const LOG_FILE = "log.jsonl";
 const SIGNALS_FILE = "signals.json";
 const CURSORS_FILE = "cursors.json";
+const BUS_FILE = "bus.json";
 /** Keeps the log bounded without needing a rotation daemon. */
 const LOG_TAIL_BYTES = 512 * 1024;
 
@@ -149,6 +161,24 @@ export function createStateStore(options: StateStoreOptions = {}) {
     writeJson(CURSORS_FILE, all);
   }
 
+  function readBus(): BusMarkerRecord | null {
+    const value = readJson<BusMarkerRecord | null>(BUS_FILE, null);
+    if (!value || typeof value.plugin !== "string" || !value.plugin) return null;
+    return value;
+  }
+
+  function writeBus(marker: BusMarkerRecord): void {
+    writeJson(BUS_FILE, marker);
+  }
+
+  function clearBus(): void {
+    try {
+      rmSync(join(dir, BUS_FILE), { force: true });
+    } catch {
+      // Nothing to forget.
+    }
+  }
+
   /** Test helper: drop everything this store wrote. */
   function reset(): void {
     rmSync(dir, { recursive: true, force: true });
@@ -165,6 +195,9 @@ export function createStateStore(options: StateStoreOptions = {}) {
     readCursor,
     writeCursor,
     clearCursor,
+    readBus,
+    writeBus,
+    clearBus,
     reset,
   };
 }

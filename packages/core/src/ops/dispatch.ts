@@ -10,7 +10,9 @@ import {
   type Policy,
 } from "../policy.js";
 import { createStateStore, type StateStore } from "../state.js";
+import { busToPanes } from "../zellij/bus.js";
 import { broadcast } from "./broadcast.js";
+import { busOp, busSnapshot } from "./bus.js";
 import {
   dumpLayoutOp,
   focusTarget,
@@ -33,6 +35,7 @@ import {
   fail,
   isTrue,
   isVerbose,
+  paneViewBus,
   paneViewFull,
   paneViewSlim,
   truncateDumpText,
@@ -89,12 +92,21 @@ export async function dispatchZswarm(
         const { session } = await client.resolveSession(
           typeof args.session === "string" ? args.session : undefined,
         );
-        const view = verbose ? paneViewFull : paneViewSlim;
-        const panes = (await client.listPanes(session))
+        // The plugin's manifest carries no cwd or floating flag, so anything
+        // verbose has to go the polling route.
+        const bus = verbose
+          ? null
+          : await busSnapshot(client, state(), session, clock, deps.env);
+        const view = bus ? paneViewBus : verbose ? paneViewFull : paneViewSlim;
+        const panes = (bus ? busToPanes(bus.snapshot) : await client.listPanes(session))
           .filter((p) => !p.isPlugin)
           .map(view)
           .sort((a, b) => a.id.localeCompare(b.id));
-        const data: Record<string, unknown> = { session, panes };
+        const data: Record<string, unknown> = {
+          session,
+          source: bus ? "plugin" : "zellij",
+          panes,
+        };
         if (verbose && client.selfPaneId) data.self = client.selfPaneId;
         return { ok: true, data };
       }
@@ -212,8 +224,32 @@ export async function dispatchZswarm(
         const target = await resolveTarget(client, args);
         return await waitForPane(client, target, args, clock);
       }
-      case "status":
-        return await peerStatus(client, args, clock);
+      case "status": {
+        const { session } = await client.resolveSession(
+          typeof args.session === "string" ? args.session : undefined,
+        );
+        const bus = await busSnapshot(client, state(), session, clock, deps.env);
+        let supplied = bus
+          ? {
+              session,
+              panes: busToPanes(bus.snapshot),
+              source: "plugin" as const,
+            }
+          : null;
+        const only = typeof args.to === "string" ? args.to.trim() : "";
+        if (supplied && only) {
+          try {
+            client.resolvePane(supplied.panes, only);
+          } catch {
+            // The manifest has no commands, so a command-shaped `to` only
+            // resolves against the polled list.
+            supplied = null;
+          }
+        }
+        return await peerStatus(client, args, clock, supplied);
+      }
+      case "bus":
+        return await busOp(client, state(), args, clock, deps.env, policy);
       case "signal":
         return postSignal(state(), args, clock);
       case "signals":

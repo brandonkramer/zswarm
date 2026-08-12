@@ -31,6 +31,7 @@ export const OP_NAMES = [
   "stack",
   "diff",
   "checkpoint",
+  "bus",
 ] as const;
 
 export type OpName = (typeof OP_NAMES)[number];
@@ -110,7 +111,15 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "clear",
     type: "boolean",
     flags: ["--clear"],
-    description: "signal: reset the channel (all channels when none is given)",
+    description:
+      "signal: reset the channel (all channels when none is given); bus: forget the installed plugin",
+  },
+  {
+    name: "install",
+    type: "boolean",
+    flags: ["--install"],
+    description:
+      "bus: load the event-bus plugin in a pane so its permission prompt can be answered, then remember it",
   },
   {
     name: "reset",
@@ -122,7 +131,8 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "sampleMs",
     type: "number",
     flags: ["--sample-ms"],
-    description: "status: gap between the two screen samples (default 400)",
+    description:
+      "status: gap between the two screen samples (default 400); 0 skips sampling and reports running/exited only",
   },
   {
     name: "limit",
@@ -397,7 +407,7 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "boolean",
     flags: ["--force"],
     description:
-      "send/keys: write to a pane whose command has exited; unworktree: remove a busy or dirty worktree",
+      "send/keys: write to a pane whose command has exited; unworktree: remove a busy or dirty worktree; bus: reinstall under a fresh key",
   },
   {
     name: "verbose",
@@ -465,7 +475,8 @@ export function cliUsage(): string {
   lines.push(
     "",
     "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force).",
-    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZELLIJ_SESSION_NAME",
+    "Bus: `zswarm bus --install` once, then list/status read pane state from the plugin instead of polling.",
+    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN",
     "",
   );
   return lines.join("\n");

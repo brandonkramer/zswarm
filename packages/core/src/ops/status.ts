@@ -3,7 +3,15 @@ import type { ZellijPane } from "../zellij/panes.js";
 import type { Clock, OpsResult } from "./types.js";
 import { isTrue, normalizeScreen, numberArg, optionalString } from "./util.js";
 
-export type PeerState = "busy" | "waiting" | "idle" | "exited";
+/** `running` only appears when sampling is off — busy and idle are indistinguishable then. */
+export type PeerState = "busy" | "waiting" | "idle" | "exited" | "running";
+
+/** Pane list already in hand, so status does not re-fetch what the caller has. */
+export type StatusSource = {
+  session: string;
+  panes: ZellijPane[];
+  source: "plugin" | "zellij";
+};
 
 /** Lines that mean the pane wants an answer rather than more time. */
 const QUESTION =
@@ -32,17 +40,40 @@ export async function peerStatus(
   client: ZellijClient,
   args: Record<string, unknown>,
   clock: Clock,
+  supplied?: StatusSource | null,
 ): Promise<OpsResult> {
-  const { session } = await client.resolveSession(
-    typeof args.session === "string" ? args.session : undefined,
-  );
-  const panes = await client.listPanes(session);
+  const session =
+    supplied?.session ??
+    (
+      await client.resolveSession(
+        typeof args.session === "string" ? args.session : undefined,
+      )
+    ).session;
+  const panes = supplied?.panes ?? (await client.listPanes(session));
+  const source = supplied?.source ?? "zellij";
   const only = optionalString(args.to);
   const targets: ZellijPane[] = only
     ? [client.resolvePane(panes, only)]
     : panes.filter((p) => !p.isPlugin);
 
-  const sampleMs = numberArg(args, "sampleMs", 400, { min: 50, max: 10_000 });
+  // sampleMs=0 asks for the cheap answer: who is alive, from state the plugin
+  // already holds. Below that, two samples too close together read as idle.
+  const requested = numberArg(args, "sampleMs", 400, { min: 0, max: 10_000 });
+  if (requested === 0) {
+    const peers = targets
+      .map((pane) => ({
+        id: pane.id,
+        title: pane.title,
+        state: pane.exited ? ("exited" as const) : ("running" as const),
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    // No `free`: without sampling there is no way to tell busy from idle.
+    return {
+      ok: true,
+      data: { session, source, sampled: false, sampleMs: 0, peers },
+    };
+  }
+  const sampleMs = Math.max(50, requested);
   const before = new Map<string, string>();
   for (const pane of targets) {
     if (pane.exited) continue;
@@ -76,5 +107,8 @@ export async function peerStatus(
 
   peers.sort((a, b) => String(a.id).localeCompare(String(b.id)));
   const free = peers.filter((p) => p.state === "idle").map((p) => p.id);
-  return { ok: true, data: { session, sampleMs, peers, free } };
+  return {
+    ok: true,
+    data: { session, source, sampled: true, sampleMs, peers, free },
+  };
 }

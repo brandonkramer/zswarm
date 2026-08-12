@@ -1,0 +1,14 @@
+[package]
+name = "zswarm-events"
+version = "0.1.0"
+edition = "2021"
+description = "zSwarm event-bus spike: pane state pushed by Zellij instead of polled"
+license = "MIT"
+
+
+[dependencies]
+zellij-tile = "0.44"
+
+[profile.release]
+opt-level = "z"
+# No `strip`/`lto`: they drop the exported functions Zellij looks for.
