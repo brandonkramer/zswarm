@@ -9,7 +9,10 @@
     "test": "pnpm --dir packages/core test",
     "cli": "pnpm --dir packages/cli exec node dist/cli.js",
     "mcp": "pnpm --dir packages/mcp exec node dist/mcp-server.js",
-    "prepublishOnly": "node scripts/check-publish.mjs"
+    "prepublishOnly": "node scripts/check-publish.mjs",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm -r build && changeset publish"
   },
   "engines": {
     "node": ">=20"
@@ -36,5 +39,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^3.0.0"
   }
 }
