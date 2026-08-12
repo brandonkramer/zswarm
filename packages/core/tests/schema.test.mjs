@@ -89,3 +89,20 @@ test("cliUsage lists every flagged param", () => {
   }
   for (const op of OP_NAMES) assert.ok(usage.includes(op));
 });
+
+test("parseCliArgv finds the op when flags come first", () => {
+  // `zswarm --session crew list` used to report `--session` as an unknown op.
+  assert.deepEqual(parseCliArgv(["--session", "crew", "list"]), {
+    op: "list",
+    session: "crew",
+  });
+  // An op in first position still wins, so a positional body that happens to
+  // be an op name is not stolen.
+  assert.deepEqual(parseCliArgv(["send", "reviewer", "list"]), {
+    op: "send",
+    to: "reviewer",
+    body: "list",
+  });
+  // Nothing op-shaped anywhere still fails, and names the offending token.
+  assert.throws(() => parseCliArgv(["--session", "crew"]), /usage|unexpected/i);
+});

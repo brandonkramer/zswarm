@@ -498,8 +498,27 @@ export function cliUsage(): string {
 }
 
 /** Turn argv (without the op) into dispatch args, driven by PARAMS. */
+/**
+ * Pull the op out of argv, tolerating flags before it.
+ *
+ * The op normally comes first. When it does not — `zswarm --session crew list`
+ * — the first token is a flag, and taking argv[0] blindly reported the flag as
+ * an unknown op. Only positions that already errored are affected: if argv[0]
+ * is a real op it wins, so `send reviewer list` still sends the word "list".
+ */
+function extractOp(argv: string[]): { op: string; rest: string[] } {
+  const first = argv[0];
+  if (first && !first.startsWith("-")) {
+    return { op: first, rest: argv.slice(1) };
+  }
+  const names = OP_NAMES as readonly string[];
+  const at = argv.findIndex((token) => names.includes(token));
+  if (at === -1) return { op: first ?? "", rest: argv.slice(1) };
+  return { op: argv[at]!, rest: [...argv.slice(0, at), ...argv.slice(at + 1)] };
+}
+
 export function parseCliArgv(argv: string[]): Record<string, unknown> {
-  const [op, ...rest] = argv;
+  const { op, rest } = extractOp(argv);
   if (!op) throw new ZellijError("usage", "no op given");
   const out: Record<string, unknown> = { op };
   const repeated = new Map<string, string[]>();
