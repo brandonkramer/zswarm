@@ -5,6 +5,11 @@ export type HarnessProfile = {
   name: string;
   /** What `send` should do when the caller did not pass submit= explicitly. */
   submit: SubmitStrategy;
+  /**
+   * Approval-prompt UI this harness pins on screen. `status` matches these
+   * against the trailing lines; a hit means the pane wants input, not time.
+   */
+  waiting: readonly RegExp[];
 };
 
 type HarnessName = Exclude<HarnessProfile["name"], "unknown">;
@@ -35,7 +40,41 @@ const SUBMIT: Record<HarnessName, SubmitStrategy> = {
   pi: "auto",
 };
 
-const UNKNOWN: HarnessProfile = { name: "unknown", submit: "auto" };
+/**
+ * Prompt shapes any CLI can show, so every profile carries these as a base.
+ * They are named UI, never guesses: nothing here matches on a bare "?", the
+ * word "confirm", or a lone "y".
+ */
+const GENERIC_WAITING: readonly RegExp[] = [
+  /\(y\/n\)/i,
+  /\[y\/n\]/i,
+  /press enter to continue/i,
+];
+
+/**
+ * Per-harness approval UI observed in this live session. Only gemini and
+ * opencode showed full-screen prompts worth naming; codex, cursor, and pi
+ * show only the generic shapes so far, and unknown panes get the generic set
+ * and nothing else. Mislabelling a working pane as waiting makes a dispatcher
+ * type into it, so unobserved prompts stay undetected.
+ */
+const WAITING: Record<HarnessName, readonly RegExp[]> = {
+  codex: GENERIC_WAITING,
+  cursor: GENERIC_WAITING,
+  opencode: [...GENERIC_WAITING, /Permission required/i, /Allow once/i],
+  gemini: [
+    ...GENERIC_WAITING,
+    /Do you want to proceed\?/i,
+    /Accept this file edit\?/i,
+  ],
+  pi: GENERIC_WAITING,
+};
+
+const UNKNOWN: HarnessProfile = {
+  name: "unknown",
+  submit: "auto",
+  waiting: GENERIC_WAITING,
+};
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -82,5 +121,5 @@ export function resolveHarness(pane: {
 }): HarnessProfile {
   const name = matchCommand(pane.command) ?? matchTitle(pane.title) ?? "unknown";
   if (name === "unknown") return UNKNOWN;
-  return { name, submit: SUBMIT[name] };
+  return { name, submit: SUBMIT[name], waiting: WAITING[name] };
 }

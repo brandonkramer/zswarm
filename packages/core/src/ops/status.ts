@@ -1,3 +1,4 @@
+import { resolveHarness, type HarnessProfile } from "../harness.js";
 import type { ZellijClient } from "../zellij/client.js";
 import type { ZellijPane } from "../zellij/panes.js";
 import type { Clock, OpsResult } from "./types.js";
@@ -22,23 +23,67 @@ export type StatusSource = {
   ) => Promise<Map<string, { changed: boolean; first: boolean; screen: string }> | null>;
 };
 
-/** Lines that mean the pane wants an answer rather than more time. */
+/**
+ * Legacy last-line prompt shapes for callers without a profile. A term counts
+ * only when it is a question, not chrome: a y/n form, a trailing `?`, or the
+ * canonical "press enter to continue" pause. A bare "confirm" or "continue"
+ * sits in status bars ("select  enter confirm") and must not qualify.
+ */
 const QUESTION =
-  /(\(y\/n\)|\[y\/n\]|\(yes\/no\)|press\s+enter|continue\?|proceed\?|overwrite\?|\bcontinue\b\s*\(|password:|passphrase:|\[y\/n\/a\]|confirm)/i;
+  /(\(y\/n\)|\[y\/n\]|\(yes\/no\)|\[y\/n\/a\]|password:|passphrase:|(?:continue|proceed|overwrite|confirm)\?|press\s+enter\s+to\s+continue)/i;
+
+/**
+ * How many trailing non-empty lines `status` inspects for a prompt. A
+ * full-screen TUI hides its prompt under chrome, so the last line alone is
+ * the wrong place to look — measured live, gemini's question sat 4 lines
+ * above "esc to cancel".
+ */
+const PROMPT_WINDOW = 10;
 
 export function lastLine(screen: string): string {
   const lines = screen.split("\n").filter((l) => l.trim());
   return lines.length > 0 ? lines[lines.length - 1]!.trim() : "";
 }
 
+function trailingLines(screen: string, n: number): string[] {
+  return screen
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(-n);
+}
+
+/**
+ * True when the trailing window holds a named approval prompt. The profile's
+ * waiting patterns run across the window; the legacy last-line QUESTION check
+ * stays as the conservative fallback for callers without a profile. Bias is
+ * toward false negatives: a hit must be prompt UI we can name, never a bare
+ * question mark or "confirm".
+ */
+function promptHolds(screen: string, profile?: HarnessProfile | null): boolean {
+  const lines = trailingLines(screen, PROMPT_WINDOW);
+  const patterns = profile?.waiting;
+  if (patterns && patterns.length > 0) {
+    for (const line of lines) {
+      for (const re of patterns) {
+        if (re.test(line)) return true;
+      }
+    }
+  }
+  return QUESTION.test(lines[lines.length - 1] ?? "");
+}
+
 export function classify(input: {
   exited: boolean;
   before: string;
   after: string;
+  /** The pane's harness; its waiting patterns name the prompts worth blocking on. */
+  profile?: HarnessProfile | null;
 }): PeerState {
   if (input.exited) return "exited";
   if (input.before !== input.after) return "busy";
-  return QUESTION.test(lastLine(input.after)) ? "waiting" : "idle";
+  return promptHolds(input.after, input.profile) ? "waiting" : "idle";
 }
 
 /**
@@ -106,7 +151,7 @@ export async function peerStatus(
             ? "exited"
             : row?.changed
               ? "busy"
-              : QUESTION.test(lastLine(row?.screen ?? ""))
+              : promptHolds(row?.screen ?? "", resolveHarness(pane))
                 ? "waiting"
                 : "idle";
           const entry: Record<string, unknown> = {
@@ -164,7 +209,12 @@ export async function peerStatus(
   for (const pane of targets) {
     const first = before.get(pane.id) ?? "";
     const after = pane.exited ? first : (afterScreens.get(pane.id) ?? "");
-    const state = classify({ exited: pane.exited, before: first, after });
+    const state = classify({
+      exited: pane.exited,
+      before: first,
+      after,
+      profile: resolveHarness(pane),
+    });
     const entry: Record<string, unknown> = {
       id: pane.id,
       title: pane.title,
