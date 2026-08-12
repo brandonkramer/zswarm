@@ -33,11 +33,11 @@ CLI backup: `zswarm list|send|dump|tail|wait|status|keys|interrupt|spawn|close|b
 | op | Purpose |
 |----|---------|
 | `list` | Terminal panes (id, title, command, tab); `verbose` adds cwd/flags |
-| `send` | Paste body + Enter into pane (`to` = id / title / command); ack is lean unless `verbose`. Delivery check: `submit` (`auto` default / `double-enter` / `none`); result `submitted: true\|false\|"unverified"` |
+| `send` | Paste body + Enter into pane (`to` = id / title / command); ack is lean unless `verbose`. Delivery check: `submit` (`auto` default / `double-enter` / `none`); result `submitted: true\|false\|"unverified"`. `expect: "<text>"` refuses unless the screen already shows it |
 | `dump` | Full-screen read; capped at 8000 chars (tail) — expensive vs `tail` |
 | `tail` | Cheap incremental read since last cursor; `reset: true` returns whole screen |
-| `wait` | Block until the pane is quiet or prints `match`; returns `reason` + a 2000-char tail |
-| `status` | Classify panes busy / waiting / idle / exited; `free[]` = idle ids. `sampleMs: 0` skips sampling — live panes report `running`, no `free[]`, and the event bus answers it |
+| `wait` | Block until the pane is quiet or prints `match`; returns `reason` + a 2000-char tail. With the bus one held pipe covers the whole wait and notices in ~50ms instead of up to 600ms |
+| `status` | Classify panes busy / waiting / idle / exited; `free[]` = idle ids. `sampleMs: 0` skips sampling — live panes report `running`, no `free[]`. `sinceLast: true` drops the 400ms gap (0.30s vs 0.84s) by asking what moved since your last call |
 | `keys` | Key specs (`keys: ["Ctrl c"]`) or literal `chars` (+ `enter`) |
 | `interrupt` | `Esc`; `hard: true` sends `Ctrl c` |
 | `spawn` | New pane (`newTab: true` for a fresh tab) with `command`, `cwd`, `name`, `direction`, `floating`; `tab` = tab name to open in; `worktree` isolates on a branch |
@@ -74,9 +74,21 @@ over one pipe instead of polling, and every reply says `source: "plugin"` or
 `source: "zellij"`. It is off until installed, and any failure falls back
 silently — so treat it as speed, never as a dependency.
 
-The manifest Zellij pushes has no pane command, cwd, or output text. A
-bus-served `list` therefore omits `command`; `list` with `verbose`,
-`status --to <command>`, and all of `dump` / `tail` / `wait` keep polling.
+The manifest Zellij pushes has no pane command or cwd, so a bus-served `list`
+omits `command`, and `list` with `verbose` / `status --to <command>` keep
+polling. Screen text the plugin reads on demand instead: `status` sampling
+batches it, `wait` gets a pipe held open until the condition resolves, and
+`dump` / `tail` stay on the CLI because one pane is cheaper as a process.
+
+`send`'s `expect` guard exists because a pane that dropped back to a shell will
+**run** your message as a command. Nothing reliably tells an agent from a
+prompt, so name something the screen must already show:
+
+```text
+zswarm({ op: "send", to: "reviewer", body: "…", expect: "Add a follow-up" })
+```
+
+Failure is `expect_missing` and nothing is written.
 
 ## Crew coordination
 

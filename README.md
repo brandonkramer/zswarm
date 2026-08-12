@@ -251,8 +251,28 @@ the server so N panes cost one process instead of N. Measured here:
   → a loss for one pane, a win from two upward
 ```
 
-So `status` sampling batches through the plugin, while `dump`, `tail`, and
-`wait` keep polling: they read one pane, where polling is faster.
+So `status` sampling batches through the plugin, while `dump` and `tail` keep
+polling: they read one pane, where polling is faster.
+
+`wait` works a third way. The plugin **holds the pipe open** and answers only
+once the condition is met, so one process covers the whole wait and it polls far
+tighter than spawning a process allows:
+
+```
+                 detection   processes
+  polling          3782ms        6       600ms poll interval
+  held pipe        3348ms        1        50ms poll interval
+```
+
+measured against the same event. Over a 60s wait that is ~100 processes against
+one. A `regex` needle the plugin declines — it has no engine — and the caller
+falls back to its own loop automatically.
+
+`status --since-last` drops the sample gap entirely by asking the plugin what
+moved since the previous call: **0.30s against 0.84s**. It answers a different
+question, though — "moved since you last asked" rather than "moved in the last
+400ms" — so two calls in quick succession read everything as idle. Right for a
+polling loop, wrong for a one-shot check, which is why it is opt-in.
 
 Because the manifest carries no command, a bus-served `list` omits `command`
 rather than reporting it as null, and `status --to <command>` falls back to

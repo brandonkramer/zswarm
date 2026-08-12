@@ -43,9 +43,19 @@ else stays a bare word, so the original pipes keep working.
 | `status` | pane + tab snapshot, from pushed state |
 | `events` | push counters only |
 | `{"op":"scrollback","panes":["terminal_4"],"full":false}` | pane screens, read on demand |
+| `{"op":"changed","panes":["terminal_4"]}` | screens plus "moved since you last asked" |
+| `{"op":"wait","pane":"terminal_4","for":"match","match":"DONE"}` | held open, answers when it resolves |
 
 `scrollback` reports unresolvable ids in `missing` instead of failing the batch —
 a pane closing between the ask and the read is normal.
+
+`wait` is the only op that does not answer immediately. It calls
+`block_cli_pipe_input`, records the request, and polls from `Event::Timer` until
+the condition is met, the pane goes idle, or the timeout expires — so one
+`zellij pipe` process covers a wait of any length. `regex` is refused outright:
+there is no regex engine in the wasm, and a wrong answer is worse than a
+fallback. `changed` is the only op that mutates plugin state, remembering the
+screen it handed out so the next call can answer without a sample gap.
 
 ## Findings
 
