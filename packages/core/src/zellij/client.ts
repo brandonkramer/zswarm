@@ -2,21 +2,31 @@ import { ZellijError } from "../errors.js";
 import {
   buildClosePaneArgs,
   buildDumpArgs,
+  buildDumpLayoutArgs,
+  buildFocusPaneArgs,
   buildListPanesArgs,
+  buildListTabsArgs,
   buildNewPaneArgs,
   buildNewTabArgs,
   buildPasteArgs,
+  buildRenamePaneArgs,
+  buildRenameTabArgs,
   buildSendEnterArgs,
   buildSendKeysArgs,
+  buildStackPanesArgs,
   buildWriteCharsArgs,
   type NewPaneInput,
   type NewTabInput,
 } from "./args.js";
+import { parseTabList, resolveTab, type ZellijTab } from "./tabs.js";
+import { createSshExec } from "../exec.js";
 import {
   DEFAULT_TIMEOUT_MS,
   NOT_FOUND_EXIT,
   defaultExec,
+  resolveSshTarget,
   resolveZellijBinary,
+  sanitizeZellijEnv,
   type ZellijExecFn,
 } from "./binary.js";
 import {
@@ -43,8 +53,16 @@ export type ZellijClientOptions = {
 /** Thin, stateless wrapper over the `zellij` binary. */
 export function createZellijClient(options: ZellijClientOptions = {}) {
   const env = options.env ?? process.env;
-  const zellijPath = options.zellijPath ?? resolveZellijBinary(env);
-  const exec = options.exec ?? defaultExec(zellijPath, env);
+  // A remote crew never resolves a local binary.
+  const ssh = options.exec ? null : resolveSshTarget(env);
+  const zellijPath =
+    options.zellijPath ??
+    (ssh ? `ssh://${ssh.host}/${ssh.remoteBin}` : resolveZellijBinary(env));
+  const exec =
+    options.exec ??
+    (ssh
+      ? createSshExec(ssh, sanitizeZellijEnv(env))
+      : defaultExec(zellijPath, env));
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const selfPaneId = resolveSelfPaneId(env);
 
@@ -152,6 +170,82 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     return { paneId, session: input.session };
   }
 
+  async function renamePane(input: {
+    session: string;
+    paneId: string;
+    name: string;
+  }): Promise<{ paneId: string; session: string; name: string }> {
+    const paneId = normalizePaneId(input.paneId);
+    if (!input.name.trim()) {
+      throw new ZellijError("missing_name", "name required");
+    }
+    await run(
+      buildRenamePaneArgs(input.session, paneId, input.name),
+      "zellij action rename-pane",
+    );
+    return { paneId, session: input.session, name: input.name };
+  }
+
+  async function renameTab(input: {
+    session: string;
+    tabId: number;
+    name: string;
+  }): Promise<{ tabId: number; session: string; name: string }> {
+    if (!input.name.trim()) {
+      throw new ZellijError("missing_name", "name required");
+    }
+    await run(
+      buildRenameTabArgs(input.session, input.tabId, input.name),
+      "zellij action rename-tab-by-id",
+    );
+    return { tabId: input.tabId, session: input.session, name: input.name };
+  }
+
+  async function focusPane(input: {
+    session: string;
+    paneId: string;
+  }): Promise<{ paneId: string; session: string }> {
+    const paneId = normalizePaneId(input.paneId);
+    await run(
+      buildFocusPaneArgs(input.session, paneId),
+      "zellij action focus-pane-id",
+    );
+    return { paneId, session: input.session };
+  }
+
+  async function listTabs(session: string): Promise<ZellijTab[]> {
+    const result = await run(
+      buildListTabsArgs(session),
+      "zellij action list-tabs",
+    );
+    return parseTabList(result.stdout);
+  }
+
+  async function dumpLayout(session: string): Promise<string> {
+    const result = await run(
+      buildDumpLayoutArgs(session),
+      "zellij action dump-layout",
+    );
+    return result.stdout;
+  }
+
+  async function stackPanes(input: {
+    session: string;
+    paneIds: string[];
+  }): Promise<{ session: string; paneIds: string[] }> {
+    if (input.paneIds.length < 2) {
+      throw new ZellijError("bad_arg", "stack needs at least two panes");
+    }
+    await run(
+      buildStackPanesArgs(input.session, input.paneIds),
+      "zellij action stack-panes",
+    );
+    return {
+      session: input.session,
+      paneIds: input.paneIds.map((id) => normalizePaneId(id)),
+    };
+  }
+
   async function closePane(input: {
     session: string;
     paneId: string;
@@ -213,6 +307,13 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     closePane,
     newPane,
     newTab,
+    renamePane,
+    renameTab,
+    focusPane,
+    listTabs,
+    dumpLayout,
+    stackPanes,
+    resolveTab,
     normalizePaneId,
     formatPeerMessage,
     buildListPanesArgs,

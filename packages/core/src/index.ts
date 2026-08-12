@@ -62,6 +62,16 @@ export {
   type StateStoreOptions,
 } from "./state.js";
 export { dispatchZswarm } from "./ops/dispatch.js";
+export {
+  assertOpAllowed,
+  assertPaneAllowed,
+  isWriteOp,
+  loadPolicy,
+  type Policy,
+} from "./policy.js";
+export { createSshExec, shellQuote, type SshTarget } from "./exec.js";
+export { resolveSshTarget } from "./zellij/binary.js";
+export { parseTabList, resolveTab, type ZellijTab } from "./zellij/tabs.js";
 export { selectTargets } from "./ops/broadcast.js";
 export { diffScreens, cursorKey } from "./ops/tail.js";
 export { classify, lastLine, type PeerState } from "./ops/status.js";

@@ -24,6 +24,13 @@ export const OP_NAMES = [
   "signals",
   "await",
   "log",
+  "rename",
+  "focus",
+  "tabs",
+  "layout",
+  "stack",
+  "diff",
+  "checkpoint",
 ] as const;
 
 export type OpName = (typeof OP_NAMES)[number];
@@ -300,7 +307,33 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "name",
     type: "string",
     flags: ["--name", "-n"],
-    description: "spawn: pane (or tab) name",
+    description: "spawn: pane (or tab) name; rename: the new name",
+  },
+  {
+    name: "submit",
+    type: "string",
+    flags: ["--submit"],
+    values: ["auto", "double-enter", "none"],
+    description:
+      "send/broadcast: auto verifies the paste actually submitted and presses Enter again if not (default)",
+  },
+  {
+    name: "settleMs",
+    type: "number",
+    flags: ["--settle-ms"],
+    description: "send/broadcast: pause before checking the paste landed (default 300)",
+  },
+  {
+    name: "message",
+    type: "string",
+    flags: ["--message"],
+    description: "checkpoint: commit message",
+  },
+  {
+    name: "stat",
+    type: "boolean",
+    flags: ["--stat"],
+    description: "diff: stat only, no patch body",
   },
   {
     name: "direction",
@@ -329,15 +362,22 @@ export const PARAMS: readonly ParamSpec[] = [
   },
   {
     name: "tab",
-    type: "boolean",
+    type: "string",
     flags: ["--tab"],
+    description:
+      "tab name: broadcast targets it, rename retitles it, spawn opens the new pane's tab by it",
+  },
+  {
+    name: "newTab",
+    type: "boolean",
+    flags: ["--new-tab"],
     description: "spawn: open a new tab instead of splitting",
   },
   {
     name: "layout",
     type: "string",
     flags: ["--layout", "-l"],
-    description: "spawn: layout name for the new tab (tab=true)",
+    description: "spawn: layout name for the new tab (newTab=true)",
   },
   {
     name: "closeOnExit",

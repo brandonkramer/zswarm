@@ -18,6 +18,35 @@ export type ExecFn = (
 
 export const NOT_FOUND_EXIT = 127;
 
+/** POSIX single-quoting, for building a command line the remote shell parses. */
+export function shellQuote(arg: string): string {
+  if (arg === "") return "''";
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(arg)) return arg;
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+export type SshTarget = {
+  ssh: string;
+  host: string;
+  remoteBin: string;
+  options: string[];
+};
+
+/**
+ * Run the remote zellij over ssh. The whole invocation is quoted into a single
+ * command string, because the remote login shell re-parses it.
+ */
+export function createSshExec(
+  target: SshTarget,
+  env: NodeJS.ProcessEnv,
+): ExecFn {
+  const runner = createExec(target.ssh, env);
+  return (args, options) => {
+    const remote = [target.remoteBin, ...args].map(shellQuote).join(" ");
+    return runner([...target.options, target.host, remote], options);
+  };
+}
+
 /**
  * execFile-backed runner for a fixed binary. Never rejects — callers branch on
  * `code`, and a missing binary surfaces as NOT_FOUND_EXIT.

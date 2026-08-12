@@ -3,10 +3,14 @@ import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
   createExec,
+  createSshExec,
   NOT_FOUND_EXIT,
   type ExecFn,
   type ExecResult,
+  type SshTarget,
 } from "../exec.js";
+
+export { createSshExec, type SshTarget };
 
 export type ZellijExecResult = ExecResult;
 export type ZellijExecFn = ExecFn;
@@ -90,6 +94,27 @@ export function sanitizeZellijEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     if (out.Path && !out.PATH) out.PATH = out.Path;
   }
   return out;
+}
+
+/**
+ * Remote crew: `ZSWARM_SSH=user@host` routes every zellij call over ssh.
+ * `ZSWARM_SSH_OPTS` is split on whitespace; `BatchMode` keeps it non-interactive.
+ */
+export function resolveSshTarget(
+  env: NodeJS.ProcessEnv = process.env,
+): SshTarget | null {
+  const host = env.ZSWARM_SSH?.trim();
+  if (!host) return null;
+  const options = (env.ZSWARM_SSH_OPTS ?? "").trim().split(/\s+/).filter(Boolean);
+  if (!options.some((o) => o.startsWith("BatchMode"))) {
+    options.unshift("-o", "BatchMode=yes");
+  }
+  return {
+    ssh: env.ZSWARM_SSH_BIN?.trim() || "ssh",
+    host,
+    remoteBin: env.ZSWARM_REMOTE_BIN?.trim() || "zellij",
+    options,
+  };
 }
 
 /** Runner bound to the resolved zellij binary and a cleaned environment. */

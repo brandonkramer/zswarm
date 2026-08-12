@@ -1,3 +1,6 @@
+// This file dispatches real send ops; keep them out of the delivery log.
+process.env.ZSWARM_LOG = "0";
+
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, unlinkSync, existsSync, mkdirSync } from "node:fs";

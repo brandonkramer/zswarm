@@ -122,6 +122,75 @@ export function buildWriteCharsArgs(
   ];
 }
 
+export function buildRenamePaneArgs(
+  session: string,
+  paneId: string,
+  name: string,
+): string[] {
+  return [
+    ...sessionPrefix(session),
+    "action",
+    "rename-pane",
+    "--pane-id",
+    normalizePaneId(paneId),
+    "--",
+    name,
+  ];
+}
+
+export function buildRenameTabArgs(
+  session: string,
+  tabId: number,
+  name: string,
+): string[] {
+  return [
+    ...sessionPrefix(session),
+    "action",
+    "rename-tab-by-id",
+    String(tabId),
+    "--",
+    name,
+  ];
+}
+
+export function buildFocusPaneArgs(session: string, paneId: string): string[] {
+  return [
+    ...sessionPrefix(session),
+    "action",
+    "focus-pane-id",
+    normalizePaneId(paneId),
+  ];
+}
+
+export function buildListTabsArgs(session: string): string[] {
+  return [
+    ...sessionPrefix(session),
+    "action",
+    "list-tabs",
+    "--json",
+    "--panes",
+    "--state",
+    "--layout",
+  ];
+}
+
+export function buildDumpLayoutArgs(session: string): string[] {
+  return [...sessionPrefix(session), "action", "dump-layout"];
+}
+
+export function buildStackPanesArgs(
+  session: string,
+  paneIds: string[],
+): string[] {
+  return [
+    ...sessionPrefix(session),
+    "action",
+    "stack-panes",
+    "--",
+    ...paneIds.map((id) => normalizePaneId(id)),
+  ];
+}
+
 export function buildClosePaneArgs(session: string, paneId: string): string[] {
   return [
     ...sessionPrefix(session),

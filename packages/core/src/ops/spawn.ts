@@ -38,7 +38,7 @@ export async function spawnPane(
 
   let paneId: string | null = null;
   let tabId: number | null = null;
-  if (isTrue(args.tab)) {
+  if (isTrue(args.newTab) || args.tab === true) {
     const created = await client.newTab({
       session,
       command,
@@ -61,6 +61,11 @@ export async function spawnPane(
       height: optionalString(args.height),
     };
     if (typeof args.tabId === "number") input.tabId = args.tabId;
+    // `tab` as a name places the pane in that tab; ids come via tabId.
+    const tabName = optionalString(args.tab);
+    if (input.tabId === undefined && tabName) {
+      input.tabId = client.resolveTab(await client.listTabs(session), tabName).id;
+    }
     paneId = (await client.newPane(input)).paneId;
   }
 

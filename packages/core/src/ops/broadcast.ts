@@ -1,4 +1,6 @@
 import { ZellijError } from "../errors.js";
+import type { Policy } from "../policy.js";
+import { assertPaneAllowed } from "../policy.js";
 import type { StateStore } from "../state.js";
 import type { ZellijClient } from "../zellij/client.js";
 import type { ZellijPane } from "../zellij/panes.js";
@@ -82,6 +84,7 @@ export async function broadcast(
   state: StateStore,
   args: Record<string, unknown>,
   clock: Clock,
+  policy?: Policy,
 ): Promise<OpsResult> {
   const body = String(args.body ?? args.text ?? "");
   if (!body.trim()) throw new ZellijError("missing_body", "body required");
@@ -90,7 +93,18 @@ export async function broadcast(
     typeof args.session === "string" ? args.session : undefined,
   );
   const panes = await client.listPanes(session);
-  const { targets, skipped } = selectTargets(client, panes, args);
+  const { targets: selected, skipped } = selectTargets(client, panes, args);
+  // Policy narrows the selection rather than failing the whole broadcast.
+  const targets = selected.filter((pane) => {
+    if (!policy) return true;
+    try {
+      assertPaneAllowed(policy, pane, "broadcast");
+      return true;
+    } catch {
+      skipped.push({ id: pane.id, reason: "policy_denied" });
+      return false;
+    }
+  });
   if (targets.length === 0) {
     throw new ZellijError(
       "no_targets",
@@ -107,6 +121,7 @@ export async function broadcast(
         body,
         op: "broadcast",
         at: clock.now(),
+        clock,
       }),
     );
   }

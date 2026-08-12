@@ -188,6 +188,65 @@ export function createGitClient(options: GitClientOptions = {}) {
     return result.stdout.trim().length > 0;
   }
 
+  /**
+   * Stage untracked paths as intent-to-add so they appear in `git diff`
+   * (without copying blob contents into the object database).
+   */
+  async function intentAddUntracked(path: string): Promise<void> {
+    await run(
+      ["add", "-A", "--intent-to-add"],
+      path,
+      "git add --intent-to-add",
+    );
+  }
+
+  /** `git diff --stat HEAD`, including untracked via `--intent-to-add`. */
+  async function diffStat(path: string): Promise<string> {
+    await intentAddUntracked(path);
+    const result = await run(
+      ["diff", "--stat", "HEAD"],
+      path,
+      "git diff --stat",
+    );
+    return result.stdout;
+  }
+
+  /**
+   * `git diff HEAD`, including untracked via `--intent-to-add`.
+   * When `maxChars > 0` and the patch is longer, keep the head and set
+   * `truncated`. `chars` is always the full patch length before truncating.
+   */
+  async function diffPatch(
+    path: string,
+    maxChars: number,
+  ): Promise<{ patch: string; truncated: boolean; chars: number }> {
+    await intentAddUntracked(path);
+    const result = await run(["diff", "HEAD"], path, "git diff");
+    const full = result.stdout;
+    const chars = full.length;
+    if (maxChars <= 0 || chars <= maxChars) {
+      return { patch: full, truncated: false, chars };
+    }
+    return { patch: full.slice(0, maxChars), truncated: true, chars };
+  }
+
+  /** `git add -A` then `git commit -m`; returns the new short HEAD sha. */
+  async function commitAll(path: string, message: string): Promise<string> {
+    await run(["add", "-A"], path, "git add");
+    await run(["commit", "-m", message], path, "git commit");
+    return headSha(path);
+  }
+
+  /** Short sha of HEAD. */
+  async function headSha(path: string): Promise<string> {
+    const result = await run(
+      ["rev-parse", "--short", "HEAD"],
+      path,
+      "git rev-parse",
+    );
+    return result.stdout.trim();
+  }
+
   return {
     gitPath,
     repoRoot,
@@ -196,6 +255,10 @@ export function createGitClient(options: GitClientOptions = {}) {
     addWorktree,
     removeWorktree,
     isDirty,
+    diffStat,
+    diffPatch,
+    commitAll,
+    headSha,
   };
 }
 

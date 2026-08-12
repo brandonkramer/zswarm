@@ -3,8 +3,22 @@ import { createGitClient, type GitClient } from "../git.js";
 import { normalizeKeys } from "../keys.js";
 import { createZellijClient, type ZellijClient } from "../zellij/client.js";
 import type { ZellijPane } from "../zellij/panes.js";
+import {
+  assertOpAllowed,
+  assertPaneAllowed,
+  loadPolicy,
+  type Policy,
+} from "../policy.js";
 import { createStateStore, type StateStore } from "../state.js";
 import { broadcast } from "./broadcast.js";
+import {
+  dumpLayoutOp,
+  focusTarget,
+  listTabsOp,
+  renameTarget,
+  stackTargets,
+} from "./panes.js";
+import { peerCheckpoint, peerDiff } from "./review.js";
 import { deliverTo } from "./delivery.js";
 import { assertNotPlugin, assertNotSelf, assertWritable } from "./guards.js";
 import { readDeliveryLog } from "./log.js";
@@ -29,6 +43,8 @@ import { listPeerWorktrees, removePeerWorktree } from "./worktree.js";
 async function resolveTarget(
   client: ZellijClient,
   args: Record<string, unknown>,
+  policy?: Policy,
+  op?: string,
 ): Promise<{ session: string; panes: ZellijPane[]; pane: ZellijPane }> {
   const to = String(args.to ?? "").trim();
   if (!to) throw new ZellijError("missing_peer", "to required");
@@ -36,7 +52,9 @@ async function resolveTarget(
     typeof args.session === "string" ? args.session : undefined,
   );
   const panes = await client.listPanes(session);
-  return { session, panes, pane: client.resolvePane(panes, to) };
+  const pane = client.resolvePane(panes, to);
+  if (policy && op) assertPaneAllowed(policy, pane, op);
+  return { session, panes, pane };
 }
 
 /** Shared MCP/CLI dispatch for zswarm ops. */
@@ -58,7 +76,10 @@ export async function dispatchZswarm(
   const git = () => (gitClient ??= createGitClient());
   let stateStore: StateStore | null = deps.state ?? null;
   const state = () => (stateStore ??= createStateStore());
+  const policy = deps.policy ?? loadPolicy(deps.env);
   try {
+    // Policy gates the op before anything touches the session.
+    assertOpAllowed(policy, op);
     switch (op) {
       case "sessions": {
         const sessions = await client.listSessions();
@@ -80,7 +101,7 @@ export async function dispatchZswarm(
       case "send": {
         const body = String(args.body ?? args.text ?? "");
         if (!body.trim()) throw new ZellijError("missing_body", "body required");
-        const { session, pane } = await resolveTarget(client, args);
+        const { session, pane } = await resolveTarget(client, args, policy, op);
         assertWritable(client, pane, args, "send");
         const result = await deliverTo(client, state(), args, {
           session,
@@ -88,6 +109,7 @@ export async function dispatchZswarm(
           body,
           op: "send",
           at: clock.now(),
+          clock,
         });
         if (!result.ok && result.error) {
           throw new ZellijError(result.error.code, result.error.message);
@@ -97,15 +119,16 @@ export async function dispatchZswarm(
           session,
           to: result.to,
           from: (typeof args.from === "string" && args.from.trim()) || "swarm",
+          submitted: result.submitted,
         };
         if (verbose) data.pane = paneViewFull(pane);
         return { ok: true, data };
       }
       case "broadcast":
-        return await broadcast(client, state(), args, clock);
+        return await broadcast(client, state(), args, clock, policy);
       case "keys":
       case "interrupt": {
-        const { session, pane } = await resolveTarget(client, args);
+        const { session, pane } = await resolveTarget(client, args, policy, op);
         assertWritable(client, pane, args, op);
         const chars = typeof args.chars === "string" ? args.chars : "";
         if (op === "keys" && chars) {
@@ -199,6 +222,20 @@ export async function dispatchZswarm(
         return await awaitSignal(state(), args, clock);
       case "log":
         return readDeliveryLog(state(), args);
+      case "rename":
+        return await renameTarget(client, args);
+      case "focus":
+        return await focusTarget(client, args);
+      case "tabs":
+        return await listTabsOp(client, args);
+      case "layout":
+        return await dumpLayoutOp(client, args);
+      case "stack":
+        return await stackTargets(client, args);
+      case "diff":
+        return await peerDiff(git(), args);
+      case "checkpoint":
+        return await peerCheckpoint(git(), args, clock);
       case "spawn":
         return await spawnPane(client, args, deps.git);
       case "worktrees":
@@ -206,7 +243,7 @@ export async function dispatchZswarm(
       case "unworktree":
         return await removePeerWorktree(git(), client, args);
       case "close": {
-        const { session, pane } = await resolveTarget(client, args);
+        const { session, pane } = await resolveTarget(client, args, policy, op);
         // Not assertWritable: closing an exited pane is the point of close.
         assertNotPlugin(pane, "close");
         assertNotSelf(client, pane, args, "close");

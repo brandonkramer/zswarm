@@ -3,11 +3,12 @@ name: zswarm
 description: >-
   Coordinate CLI crews in Zellij panes via zSwarm MCP (list, send, dump, tail,
   wait, status, keys, interrupt, spawn, close, broadcast, signal, signals,
-  await, log, worktrees, unworktree). Use when messaging another
-  Codex/Claude/Cursor CLI in a Zellij pane, waiting for one to finish,
-  broadcasting to a crew, signalling barriers, interrupting, opening a new
-  crew pane, isolating peers in git worktrees, or dumping short scrollback.
-  Local Zellij only — not IDE side-panel chat.
+  await, log, worktrees, unworktree, rename, focus, tabs, layout, stack, diff,
+  checkpoint). Use when messaging another Codex/Claude/Cursor CLI in a Zellij
+  pane, waiting for one to finish, broadcasting to a crew, signalling barriers,
+  interrupting, opening a new crew pane, isolating peers in git worktrees,
+  reviewing peer diffs/checkpoints, renaming/focusing panes, or dumping short
+  scrollback. Local Zellij only — not IDE side-panel chat.
 ---
 
 # zSwarm
@@ -19,12 +20,12 @@ Cursor CLI, shells). Delivery is `zellij action paste` + Enter into that pane.
 
 ```text
 zswarm({ op: "list" })
-zswarm({ op: "send", to: "terminal_2", body: "please review the plan" })
-zswarm({ op: "wait", to: "terminal_2", for: "idle" })
+zswarm({ op: "send", to: "reviewer", body: "please review the plan" })
+zswarm({ op: "wait", to: "reviewer", for: "idle" })
 ```
 
 Optional: `session` when multiple Zellij sessions exist, or set `ZSWARM_SESSION`.
-CLI backup: `zswarm list|send|dump|tail|wait|status|keys|interrupt|spawn|close|broadcast|signal|signals|await|log|worktrees|unworktree|sessions`
+CLI backup: `zswarm list|send|dump|tail|wait|status|keys|interrupt|spawn|close|broadcast|signal|signals|await|log|worktrees|unworktree|rename|focus|tabs|layout|stack|diff|checkpoint|sessions`
 (same ops; package `@zswarm/cli`).
 
 ## Ops
@@ -32,23 +33,37 @@ CLI backup: `zswarm list|send|dump|tail|wait|status|keys|interrupt|spawn|close|b
 | op | Purpose |
 |----|---------|
 | `list` | Terminal panes (id, title, command, tab); `verbose` adds cwd/flags |
-| `send` | Paste body + Enter into pane (`to` = id / title / command); ack is lean unless `verbose` |
+| `send` | Paste body + Enter into pane (`to` = id / title / command); ack is lean unless `verbose`. Delivery check: `submit` (`auto` default / `double-enter` / `none`); result `submitted: true\|false\|"unverified"` |
 | `dump` | Full-screen read; capped at 8000 chars (tail) — expensive vs `tail` |
 | `tail` | Cheap incremental read since last cursor; `reset: true` returns whole screen |
 | `wait` | Block until the pane is quiet or prints `match`; returns `reason` + a 2000-char tail |
 | `status` | Classify panes busy / waiting / idle / exited; `free[]` = idle ids |
 | `keys` | Key specs (`keys: ["Ctrl c"]`) or literal `chars` (+ `enter`) |
 | `interrupt` | `Esc`; `hard: true` sends `Ctrl c` |
-| `spawn` | New pane (or `tab`) with `command`, `cwd`, `name`, `direction`, `floating`; `worktree` isolates on a branch |
+| `spawn` | New pane (`newTab: true` for a fresh tab) with `command`, `cwd`, `name`, `direction`, `floating`; `tab` = tab name to open in; `worktree` isolates on a branch |
 | `close` | Close a pane |
-| `broadcast` | One body to many panes (`to` list, `tab`, or `all`; narrow with `group`) |
+| `rename` | Retitle a pane (`to` + `name`) or a tab (`tab` + `name`) — address peers as `reviewer`, not `terminal_11` |
+| `focus` | Focus a pane; already-focused is a no-op success |
+| `tabs` | List tabs with pane counts |
+| `layout` | Dump the session layout as KDL |
+| `stack` | Stack a comma list of panes (needs 2+) |
+| `broadcast` | One body to many panes (`to` list, `tab`, or `all`; narrow with `group`). Same `submit` / `submitted` as `send` |
 | `signal` | Post to a durable channel (`channel`, optional `payload`); `clear` resets |
 | `signals` | List channels with cumulative counts |
 | `await` | Block until a channel reaches `count` posts (`signalled` \| `timeout`) |
 | `log` | Delivery log for send/broadcast/keys/interrupt/close |
 | `worktrees` | List repo git worktrees, each annotated with panes working in it |
 | `unworktree` | Remove a worktree (`path` or `branch`; `worktree` aliases `branch`) |
+| `diff` | What a peer changed in its worktree (`path` / `branch` / `cwd`; `stat: true`; `max`) |
+| `checkpoint` | Commit a peer worktree so the pane can close and resume (`message`); clean tree is not an error |
 | `sessions` | Live Zellij session names |
+
+`submit=auto` (default) checks the paste actually submitted and presses Enter
+again if the text is still sitting in a TUI composer. `submit=double-enter`
+forces the extra Enter; `submit=none` disables. Multi-line prompts used to stay
+queued in the composer while zswarm reported success — check `submitted`.
+
+**Breaking:** `spawn`'s boolean `tab` is now `newTab`; `tab` is a tab **name**.
 
 ## Crew coordination
 
@@ -84,6 +99,24 @@ zswarm({ op: "unworktree", branch: "review-auth", cwd: "/path/to/repo" })
 used by a pane (`worktree_busy`), or one with uncommitted changes
 (`worktree_dirty`). `force: true` overrides busy/dirty only.
 
+## Review loop
+
+Isolate a peer, name it, task it, save its work, tear down:
+
+```text
+zswarm({ op: "spawn", command: "claude", worktree: "review-auth", name: "reviewer" })
+zswarm({ op: "rename", to: "terminal_11", name: "reviewer" })
+zswarm({ op: "send", to: "reviewer", body: "review the auth changes" })
+zswarm({ op: "wait", to: "reviewer", for: "idle" })
+zswarm({ op: "diff", branch: "review-auth", cwd: "/path/to/repo" })
+zswarm({ op: "checkpoint", branch: "review-auth", cwd: "/path/to/repo", message: "review checkpoint" })
+zswarm({ op: "close", to: "reviewer" })
+zswarm({ op: "unworktree", branch: "review-auth", cwd: "/path/to/repo" })
+```
+
+Prefer `diff` / `checkpoint` over reading the worktree by hand. Clean
+`checkpoint` returns `committed: false`, `nothingToCommit: true` — not an error.
+
 ## Waiting
 
 `wait` polls the pane screen instead of you re-dumping it.
@@ -95,8 +128,8 @@ used by a pane (`worktree_busy`), or one with uncommitted changes
 Send-then-wait is the normal loop:
 
 ```text
-zswarm({ op: "send", to: "terminal_5", body: "run the tests" })
-zswarm({ op: "wait", to: "terminal_5", for: "either", match: "FAIL", idleMs: 4000 })
+zswarm({ op: "send", to: "reviewer", body: "run the tests" })
+zswarm({ op: "wait", to: "reviewer", for: "either", match: "FAIL", idleMs: 4000 })
 ```
 
 Prefer `tail` for cheap incremental polls; reserve `dump` for a one-shot full
@@ -113,13 +146,18 @@ Unless `raw: true`, sends are prefixed:
 
 ## Rules
 
-1. Target **pane ids** from `list` — do not invent transports.
-2. Prefer `send` + `wait` over polling. Prefer `tail` over repeated `dump`.
-3. Not for IDE side-panel chats — only Zellij terminal panes.
-4. Local machine only (same host as Zellij).
-5. Writes refuse zSwarm's own pane (`self_target`) and exited panes (`pane_exited`).
+1. Target **pane ids or names** from `list` — do not invent transports.
+2. Name peers with `rename` right after `spawn`, then target them by name.
+3. Prefer `send` + `wait` over polling. Prefer `tail` over repeated `dump`.
+4. Check `submitted` on `send`; `false` means the peer never got it.
+5. Prefer `diff` / `checkpoint` over reading a worktree by hand.
+6. Not for IDE side-panel chats — only Zellij terminal panes.
+7. Local machine only (same host as Zellij).
+8. Writes refuse zSwarm's own pane (`self_target`) and exited panes (`pane_exited`).
    Override with `allowSelf` / `force` only when you mean it.
-6. `spawn` takes an executable plus argv — no shell, so no pipes or `&&`.
-7. Prefer `worktree` on `spawn` when peers should not share one dirty tree.
-   Tear down with `unworktree` after the pane is closed.
-8. For crew barriers use `broadcast` + `signal` + `await`, not ad-hoc dumps.
+9. Policy env vars can block writes (`policy_denied` names the env var) — denial
+   is configuration, not a bug.
+10. `spawn` takes an executable plus argv — no shell, so no pipes or `&&`.
+11. Prefer `worktree` on `spawn` when peers should not share one dirty tree.
+    Tear down with `unworktree` after the pane is closed.
+12. For crew barriers use `broadcast` + `signal` + `await`, not ad-hoc dumps.
