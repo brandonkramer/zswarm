@@ -24,6 +24,31 @@ struct State {
     /// How many pushes Zellij has sent us — proof this is event driven.
     pane_updates: u64,
     tab_updates: u64,
+    /// Last screen handed out per pane, so "did anything move?" needs no second
+    /// sample. Only written by the `changed` op — `scrollback` is a pure read.
+    seen: BTreeMap<String, String>,
+    /// Waits currently holding a CLI pipe open. Keyed by pipe id.
+    waiting: Vec<PendingWait>,
+}
+
+/// A `wait` that has not resolved yet. The caller's `zellij pipe` stays blocked
+/// until one of these finishes, so a minute-long wait costs one process rather
+/// than one per poll.
+struct PendingWait {
+    pipe_id: String,
+    pane: PaneId,
+    /// The typed id the caller used, echoed back in the reply.
+    pane_key: String,
+    /// "match" | "idle" | "either"
+    mode: String,
+    needle: Option<String>,
+    ignore_case: bool,
+    idle_ms: f64,
+    poll_ms: f64,
+    timeout_ms: f64,
+    elapsed_ms: f64,
+    unchanged_ms: f64,
+    last_screen: Option<String>,
 }
 
 #[derive(Clone)]
@@ -51,6 +76,30 @@ fn parse_pane_id(raw: &str) -> Option<PaneId> {
         "terminal" => Some(PaneId::Terminal(id)),
         "plugin" => Some(PaneId::Plugin(id)),
         _ => None,
+    }
+}
+
+/// Mirror of `normalizeScreen` on the TypeScript side. The viewport arrives
+/// padded to the terminal width where `dump-screen` leaves it ragged, so both
+/// sides have to strip the same way or "did it change?" answers differently
+/// depending on which path served the read.
+fn normalize(lines: &[String]) -> String {
+    let mut joined = lines
+        .iter()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    while joined.ends_with('\n') {
+        joined.pop();
+    }
+    joined
+}
+
+fn contains(haystack: &str, needle: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        haystack.to_lowercase().contains(&needle.to_lowercase())
+    } else {
+        haystack.contains(needle)
     }
 }
 
@@ -151,6 +200,181 @@ impl State {
         .to_string()
     }
 
+    /// Screens plus a `changed` flag against what this plugin handed out last
+    /// time. Lets a caller tell moving panes from still ones with no sample gap
+    /// — at the cost of a different question: "since your last call", not
+    /// "in the last 400ms".
+    fn changed_json(&mut self, request: &serde_json::Value) -> String {
+        let requested: Vec<String> = request
+            .get("panes")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut panes = Vec::new();
+        let mut missing = Vec::new();
+        for id in requested {
+            let Some(pane_id) = parse_pane_id(&id) else {
+                missing.push(id);
+                continue;
+            };
+            match get_pane_scrollback(pane_id, false) {
+                Ok(contents) => {
+                    let screen = normalize(&contents.viewport);
+                    let previous = self.seen.get(&id);
+                    // First sight is not a change: nobody asked before, so
+                    // there is nothing it could have moved since.
+                    let changed = previous.is_some_and(|prev| prev != &screen);
+                    let first = previous.is_none();
+                    panes.push(serde_json::json!({
+                        "id": id,
+                        "viewport": contents.viewport,
+                        "changed": changed,
+                        "first": first,
+                    }));
+                    self.seen.insert(id, screen);
+                },
+                Err(_) => missing.push(id),
+            }
+        }
+
+        serde_json::json!({
+            "ok": true,
+            "source": "plugin",
+            "ready": self.pane_updates > 0,
+            "panes": panes,
+            "missing": missing,
+        })
+        .to_string()
+    }
+
+    /// Take a wait and hold the caller's pipe. Returns an error string when the
+    /// request is one this plugin will not serve, so zswarm falls back to
+    /// polling rather than getting a wrong answer.
+    fn begin_wait(&mut self, pipe_id: &str, request: &serde_json::Value) -> Option<String> {
+        // No regex crate in a wasm plugin: a regex wait belongs on the polling
+        // path, where the caller's engine decides what matches.
+        if request
+            .get("regex")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Some(error_json("regex waits are not served by the plugin"));
+        }
+        let id = request.get("pane").and_then(serde_json::Value::as_str)?;
+        let pane = parse_pane_id(id)?;
+        let number = |key: &str, fallback: f64| {
+            request
+                .get(key)
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(fallback)
+        };
+        let mode = request
+            .get("for")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("idle")
+            .to_string();
+        let needle = request
+            .get("match")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        if mode != "idle" && needle.is_none() {
+            return Some(error_json("match waits need a needle"));
+        }
+
+        let poll_ms = number("pollMs", 50.0).max(20.0);
+        self.waiting.push(PendingWait {
+            pipe_id: pipe_id.to_string(),
+            pane,
+            pane_key: id.to_string(),
+            mode,
+            needle,
+            ignore_case: request
+                .get("ignoreCase")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            idle_ms: number("idleMs", 2000.0),
+            poll_ms,
+            timeout_ms: number("timeoutMs", 60000.0),
+            elapsed_ms: 0.0,
+            unchanged_ms: 0.0,
+            last_screen: None,
+        });
+        block_cli_pipe_input(pipe_id);
+        set_timeout(poll_ms / 1000.0);
+        None
+    }
+
+    /// One poll tick for every held wait. Anything that resolves answers its
+    /// own pipe and releases the caller; the rest re-arm the timer.
+    fn tick_waits(&mut self, elapsed_secs: f64) {
+        let elapsed_ms = elapsed_secs * 1000.0;
+        let mut still_waiting = Vec::new();
+        let mut shortest_poll = f64::MAX;
+
+        for mut wait in std::mem::take(&mut self.waiting) {
+            wait.elapsed_ms += elapsed_ms;
+            let screen = match get_pane_scrollback(wait.pane, false) {
+                Ok(contents) => normalize(&contents.viewport),
+                // The pane went away mid-wait; say so rather than hanging.
+                Err(_) => {
+                    self.finish_wait(&wait, "gone", "");
+                    continue;
+                },
+            };
+
+            let matched = wait
+                .needle
+                .as_ref()
+                .is_some_and(|needle| contains(&screen, needle, wait.ignore_case));
+            if matched && wait.mode != "idle" {
+                self.finish_wait(&wait, "match", &screen);
+                continue;
+            }
+
+            match &wait.last_screen {
+                Some(previous) if previous == &screen => wait.unchanged_ms += elapsed_ms,
+                _ => wait.unchanged_ms = 0.0,
+            }
+            wait.last_screen = Some(screen.clone());
+
+            if wait.mode != "match" && wait.unchanged_ms >= wait.idle_ms {
+                self.finish_wait(&wait, "idle", &screen);
+                continue;
+            }
+            if wait.elapsed_ms >= wait.timeout_ms {
+                self.finish_wait(&wait, "timeout", &screen);
+                continue;
+            }
+            shortest_poll = shortest_poll.min(wait.poll_ms);
+            still_waiting.push(wait);
+        }
+
+        self.waiting = still_waiting;
+        if !self.waiting.is_empty() {
+            set_timeout(shortest_poll / 1000.0);
+        }
+    }
+
+    fn finish_wait(&self, wait: &PendingWait, reason: &str, screen: &str) {
+        let body = serde_json::json!({
+            "ok": true,
+            "source": "plugin",
+            "ready": true,
+            "reason": reason,
+            "pane": wait.pane_key,
+            "viewport": screen.split('\n').collect::<Vec<_>>(),
+        });
+        cli_pipe_output(&wait.pipe_id, &format!("{}\n", body));
+        unblock_cli_pipe_input(&wait.pipe_id);
+    }
+
     fn counters_json(&self) -> String {
         format!(
             "{{\"ok\":true,\"paneUpdates\":{},\"tabUpdates\":{},\"panes\":{}}}",
@@ -173,7 +397,12 @@ impl ZellijPlugin for State {
             PermissionType::ReadCliPipes,
             PermissionType::ReadPaneContents,
         ]);
-        subscribe(&[EventType::PaneUpdate, EventType::TabUpdate]);
+        // Timer drives the held waits; without it a blocked pipe never wakes.
+        subscribe(&[
+            EventType::PaneUpdate,
+            EventType::TabUpdate,
+            EventType::Timer,
+        ]);
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -207,6 +436,10 @@ impl ZellijPlugin for State {
                 self.tabs = tabs.iter().map(|t| t.name.clone()).collect();
                 true
             }
+            Event::Timer(elapsed) => {
+                self.tick_waits(elapsed);
+                false
+            },
             _ => false,
         }
     }
@@ -235,6 +468,13 @@ impl ZellijPlugin for State {
             match serde_json::from_str::<serde_json::Value>(&query) {
                 Ok(request) => match request.get("op").and_then(serde_json::Value::as_str) {
                     Some("scrollback") => self.scrollback_json(&request),
+                    Some("changed") => self.changed_json(&request),
+                    // A wait answers later, from the timer, so it returns here
+                    // without unblocking — unless it refused the request.
+                    Some("wait") => match self.begin_wait(id, &request) {
+                        Some(refusal) => refusal,
+                        None => return false,
+                    },
                     other => error_json(&format!("unknown op {:?}", other)),
                 },
                 Err(err) => error_json(&format!("bad json: {}", err)),

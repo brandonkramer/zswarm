@@ -17,7 +17,10 @@ import {
   buildSendKeysArgs,
   buildStackPanesArgs,
   buildWriteCharsArgs,
+  changedPayload,
   scrollbackPayload,
+  waitPayload,
+  type WaitRequest,
   type LaunchPluginInput,
   type NewPaneInput,
   type NewTabInput,
@@ -26,7 +29,9 @@ import {
 import {
   DEFAULT_BUS_TIMEOUT_MS,
   parseBusReply,
+  parseChangedReply,
   parseScrollbackReply,
+  parseWaitReply,
 } from "./bus.js";
 import { parseTabList, resolveTab, type ZellijTab } from "./tabs.js";
 import { createSshExec } from "../exec.js";
@@ -340,6 +345,45 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     );
   }
 
+  /**
+   * A wait the plugin holds open. The transport timeout has to outlast the
+   * caller's own, or the pipe dies before the wait it is carrying.
+   */
+  async function waitPlugin(
+    input: { session: string; url: string; configKey: string } & WaitRequest,
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    const budget = (input.timeoutMs ?? 60_000) + DEFAULT_BUS_TIMEOUT_MS;
+    return exec(
+      buildPipeArgs({
+        session: input.session,
+        url: input.url,
+        configKey: input.configKey,
+        payload: waitPayload(input),
+      }),
+      {
+        timeoutMs: budget,
+        until: (stdout) => parseWaitReply(stdout) !== null,
+      },
+    );
+  }
+
+  async function changedPlugin(
+    input: { session: string; url: string; configKey: string; panes: string[] },
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    return exec(
+      buildPipeArgs({
+        session: input.session,
+        url: input.url,
+        configKey: input.configKey,
+        payload: changedPayload(input.panes),
+      }),
+      {
+        timeoutMs: DEFAULT_BUS_TIMEOUT_MS,
+        until: (stdout) => parseChangedReply(stdout) !== null,
+      },
+    );
+  }
+
   async function launchPlugin(
     input: LaunchPluginInput,
   ): Promise<{ session: string; paneId: string | null }> {
@@ -383,6 +427,8 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     stackPanes,
     pipePlugin,
     scrollbackPlugin,
+    waitPlugin,
+    changedPlugin,
     launchPlugin,
     resolveTab,
     normalizePaneId,

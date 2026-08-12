@@ -167,6 +167,12 @@ pnpm run cli -- checkpoint --branch review-auth --cwd /path/to/repo --message wi
 | `checkpoint` | Commit everything in a peer worktree (`message=`); clean → `committed: false` |
 | `bus` | Report the event bus; `install: true` loads it, `clear: true` forgets it |
 
+`send` accepts `expect=<text>`: the target pane's screen must contain it before
+zswarm writes anything. A pane that has dropped back to a shell prompt will
+**run** a message as a command — this happened during development — and nothing
+reliably distinguishes an agent from a prompt, so the guard is explicit rather
+than clever. Failure is `expect_missing`.
+
 **Breaking:** `spawn`'s boolean `tab` is now `newTab`. `tab` is a tab **name**
 (used by `broadcast` to target a tab, by `rename` to retitle one, and by `spawn`
 to place the pane).

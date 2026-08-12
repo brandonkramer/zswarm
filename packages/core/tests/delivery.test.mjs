@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStateStore, createZellijClient } from "../dist/index.js";
-import { deliverTo } from "../dist/ops/delivery.js";
+import { classifySubmit, deliverTo } from "../dist/ops/delivery.js";
 
 let stateSeq = 0;
 function tempState() {
@@ -24,6 +24,11 @@ const PANE = {
   exited: false,
   floating: false,
 };
+
+const BODY = "please review the auth patch";
+const BEFORE = "idle\n>";
+const QUEUED = `idle\n>\n[Pasted text #1 +2 lines]\n${BODY}`;
+const SUBMITTED = `${QUEUED}\nI'll start by reading auth.ts`;
 
 /** Fake clock: sleep advances `now`. */
 function fakeClock(start = 1_000) {
@@ -63,7 +68,7 @@ function harness({ screens = ["idle prompt"], dumpFailAt = -1 } = {}) {
   return { client, calls, enterSends };
 }
 
-async function runDeliver(args, harnessOpts, body = "please review the auth patch") {
+async function runDeliver(args, harnessOpts, body = BODY) {
   const { client, calls, enterSends } = harness(harnessOpts);
   const state = tempState();
   const clock = fakeClock();
@@ -78,28 +83,41 @@ async function runDeliver(args, harnessOpts, body = "please review the auth patc
   return { result, calls, enterSends, state, clock };
 }
 
-test("auto: clean submit — no extra Enter, submitted true", async () => {
+test("classifySubmit: new output below the paste is submitted", () => {
+  assert.equal(classifySubmit(BEFORE, SUBMITTED, BODY), true);
+});
+
+test("classifySubmit: composer holding the paste is queued", () => {
+  assert.equal(classifySubmit(BEFORE, QUEUED, BODY), false);
+});
+
+test("classifySubmit: unchanged screen without a last-line marker is unverified", () => {
+  assert.equal(classifySubmit(BEFORE, BEFORE, BODY), "unverified");
+});
+
+test("classifySubmit: [Pasted text] in scrollback does not decide", () => {
+  const after = `idle\n[Pasted text #1 +9 lines]\noutput line`;
+  const before = `idle\noutput line`;
+  assert.equal(classifySubmit(before, after, BODY), "unverified");
+});
+
+test("auto: real submission — new output below paste, no extra Enter", async () => {
   const { result, enterSends, state } = await runDeliver(
     { from: "codex" },
-    { screens: ["ready>\n  (listening)"] },
+    { screens: [BEFORE, SUBMITTED] },
   );
   assert.equal(result.ok, true);
   assert.equal(result.submitted, true);
-  // injectPane already sends one Enter; auto must not send another
   assert.equal(enterSends().length, 1);
   const log = state.readLog();
   assert.equal(log.length, 1);
   assert.match(log[0].detail, /submitted=true/);
 });
 
-test("auto: queued text rescued by extra Enter", async () => {
-  const body = "please review the auth patch";
-  const queued = `composer\n[Pasted text #1 +2 lines]\n${body}`;
-  const clear = "thinking…\nworking on it";
+test("auto: queued composer rescued by extra Enter", async () => {
   const { result, enterSends } = await runDeliver(
     { from: "codex" },
-    { screens: [queued, clear] },
-    body,
+    { screens: [BEFORE, QUEUED, SUBMITTED] },
   );
   assert.equal(result.ok, true);
   assert.equal(result.submitted, true);
@@ -107,16 +125,35 @@ test("auto: queued text rescued by extra Enter", async () => {
 });
 
 test("auto: still queued after retry → submitted false", async () => {
-  const body = "please review the auth patch";
-  const queued = `idle\n> ${body.slice(0, 40)}\n[Pasted text #1 +1 lines]`;
   const { result, enterSends } = await runDeliver(
     {},
-    { screens: [queued, queued] },
-    body,
+    { screens: [BEFORE, QUEUED, QUEUED] },
   );
   assert.equal(result.ok, true);
   assert.equal(result.submitted, false);
   assert.equal(enterSends().length, 2);
+});
+
+test("auto: ambiguous screen → unverified", async () => {
+  const { result, enterSends } = await runDeliver(
+    {},
+    { screens: [BEFORE, BEFORE] },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.submitted, "unverified");
+  assert.equal(enterSends().length, 1);
+});
+
+test("auto: leftover [Pasted text] marker does not force a retry", async () => {
+  const before = "idle\noutput line";
+  const after = "idle\n[Pasted text #1 +9 lines]\noutput line";
+  const { result, enterSends } = await runDeliver(
+    {},
+    { screens: [before, after] },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.submitted, "unverified");
+  assert.equal(enterSends().length, 1);
 });
 
 test("submit none: no verify dump, submitted unverified", async () => {
@@ -137,6 +174,5 @@ test("auto: dump failure falls back to unverified", async () => {
   );
   assert.equal(result.ok, true);
   assert.equal(result.submitted, "unverified");
-  // inject Enter only — rescue Enter not attempted when first dump fails
   assert.equal(enterSends().length, 1);
 });

@@ -12,7 +12,7 @@ import {
 import { createStateStore, type StateStore } from "../state.js";
 import { busToPanes } from "../zellij/bus.js";
 import { broadcast } from "./broadcast.js";
-import { busOp, busScreens, busSnapshot } from "./bus.js";
+import { busChanged, busOp, busScreens, busSnapshot, busWait } from "./bus.js";
 import {
   dumpLayoutOp,
   focusTarget,
@@ -22,7 +22,12 @@ import {
 } from "./panes.js";
 import { peerCheckpoint, peerDiff } from "./review.js";
 import { deliverTo } from "./delivery.js";
-import { assertNotPlugin, assertNotSelf, assertWritable } from "./guards.js";
+import {
+  assertNotPlugin,
+  assertNotSelf,
+  assertPaneExpects,
+  assertWritable,
+} from "./guards.js";
 import { readDeliveryLog } from "./log.js";
 import { awaitSignal, listSignals, postSignal } from "./signals.js";
 import { spawnPane } from "./spawn.js";
@@ -42,6 +47,15 @@ import {
 } from "./util.js";
 import { waitForPane } from "./wait.js";
 import { listPeerWorktrees, removePeerWorktree } from "./worktree.js";
+
+/** Same default `wait` applies: match when a needle is given, else idle. */
+function waitMode(args: Record<string, unknown>): "idle" | "match" | "either" {
+  const requested = typeof args.for === "string" ? args.for.trim() : "";
+  if (requested === "match" || requested === "either" || requested === "idle") {
+    return requested;
+  }
+  return typeof args.match === "string" && args.match ? "match" : "idle";
+}
 
 async function resolveTarget(
   client: ZellijClient,
@@ -141,6 +155,14 @@ export async function dispatchZswarm(
           op,
         );
         assertWritable(client, pane, args, "send");
+        // A pane that dropped back to a shell will *run* the message. There is
+        // no reliable way to tell an agent from a prompt, so the caller names
+        // something the screen must show first.
+        const expect = typeof args.expect === "string" ? args.expect.trim() : "";
+        if (expect) {
+          const screen = await client.dumpPane({ session, paneId: pane.id });
+          assertPaneExpects(screen.text, expect, pane.id);
+        }
         const result = await deliverTo(client, state(), args, {
           session,
           pane,
@@ -274,7 +296,27 @@ export async function dispatchZswarm(
           clock,
           deps.env,
         );
-        return await waitForPane(client, target, args, clock);
+        // The plugin holds one pipe for the whole wait and polls far tighter
+        // than spawning a process allows. It declines a regex needle — it has
+        // no engine — and then this is the loop that runs.
+        const viaBus = isTrue(args.regex)
+          ? undefined
+          : () =>
+              busWait(
+                client,
+                state(),
+                target.session,
+                {
+                  pane: target.pane.id,
+                  for: waitMode(args),
+                  match: typeof args.match === "string" ? args.match : null,
+                  ignoreCase: isTrue(args.ignoreCase),
+                  idleMs: Number(args.idleMs ?? 2000),
+                  timeoutMs: Number(args.timeoutMs ?? 60_000),
+                },
+                deps.env,
+              );
+        return await waitForPane(client, target, args, clock, viaBus);
       }
       case "status": {
         const { session } = await client.resolveSession(
@@ -292,6 +334,22 @@ export async function dispatchZswarm(
               // Sampling is 2N dumps; the plugin reads them all in one pipe.
               readScreens: (paneIds: string[]) =>
                 busScreens(client, state(), session, paneIds, clock, deps.env),
+              readChanged: async (paneIds: string[]) => {
+                const reply = await busChanged(
+                  client,
+                  state(),
+                  session,
+                  paneIds,
+                  deps.env,
+                );
+                if (!reply) return null;
+                return new Map(
+                  reply.panes.map((p) => [
+                    p.id,
+                    { changed: p.changed, first: p.first, screen: p.screen },
+                  ]),
+                );
+              },
             }
           : null;
         const only = typeof args.to === "string" ? args.to.trim() : "";

@@ -24,7 +24,7 @@ export const DEFAULT_BUS_TIMEOUT_MS = 2_500;
  * approved set — it denies the new one silently. A build that gains a
  * permission has to ship under a new name; `-v2` is the ReadPaneContents one.
  */
-const PREBUILT_RELATIVE = join("plugin", "prebuilt", "zswarm-bus-v2.wasm");
+const PREBUILT_RELATIVE = join("plugin", "prebuilt", "zswarm-bus-v3.wasm");
 
 export type BusPane = {
   id: string;
@@ -62,6 +62,92 @@ export type BusScrollback = {
   panes: BusScrollbackPane[];
   missing: string[];
 };
+
+export type BusWait = {
+  reason: "match" | "idle" | "timeout" | "gone";
+  pane: string;
+  screen: string;
+};
+
+export type BusChangedPane = {
+  id: string;
+  screen: string;
+  changed: boolean;
+  /** True the first time the plugin has been asked about this pane. */
+  first: boolean;
+};
+
+export type BusChanged = {
+  ready: boolean;
+  panes: BusChangedPane[];
+  missing: string[];
+};
+
+const WAIT_REASONS = ["match", "idle", "timeout", "gone"] as const;
+
+function jsonLines(stdout: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const line of stdout.split("\n")) {
+    const text = line.trim();
+    if (!text.startsWith("{")) continue;
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (parsed && typeof parsed === "object") {
+        out.push(parsed as Record<string, unknown>);
+      }
+    } catch {
+      // Zellij's own notices share the stream; skip anything that is not ours.
+    }
+  }
+  return out;
+}
+
+function screenOf(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  return value.filter((l): l is string => typeof l === "string").join("\n");
+}
+
+/** A held wait answers once, late. Same scan as every other bus reply. */
+export function parseWaitReply(stdout: string): BusWait | null {
+  for (const value of jsonLines(stdout)) {
+    if (value.ok !== true) continue;
+    const reason = value.reason;
+    if (typeof reason !== "string") continue;
+    if (!(WAIT_REASONS as readonly string[]).includes(reason)) continue;
+    return {
+      reason: reason as BusWait["reason"],
+      pane: typeof value.pane === "string" ? value.pane : "",
+      screen: screenOf(value.viewport),
+    };
+  }
+  return null;
+}
+
+export function parseChangedReply(stdout: string): BusChanged | null {
+  for (const value of jsonLines(stdout)) {
+    if (value.ok !== true || !Array.isArray(value.panes)) continue;
+    const panes: BusChangedPane[] = [];
+    for (const row of value.panes) {
+      if (!row || typeof row !== "object") continue;
+      const p = row as Record<string, unknown>;
+      if (typeof p.id !== "string") continue;
+      panes.push({
+        id: p.id,
+        screen: screenOf(p.viewport),
+        changed: p.changed === true,
+        first: p.first === true,
+      });
+    }
+    return {
+      ready: value.ready === true,
+      panes,
+      missing: Array.isArray(value.missing)
+        ? value.missing.filter((m): m is string => typeof m === "string")
+        : [],
+    };
+  }
+  return null;
+}
 
 /** Absolute path of the plugin wasm, or null when there is nothing to load. */
 export function resolveBusPlugin(

@@ -54,6 +54,48 @@ export function scrollbackPayload(req: ScrollbackRequest): string {
   });
 }
 
+/** A wait the plugin serves by holding the pipe until it resolves. */
+export type WaitRequest = {
+  pane: string;
+  for: "idle" | "match" | "either";
+  match?: string | null;
+  ignoreCase?: boolean;
+  idleMs?: number;
+  timeoutMs?: number;
+  pollMs?: number;
+};
+
+/**
+ * `regex` is deliberately absent: the plugin has no regex engine, refuses such
+ * requests, and the caller falls back to polling where its own engine decides.
+ */
+export function waitPayload(req: WaitRequest): string {
+  if (!req.pane.trim()) {
+    throw new ZellijError("bad_arg", "wait needs a pane");
+  }
+  if (req.for !== "idle" && !req.match) {
+    throw new ZellijError("bad_arg", "match waits need a needle");
+  }
+  return JSON.stringify({
+    op: "wait",
+    pane: req.pane,
+    for: req.for,
+    match: req.match ?? null,
+    ignoreCase: req.ignoreCase === true,
+    idleMs: req.idleMs ?? 2000,
+    timeoutMs: req.timeoutMs ?? 60000,
+    pollMs: req.pollMs ?? 50,
+  });
+}
+
+/** Screens plus "did this move since you last asked", so status needs no gap. */
+export function changedPayload(panes: string[]): string {
+  if (panes.length === 0) {
+    throw new ZellijError("bad_arg", "changed needs a non-empty pane list");
+  }
+  return JSON.stringify({ op: "changed", panes });
+}
+
 export type LaunchPluginInput = {
   session: string;
   url: string;

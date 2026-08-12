@@ -7,11 +7,16 @@ import {
   busPluginUrl,
   nextConfigKey,
   parseBusReply,
+  parseChangedReply,
   parseScrollbackReply,
+  parseWaitReply,
   resolveBusPlugin,
   scrollbackToScreen,
+  type BusChanged,
   type BusSnapshot,
+  type BusWait,
 } from "../zellij/bus.js";
+import type { WaitRequest } from "../zellij/args.js";
 import type { ZellijClient } from "../zellij/client.js";
 import type { Clock, OpsResult } from "./types.js";
 import { isTrue } from "./util.js";
@@ -195,6 +200,63 @@ export async function busScreens(
   // A pane that vanished mid-read is normal; a wholesale miss is not, and
   // silently returning fewer screens would read as "those panes are quiet".
   return screens.size === paneIds.length ? screens : null;
+}
+
+/**
+ * Hand the whole wait to the plugin, which holds the pipe until it resolves.
+ * One process covers a minute-long wait instead of one per poll, and the plugin
+ * can poll far tighter than a process spawn allows.
+ *
+ * Returns null for anything it will not serve — a regex needle, a cold
+ * instance, no reply — and the caller runs its own loop.
+ */
+export async function busWait(
+  client: ZellijClient,
+  state: StateStore,
+  session: string,
+  request: WaitRequest,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<BusWait | null> {
+  const plan = planBus(client, state, env);
+  if (!plan.enabled || !plan.url) return null;
+  const configKey = answeredWith.get(session) ?? plan.configKey;
+  const reply = await client.waitPlugin({
+    session,
+    url: plan.url,
+    configKey,
+    ...request,
+  });
+  const parsed = parseWaitReply(reply.stdout);
+  // `gone` means the pane vanished mid-wait; the polling path reports that
+  // with its own error, so let it.
+  return parsed && parsed.reason !== "gone" ? parsed : null;
+}
+
+/**
+ * Screens plus "did this move since you last asked". Answers the same question
+ * `status` answers by sampling twice, without the gap between samples — but
+ * relative to the previous call rather than a fixed window.
+ */
+export async function busChanged(
+  client: ZellijClient,
+  state: StateStore,
+  session: string,
+  paneIds: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<BusChanged | null> {
+  if (paneIds.length === 0) return null;
+  const plan = planBus(client, state, env);
+  if (!plan.enabled || !plan.url) return null;
+  const configKey = answeredWith.get(session) ?? plan.configKey;
+  const reply = await client.changedPlugin({
+    session,
+    url: plan.url,
+    configKey,
+    panes: paneIds,
+  });
+  const parsed = parseChangedReply(reply.stdout);
+  if (!parsed || !parsed.ready) return null;
+  return parsed.panes.length === paneIds.length ? parsed : null;
 }
 
 /** Report on the bus, install it, or forget it. */

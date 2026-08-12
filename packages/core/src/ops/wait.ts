@@ -1,5 +1,6 @@
 import { ZellijError } from "../errors.js";
 import type { ZellijClient } from "../zellij/client.js";
+import type { BusWait } from "../zellij/bus.js";
 import type { ZellijPane } from "../zellij/panes.js";
 import type { Clock, OpsResult } from "./types.js";
 import {
@@ -81,15 +82,23 @@ function waitResult(
   };
 }
 
+/** Held-pipe wait answer, shaped by `parseWaitReply` in `zellij/bus.ts`. */
+export type { BusWait };
+
 /**
  * Poll a pane's screen until it goes quiet, prints a match, or the deadline
  * passes — so callers stop re-dumping in a loop of their own.
+ *
+ * `waitViaBus`, when provided, is one held pipe covering the whole wait.
+ * Null (plugin missing or silent) falls back to dump-screen polling. The
+ * pipe's own timeout belongs to the transport; this op does not cap it.
  */
 export async function waitForPane(
   client: ZellijClient,
   target: { session: string; pane: ZellijPane },
   args: Record<string, unknown>,
   clock: Clock,
+  waitViaBus?: () => Promise<BusWait | null>,
 ): Promise<OpsResult> {
   const { session, pane } = target;
   const matcher = buildMatcher(args);
@@ -113,6 +122,27 @@ export async function waitForPane(
   );
 
   const started = clock.now();
+
+  if (waitViaBus) {
+    const reply = await waitViaBus();
+    // `gone` is filtered upstream: a pane that vanished mid-wait is reported by
+    // the polling path, which has the error message for it.
+    if (reply && reply.reason !== "gone") {
+      const at = clock.now();
+      return waitResult(reply.reason, {
+        session,
+        pane,
+        text: reply.screen,
+        args,
+        started,
+        at,
+        polls: 1,
+        changes: 0,
+        idleMs,
+      });
+    }
+  }
+
   let previous: string | null = null;
   let lastChangeAt = started;
   let polls = 0;

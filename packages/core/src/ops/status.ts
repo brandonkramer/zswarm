@@ -16,6 +16,10 @@ export type StatusSource = {
    * status falls back to one `dump-screen` per pane.
    */
   readScreens?: (paneIds: string[]) => Promise<Map<string, string> | null>;
+  /** "Has this moved since you last asked?", answered without a sample gap. */
+  readChanged?: (
+    paneIds: string[],
+  ) => Promise<Map<string, { changed: boolean; first: boolean; screen: string }> | null>;
 };
 
 /** Lines that mean the pane wants an answer rather than more time. */
@@ -88,6 +92,47 @@ export async function peerStatus(
   }
   const sampleMs = Math.max(50, requested);
   const live = targets.filter((pane) => !pane.exited).map((pane) => pane.id);
+
+  // sinceLast trades the fixed 400ms window for "moved since your last call".
+  // The plugin remembers the previous screen, so there is no gap to wait out —
+  // but ask twice in quick succession and everything reads idle.
+  if (isTrue(args.sinceLast) && supplied?.readChanged) {
+    const changed = await supplied.readChanged(live);
+    if (changed) {
+      const peers = targets
+        .map((pane) => {
+          const row = changed.get(pane.id);
+          const state: PeerState = pane.exited
+            ? "exited"
+            : row?.changed
+              ? "busy"
+              : QUESTION.test(lastLine(row?.screen ?? ""))
+                ? "waiting"
+                : "idle";
+          const entry: Record<string, unknown> = {
+            id: pane.id,
+            title: pane.title,
+            state,
+            lastLine: lastLine(row?.screen ?? "").slice(0, 160),
+          };
+          // First sight has nothing to compare against, so idle is a guess.
+          if (row?.first) entry.first = true;
+          return entry;
+        })
+        .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+      return {
+        ok: true,
+        data: {
+          session,
+          source,
+          sampled: false,
+          sinceLast: true,
+          peers,
+          free: peers.filter((p) => p.state === "idle").map((p) => p.id),
+        },
+      };
+    }
+  }
 
   /**
    * One batched read when the bus can serve it, otherwise a process per pane.

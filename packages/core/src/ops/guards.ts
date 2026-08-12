@@ -46,3 +46,21 @@ export function assertWritable(
     );
   }
 }
+
+/**
+ * Opt-in check that the pane still looks like the intended agent, not a
+ * shell that would execute the body as a command. Substring only — a regex
+ * in a safety check is a foot-gun.
+ */
+export function assertPaneExpects(
+  screen: string,
+  expect: string,
+  paneId: string,
+): void {
+  if (!expect) return;
+  if (screen.toLowerCase().includes(expect.toLowerCase())) return;
+  throw new ZellijError(
+    "expect_missing",
+    `${paneId} screen does not contain ${JSON.stringify(expect)}`,
+  );
+}

@@ -135,6 +135,13 @@ export const PARAMS: readonly ParamSpec[] = [
       "status: gap between the two screen samples (default 400); 0 skips sampling and reports running/exited only",
   },
   {
+    name: "sinceLast",
+    type: "boolean",
+    flags: ["--since-last"],
+    description:
+      "status: classify by what changed since the last status call instead of sampling twice; needs the event bus, no sample gap",
+  },
+  {
     name: "limit",
     type: "number",
     flags: ["--limit"],
@@ -334,6 +341,13 @@ export const PARAMS: readonly ParamSpec[] = [
     description: "send/broadcast: pause before checking the paste landed (default 300)",
   },
   {
+    name: "expect",
+    type: "string",
+    flags: ["--expect"],
+    description:
+      "text the target pane's screen must contain before zswarm will write to it",
+  },
+  {
     name: "message",
     type: "string",
     flags: ["--message"],
@@ -474,7 +488,7 @@ export function cliUsage(): string {
   }
   lines.push(
     "",
-    "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force).",
+    "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force). --expect requires the screen to contain a substring first.",
     "Bus: `zswarm bus --install` once, then list/status read pane state from the plugin instead of polling.",
     "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN",
     "",
