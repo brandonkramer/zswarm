@@ -80,6 +80,14 @@ zswarm({ op: "keys", to: "terminal_5", keys: ["Ctrl c"] })
 zswarm({ op: "keys", to: "terminal_5", chars: "y", enter: true })
 zswarm({ op: "interrupt", to: "terminal_5" })      # Esc; hard:true sends Ctrl c
 zswarm({ op: "close", to: "terminal_5" })
+
+zswarm({ op: "broadcast", body: "run tests", all: true, group: "claude" })
+zswarm({ op: "tail", to: "terminal_5" })           # incremental since last tail
+zswarm({ op: "status" })                           # busy | waiting | idle | exited
+zswarm({ op: "signal", channel: "done", payload: "ok" })
+zswarm({ op: "signals" })
+zswarm({ op: "await", channel: "done", count: 3 })
+zswarm({ op: "log", limit: 20, failed: true })
 ```
 
 CLI (same ops):
@@ -95,6 +103,13 @@ pnpm run cli -- unworktree --branch review-auth --cwd /path/to/repo
 pnpm run cli -- wait --to terminal_5 --match DONE --timeout-ms 30000
 pnpm run cli -- keys --to terminal_5 --key "Ctrl c"
 pnpm run cli -- close --to terminal_5
+pnpm run cli -- broadcast --all --group claude --body "run tests"
+pnpm run cli -- tail --to terminal_5
+pnpm run cli -- status
+pnpm run cli -- signal --channel done --payload ok
+pnpm run cli -- signals
+pnpm run cli -- await --channel done --count 3
+pnpm run cli -- log --failed --limit 20
 # after link: pnpm --dir packages/cli exec zswarm list
 ```
 
@@ -105,11 +120,17 @@ pnpm run cli -- close --to terminal_5
 | `list` / `sessions` | Terminal panes in a session / live session names |
 | `send` | Paste a message + Enter into a pane |
 | `dump` | Read a pane screen (8000 chars of tail by default) |
+| `tail` | Incremental read since last cursor; prefer over repeated `dump` |
 | `wait` | Block until the pane goes quiet, prints a match, or times out |
+| `status` | Classify panes as busy / waiting / idle / exited; `free[]` = idle ids |
 | `keys` | Send key specs (`Ctrl c`, `Esc`, `F1`) or literal `chars` |
 | `interrupt` | `Esc` by default, `hard` sends `Ctrl c` |
 | `spawn` | Open a pane (or `tab`) with a `command`, `cwd`, and `name` |
 | `close` | Close a pane |
+| `broadcast` | One body to many panes (`to` list, `tab`, or `all`; narrow with `group`) |
+| `signal` / `signals` | Post to a durable channel (or clear) / list channel counts |
+| `await` | Block until a channel reaches `count` posts |
+| `log` | Delivery log for send/broadcast/keys/interrupt/close |
 | `worktrees` | List the repo's git worktrees, each with panes working in it |
 | `unworktree` | Remove a worktree (`path` or `branch`; `worktree` aliases `branch`) |
 
@@ -120,6 +141,23 @@ that resolves on PATH plus argv-style arguments.
 (overrides `cwd`). Optional `worktreeRoot` and `baseRef`. Worktrees default to
 `<repo>-worktrees` beside the repo (`--worktree-root` / `ZSWARM_WORKTREE_ROOT`).
 If a worktree already exists at the target path, `spawn` reuses it.
+
+`broadcast` selects with `to=<comma list>`, `tab=<name>`, or `all=true`;
+narrow with `group=<substring>` on title or command. Returns `delivered[]`,
+`failed[]`, `skipped[]`. Skips (does not error on) plugin panes, exited panes,
+and zSwarm's own pane; `force` / `allowSelf` override. Empty selection →
+`no_targets`.
+
+`tail` returns only what the pane printed since the last `tail` (per-pane
+cursor; handles a scrolled viewport). `reset: true` forgets the cursor and
+returns the whole screen. Fields: `text`, `reset`, `fresh`, `chars`.
+
+`status` samples each pane twice (`sampleMs`, default 400) → `busy` /
+`waiting` / `idle` / `exited`, plus `free[]`. Optional `to=` for one pane.
+
+`signal` / `signals` / `await` use durable channels under `ZSWARM_STATE_DIR`
+(default `~/.zswarm`: `log.jsonl`, `signals.json`, `cursors.json`).
+`ZSWARM_LOG=0` turns the delivery log off.
 
 ### Write guards
 
@@ -146,6 +184,8 @@ refuse panes whose command has exited.
 | `ZSWARM_SELF_PANE` | Pane to treat as zSwarm's own (defaults to `ZELLIJ_PANE_ID`; `none` disables the guard) |
 | `ZSWARM_WORKTREE_ROOT` | Directory for linked worktrees (default `<repo>-worktrees` beside the repo) |
 | `ZSWARM_GIT_BIN` | Absolute path to `git` / `git.exe` when not on PATH |
+| `ZSWARM_STATE_DIR` | Durable state dir for log / signals / tail cursors (default `~/.zswarm`) |
+| `ZSWARM_LOG` | Set to `0` to disable the delivery log |
 
 ## License
 

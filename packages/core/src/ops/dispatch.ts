@@ -3,8 +3,15 @@ import { createGitClient, type GitClient } from "../git.js";
 import { normalizeKeys } from "../keys.js";
 import { createZellijClient, type ZellijClient } from "../zellij/client.js";
 import type { ZellijPane } from "../zellij/panes.js";
+import { createStateStore, type StateStore } from "../state.js";
+import { broadcast } from "./broadcast.js";
+import { deliverTo } from "./delivery.js";
 import { assertNotPlugin, assertNotSelf, assertWritable } from "./guards.js";
+import { readDeliveryLog } from "./log.js";
+import { awaitSignal, listSignals, postSignal } from "./signals.js";
 import { spawnPane } from "./spawn.js";
+import { peerStatus } from "./status.js";
+import { tailPane } from "./tail.js";
 import { OP_NAMES } from "../schema.js";
 import type { Clock, DispatchDeps, OpsResult } from "./types.js";
 import {
@@ -49,6 +56,8 @@ export async function dispatchZswarm(
   // Only the worktree ops need git, so the client is built on demand.
   let gitClient: GitClient | null = deps.git ?? null;
   const git = () => (gitClient ??= createGitClient());
+  let stateStore: StateStore | null = deps.state ?? null;
+  const state = () => (stateStore ??= createStateStore());
   try {
     switch (op) {
       case "sessions": {
@@ -73,25 +82,27 @@ export async function dispatchZswarm(
         if (!body.trim()) throw new ZellijError("missing_body", "body required");
         const { session, pane } = await resolveTarget(client, args);
         assertWritable(client, pane, args, "send");
-        const from =
-          (typeof args.from === "string" && args.from.trim()) || "swarm";
-        const text = isTrue(args.raw)
-          ? body
-          : client.formatPeerMessage(from, body);
-        const delivered = await client.injectPane({
+        const result = await deliverTo(client, state(), args, {
           session,
-          paneId: pane.id,
-          text,
+          pane,
+          body,
+          op: "send",
+          at: clock.now(),
         });
+        if (!result.ok && result.error) {
+          throw new ZellijError(result.error.code, result.error.message);
+        }
         const data: Record<string, unknown> = {
-          delivery: "zellij_paste",
-          session: delivered.session,
-          to: delivered.paneId,
-          from,
+          delivery: result.delivery,
+          session,
+          to: result.to,
+          from: (typeof args.from === "string" && args.from.trim()) || "swarm",
         };
         if (verbose) data.pane = paneViewFull(pane);
         return { ok: true, data };
       }
+      case "broadcast":
+        return await broadcast(client, state(), args, clock);
       case "keys":
       case "interrupt": {
         const { session, pane } = await resolveTarget(client, args);
@@ -102,6 +113,15 @@ export async function dispatchZswarm(
           if (isTrue(args.enter)) {
             await client.sendKeys({ session, paneId: pane.id, keys: ["Enter"] });
           }
+          state().appendLog({
+            at: clock.now(),
+            op,
+            session,
+            to: pane.id,
+            bytes: chars.length,
+            ok: true,
+            detail: "write-chars",
+          });
           return {
             ok: true,
             data: {
@@ -121,6 +141,14 @@ export async function dispatchZswarm(
         if (op === "keys" && isTrue(args.enter)) {
           await client.sendKeys({ session, paneId: pane.id, keys: ["Enter"] });
         }
+        state().appendLog({
+          at: clock.now(),
+          op,
+          session,
+          to: sent.paneId,
+          ok: true,
+          detail: sent.keys.join(" "),
+        });
         return {
           ok: true,
           data: {
@@ -153,10 +181,24 @@ export async function dispatchZswarm(
           },
         };
       }
+      case "tail": {
+        const target = await resolveTarget(client, args);
+        return await tailPane(client, state(), args, target);
+      }
       case "wait": {
         const target = await resolveTarget(client, args);
         return await waitForPane(client, target, args, clock);
       }
+      case "status":
+        return await peerStatus(client, args, clock);
+      case "signal":
+        return postSignal(state(), args, clock);
+      case "signals":
+        return listSignals(state());
+      case "await":
+        return await awaitSignal(state(), args, clock);
+      case "log":
+        return readDeliveryLog(state(), args);
       case "spawn":
         return await spawnPane(client, args, deps.git);
       case "worktrees":
@@ -169,6 +211,13 @@ export async function dispatchZswarm(
         assertNotPlugin(pane, "close");
         assertNotSelf(client, pane, args, "close");
         const closed = await client.closePane({ session, paneId: pane.id });
+        state().appendLog({
+          at: clock.now(),
+          op: "close",
+          session,
+          to: closed.paneId,
+          ok: true,
+        });
         return {
           ok: true,
           data: { session: closed.session, closed: closed.paneId },

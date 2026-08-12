@@ -53,7 +53,18 @@ export {
   type ZellijClient,
   type ZellijClientOptions,
 } from "./zellij/client.js";
+export {
+  createStateStore,
+  defaultStateDir,
+  type LogEntry,
+  type SignalChannel,
+  type StateStore,
+  type StateStoreOptions,
+} from "./state.js";
 export { dispatchZswarm } from "./ops/dispatch.js";
+export { selectTargets } from "./ops/broadcast.js";
+export { diffScreens, cursorKey } from "./ops/tail.js";
+export { classify, lastLine, type PeerState } from "./ops/status.js";
 export {
   normalizeScreen,
   truncateDumpText,

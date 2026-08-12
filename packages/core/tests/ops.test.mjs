@@ -1,8 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+// These tests exercise write ops; keep them out of the real delivery log.
+process.env.ZSWARM_LOG = "0";
+
 import {
   createZellijClient,
   dispatchZswarm,
+  OP_NAMES,
   normalizeKey,
   normalizeKeys,
   normalizeScreen,
@@ -424,5 +428,6 @@ test("unknown op lists the current surface", async () => {
   const { client } = harness();
   const res = await dispatchZswarm({ op: "nope" }, client);
   assert.equal(res.ok, false);
-  assert.match(res.error.message, /wait\|keys\|interrupt\|spawn\|close/);
+  assert.equal(res.error.code, "usage");
+  for (const op of OP_NAMES) assert.ok(res.error.message.includes(op), op);
 });

@@ -7,16 +7,23 @@ import { ZellijError } from "./errors.js";
 
 export const OP_NAMES = [
   "list",
+  "sessions",
   "send",
+  "broadcast",
   "dump",
+  "tail",
   "wait",
+  "status",
   "keys",
   "interrupt",
   "spawn",
   "close",
-  "sessions",
   "worktrees",
   "unworktree",
+  "signal",
+  "signals",
+  "await",
+  "log",
 ] as const;
 
 export type OpName = (typeof OP_NAMES)[number];
@@ -25,7 +32,9 @@ export type OpName = (typeof OP_NAMES)[number];
 export const TARGET_OPS: readonly OpName[] = [
   "send",
   "dump",
+  "tail",
   "wait",
+  "status",
   "keys",
   "interrupt",
   "close",
@@ -56,7 +65,75 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "to",
     type: "string",
     flags: ["--to", "-t"],
-    description: "target pane: id (3 / terminal_3) or unique title/command",
+    description:
+      "target pane: id (3 / terminal_3) or unique title/command; broadcast takes a comma list; log filters by it",
+  },
+  {
+    name: "all",
+    type: "boolean",
+    flags: ["--all", "-a"],
+    description: "broadcast: every terminal pane in the session",
+  },
+  {
+    name: "group",
+    type: "string",
+    flags: ["--group", "-g"],
+    description:
+      "broadcast: narrow the selection to panes whose title or command contains this",
+  },
+  {
+    name: "channel",
+    type: "string",
+    flags: ["--channel"],
+    description: "signal/await: channel name",
+  },
+  {
+    name: "payload",
+    type: "string",
+    flags: ["--payload"],
+    description: "signal: short note stored with the post",
+  },
+  {
+    name: "count",
+    type: "number",
+    flags: ["--count"],
+    description: "await: how many posts to wait for (default 1)",
+  },
+  {
+    name: "clear",
+    type: "boolean",
+    flags: ["--clear"],
+    description: "signal: reset the channel (all channels when none is given)",
+  },
+  {
+    name: "reset",
+    type: "boolean",
+    flags: ["--reset"],
+    description: "tail: forget the stored cursor and return the whole screen",
+  },
+  {
+    name: "sampleMs",
+    type: "number",
+    flags: ["--sample-ms"],
+    description: "status: gap between the two screen samples (default 400)",
+  },
+  {
+    name: "limit",
+    type: "number",
+    flags: ["--limit"],
+    description: "log: how many entries to return (default 20)",
+  },
+  {
+    name: "since",
+    type: "string",
+    flags: ["--since"],
+    description: "log: only entries at or after this epoch millisecond",
+  },
+  {
+    name: "failed",
+    type: "boolean",
+    flags: ["--failed"],
+    description: "log: only deliveries that did not land",
   },
   {
     name: "body",

@@ -1,0 +1,80 @@
+import type { ZellijClient } from "../zellij/client.js";
+import type { ZellijPane } from "../zellij/panes.js";
+import type { Clock, OpsResult } from "./types.js";
+import { isTrue, normalizeScreen, numberArg, optionalString } from "./util.js";
+
+export type PeerState = "busy" | "waiting" | "idle" | "exited";
+
+/** Lines that mean the pane wants an answer rather than more time. */
+const QUESTION =
+  /(\(y\/n\)|\[y\/n\]|\(yes\/no\)|press\s+enter|continue\?|proceed\?|overwrite\?|\bcontinue\b\s*\(|password:|passphrase:|\[y\/n\/a\]|confirm)/i;
+
+export function lastLine(screen: string): string {
+  const lines = screen.split("\n").filter((l) => l.trim());
+  return lines.length > 0 ? lines[lines.length - 1]!.trim() : "";
+}
+
+export function classify(input: {
+  exited: boolean;
+  before: string;
+  after: string;
+}): PeerState {
+  if (input.exited) return "exited";
+  if (input.before !== input.after) return "busy";
+  return QUESTION.test(lastLine(input.after)) ? "waiting" : "idle";
+}
+
+/**
+ * Sample every pane twice and say who is working, who is stuck on a prompt,
+ * and who is free — the routing question `list` cannot answer.
+ */
+export async function peerStatus(
+  client: ZellijClient,
+  args: Record<string, unknown>,
+  clock: Clock,
+): Promise<OpsResult> {
+  const { session } = await client.resolveSession(
+    typeof args.session === "string" ? args.session : undefined,
+  );
+  const panes = await client.listPanes(session);
+  const only = optionalString(args.to);
+  const targets: ZellijPane[] = only
+    ? [client.resolvePane(panes, only)]
+    : panes.filter((p) => !p.isPlugin);
+
+  const sampleMs = numberArg(args, "sampleMs", 400, { min: 50, max: 10_000 });
+  const before = new Map<string, string>();
+  for (const pane of targets) {
+    if (pane.exited) continue;
+    const dumped = await client.dumpPane({ session, paneId: pane.id });
+    before.set(pane.id, normalizeScreen(dumped.text));
+  }
+  await clock.sleep(sampleMs);
+
+  const peers = [];
+  for (const pane of targets) {
+    const first = before.get(pane.id) ?? "";
+    const after = pane.exited
+      ? first
+      : normalizeScreen(
+          (await client.dumpPane({ session, paneId: pane.id })).text,
+        );
+    const state = classify({ exited: pane.exited, before: first, after });
+    const entry: Record<string, unknown> = {
+      id: pane.id,
+      title: pane.title,
+      state,
+      lastLine: lastLine(after).slice(0, 160),
+    };
+    if (isTrue(args.verbose)) {
+      entry.command = pane.command ?? null;
+      entry.cwd = pane.cwd ?? null;
+      entry.tab = pane.tabName ?? null;
+    }
+    peers.push(entry);
+  }
+
+  peers.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  const free = peers.filter((p) => p.state === "idle").map((p) => p.id);
+  return { ok: true, data: { session, sampleMs, peers, free } };
+}
