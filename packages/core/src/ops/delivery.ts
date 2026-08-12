@@ -1,3 +1,4 @@
+import { resolveHarness } from "../harness.js";
 import type { StateStore } from "../state.js";
 import type { ZellijClient } from "../zellij/client.js";
 import type { ZellijPane } from "../zellij/panes.js";
@@ -31,10 +32,18 @@ export function bodyText(
   return isTrue(args.raw) ? body : client.formatPeerMessage(senderLabel(args), body);
 }
 
-function submitMode(args: Record<string, unknown>): SubmitMode {
+/**
+ * Caller `submit=` always wins. With none given, the pane's harness picks
+ * auto vs double-enter (codex needs two Enters; the rest submit on one).
+ */
+export function resolveSubmitMode(
+  args: Record<string, unknown>,
+  pane: { command?: string | null; title?: string | null },
+): SubmitMode {
   const raw = args.submit;
   if (raw === "none" || raw === "double-enter" || raw === "auto") return raw;
-  return "auto";
+  if (raw !== undefined && raw !== null && raw !== "") return "auto";
+  return resolveHarness(pane).submit;
 }
 
 function nonEmptyLines(screen: string): string[] {
@@ -50,9 +59,20 @@ function isPasteLine(line: string, needle: string): boolean {
   return needle.length > 0 && line.includes(needle);
 }
 
+/** True when the paste still sits in the composer (bottom of the screen). */
+export function composerHolds(screen: string, body: string): boolean {
+  const needle = body.slice(0, 40);
+  const lines = nonEmptyLines(screen);
+  const last3 = lines.slice(-3);
+  const last = lines[lines.length - 1] ?? "";
+  if (last.includes(PASTE_MARKER)) return true;
+  return needle.length > 0 && last3.some((line) => line.includes(needle));
+}
+
 /**
- * Compare the pane before vs after the paste. `true` only when new output
- * appeared below the paste; `[Pasted text` in scrollback is not evidence.
+ * Compare the pane before vs after the paste.
+ * Composer clearing (pasted text left the bottom input region) is submission.
+ * `[Pasted text` in scrollback is not evidence.
  */
 export function classifySubmit(
   before: string,
@@ -69,6 +89,7 @@ export function classifySubmit(
   const markerInLastLine = last.includes(PASTE_MARKER);
   const bodyInLastRegion =
     needle.length > 0 && last3.some((line) => line.includes(needle));
+  const holds = bodyInLastRegion || markerInLastLine;
 
   if (afterNorm === beforeNorm) {
     // Marker may only count when it sits in the last-line region *and*
@@ -77,23 +98,37 @@ export function classifySubmit(
     return "unverified";
   }
 
-  const withoutPaste = afterLines.filter((line) => !isPasteLine(line, needle));
-  if (withoutPaste.join("\n") === beforeNorm) {
-    if (bodyInLastRegion || markerInLastLine) return false;
-    return "unverified";
+  if (holds) {
+    const withoutPaste = afterLines.filter((line) => !isPasteLine(line, needle));
+    if (withoutPaste.join("\n") === beforeNorm) return false;
+    const lastPasteIdx = afterLines.reduce(
+      (found, line, i) => (isPasteLine(line, needle) ? i : found),
+      -1,
+    );
+    const belowNovel = afterLines
+      .slice(lastPasteIdx + 1)
+      .filter((line) => !isPasteLine(line, needle))
+      .filter((line) => !beforeLines.includes(line));
+    return belowNovel.length > 0 ? true : false;
   }
 
-  const lastPasteIdx = afterLines.reduce(
-    (found, line, i) => (isPasteLine(line, needle) ? i : found),
-    -1,
-  );
-  if (lastPasteIdx < 0) return "unverified";
+  // Paste left the input region: still on screen, just not at the bottom.
+  if (needle.length > 0 && afterLines.some((line) => line.includes(needle))) {
+    return true;
+  }
+  return "unverified";
+}
 
-  const belowNovel = afterLines
-    .slice(lastPasteIdx + 1)
-    .filter((line) => !isPasteLine(line, needle))
-    .filter((line) => !beforeLines.includes(line));
-  return belowNovel.length > 0 ? true : "unverified";
+async function dumpOrNull(
+  client: ZellijClient,
+  session: string,
+  paneId: string,
+): Promise<string | null> {
+  try {
+    return (await client.dumpPane({ session, paneId })).text;
+  } catch {
+    return null;
+  }
 }
 
 async function verifySubmit(
@@ -121,23 +156,27 @@ async function verifySubmit(
   if (before === null) return "unverified";
 
   await clock.sleep(settleMs);
-  let after: string;
-  try {
-    after = (await client.dumpPane({ session, paneId })).text;
-  } catch {
-    return "unverified";
-  }
-  const first = classifySubmit(before, after, body);
-  if (first !== false) return first;
+  const after = await dumpOrNull(client, session, paneId);
+  if (after === null) return "unverified";
+  let verdict = classifySubmit(before, after, body);
+  if (verdict === true) return true;
 
-  await client.sendKeys({ session, paneId, keys: ["Enter"] });
-  await clock.sleep(settleMs);
-  try {
-    after = (await client.dumpPane({ session, paneId })).text;
-  } catch {
-    return "unverified";
+  if (verdict === false) {
+    await client.sendKeys({ session, paneId, keys: ["Enter"] });
+    await clock.sleep(settleMs);
+    const rescued = await dumpOrNull(client, session, paneId);
+    if (rescued === null) return "unverified";
+    verdict = classifySubmit(before, rescued, body);
+    if (verdict === true) return true;
+    if (verdict === false) return false;
   }
-  return classifySubmit(before, after, body);
+
+  // First look was inconclusive; TUIs often redraw after the first settle.
+  await clock.sleep(Math.min(Math.max(settleMs * 2, 800), 5000));
+  const later = await dumpOrNull(client, session, paneId);
+  if (later === null) return "unverified";
+  if (composerHolds(after, body) && !composerHolds(later, body)) return true;
+  return classifySubmit(before, later, body);
 }
 
 /** Paste a body into one pane and record the attempt. */
@@ -156,16 +195,12 @@ export async function deliverTo(
 ): Promise<DeliveryResult> {
   const { session, pane, body, op, at, clock } = input;
   const from = senderLabel(args);
-  const mode = submitMode(args);
+  const mode = resolveSubmitMode(args, pane);
   const settleMs = numberArg(args, "settleMs", 300, { min: 50, max: 5000 });
   try {
     let before: string | null = null;
     if (mode === "auto") {
-      try {
-        before = (await client.dumpPane({ session, paneId: pane.id })).text;
-      } catch {
-        before = null;
-      }
+      before = await dumpOrNull(client, session, pane.id);
     }
     const delivered = await client.injectPane({
       session,

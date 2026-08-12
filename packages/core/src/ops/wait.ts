@@ -15,12 +15,12 @@ import {
 
 const WAIT_DEFAULTS = {
   idleMs: 2_000,
-  pollMs: 600,
+  pollMs: 150,
   timeoutMs: 60_000,
 };
 const WAIT_LIMITS = {
   idleMs: { min: 200, max: 600_000 },
-  pollMs: { min: 100, max: 30_000 },
+  pollMs: { min: 50, max: 30_000 },
   timeoutMs: { min: 1_000, max: 900_000 },
 };
 

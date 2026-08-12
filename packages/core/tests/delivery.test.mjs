@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStateStore, createZellijClient } from "../dist/index.js";
-import { classifySubmit, deliverTo } from "../dist/ops/delivery.js";
+import {
+  classifySubmit,
+  composerHolds,
+  deliverTo,
+  resolveSubmitMode,
+} from "../dist/ops/delivery.js";
 
 let stateSeq = 0;
 function tempState() {
@@ -25,10 +30,18 @@ const PANE = {
   floating: false,
 };
 
+const CODEX_PANE = {
+  ...PANE,
+  title: "agent-codex",
+  command: "codex",
+};
+
 const BODY = "please review the auth patch";
 const BEFORE = "idle\n>";
 const QUEUED = `idle\n>\n[Pasted text #1 +2 lines]\n${BODY}`;
 const SUBMITTED = `${QUEUED}\nI'll start by reading auth.ts`;
+/** Body left the composer; it sits in history, last lines are new output. */
+const CLEARED = `idle\n[zswarm from=swarm]\n${BODY}\nthinking…\nworking on auth.ts\nstill going`;
 
 /** Fake clock: sleep advances `now`. */
 function fakeClock(start = 1_000) {
@@ -68,13 +81,13 @@ function harness({ screens = ["idle prompt"], dumpFailAt = -1 } = {}) {
   return { client, calls, enterSends };
 }
 
-async function runDeliver(args, harnessOpts, body = BODY) {
+async function runDeliver(args, harnessOpts, body = BODY, pane = PANE) {
   const { client, calls, enterSends } = harness(harnessOpts);
   const state = tempState();
   const clock = fakeClock();
   const result = await deliverTo(client, state, args, {
     session: "demo",
-    pane: PANE,
+    pane,
     body,
     op: "send",
     at: clock.now(),
@@ -99,6 +112,12 @@ test("classifySubmit: [Pasted text] in scrollback does not decide", () => {
   const after = `idle\n[Pasted text #1 +9 lines]\noutput line`;
   const before = `idle\noutput line`;
   assert.equal(classifySubmit(before, after, BODY), "unverified");
+});
+
+test("classifySubmit: pasted text leaving the input region is submitted", () => {
+  assert.equal(classifySubmit(BEFORE, CLEARED, BODY), true);
+  assert.equal(composerHolds(QUEUED, BODY), true);
+  assert.equal(composerHolds(CLEARED, BODY), false);
 });
 
 test("auto: real submission — new output below paste, no extra Enter", async () => {
@@ -137,7 +156,7 @@ test("auto: still queued after retry → submitted false", async () => {
 test("auto: ambiguous screen → unverified", async () => {
   const { result, enterSends } = await runDeliver(
     {},
-    { screens: [BEFORE, BEFORE] },
+    { screens: [BEFORE, BEFORE, BEFORE] },
   );
   assert.equal(result.ok, true);
   assert.equal(result.submitted, "unverified");
@@ -149,10 +168,20 @@ test("auto: leftover [Pasted text] marker does not force a retry", async () => {
   const after = "idle\n[Pasted text #1 +9 lines]\noutput line";
   const { result, enterSends } = await runDeliver(
     {},
-    { screens: [before, after] },
+    { screens: [before, after, after] },
   );
   assert.equal(result.ok, true);
   assert.equal(result.submitted, "unverified");
+  assert.equal(enterSends().length, 1);
+});
+
+test("auto: delayed composer-clear after a longer pause reads true", async () => {
+  const { result, enterSends } = await runDeliver(
+    {},
+    { screens: [BEFORE, BEFORE, CLEARED] },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.submitted, true);
   assert.equal(enterSends().length, 1);
 });
 
@@ -175,4 +204,27 @@ test("auto: dump failure falls back to unverified", async () => {
   assert.equal(result.ok, true);
   assert.equal(result.submitted, "unverified");
   assert.equal(enterSends().length, 1);
+});
+
+test("explicit submit= overrides the harness profile", () => {
+  assert.equal(resolveSubmitMode({ submit: "none" }, CODEX_PANE), "none");
+  assert.equal(resolveSubmitMode({ submit: "auto" }, CODEX_PANE), "auto");
+  assert.equal(
+    resolveSubmitMode({ submit: "double-enter" }, PANE),
+    "double-enter",
+  );
+});
+
+test("codex-shaped pane defaults to double-enter", async () => {
+  assert.equal(resolveSubmitMode({}, CODEX_PANE), "double-enter");
+  const { result, enterSends, calls } = await runDeliver(
+    {},
+    { screens: [BEFORE, QUEUED] },
+    BODY,
+    CODEX_PANE,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.submitted, "unverified");
+  assert.equal(enterSends().length, 2);
+  assert.equal(calls.filter((a) => a.includes("dump-screen")).length, 0);
 });

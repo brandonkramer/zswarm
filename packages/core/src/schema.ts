@@ -239,7 +239,8 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "pollMs",
     type: "number",
     flags: ["--poll-ms"],
-    description: "wait: poll interval (default 600)",
+    description:
+      "wait: fallback poll interval (default 150; bus path polls at 50ms)",
   },
   {
     name: "timeoutMs",

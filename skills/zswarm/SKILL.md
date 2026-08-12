@@ -160,6 +160,16 @@ zswarm({ op: "wait", to: "reviewer", for: "either", match: "FAIL", idleMs: 4000 
 Prefer `tail` for cheap incremental polls; reserve `dump` for a one-shot full
 screen (or `tail` with `reset: true`).
 
+## CLI Harness Compatibility
+
+zSwarm is verified live against five CLI harnesses: **codex**, **cursor**, **pi**, **opencode**, and **gemini**.
+
+- **Read ops** (`dump`, `tail`, `status`, `wait --for idle`, `expect`) work across all 5 harnesses.
+- **Send ops** land on all 5 (`codex` auto-detects `submit=double-enter`, others use `auto`).
+- **Replies can take > 60s.** Budget timeouts accordingly; a quiet pane is rarely a failed send.
+- **`wait --match` on full-screen TUIs is viewport-and-moment dependent.** Full-screen TUIs own the alternate screen (no scrollback; `--full` is identical). Viewports can transiently redraw during output. Prefer `wait --for idle` (verified 100% in 1 poll across all harnesses) or match pinned UI text.
+- **Re-testing**: Run `node scripts/harness-check.mjs <panes...>` to check live conformance.
+
 ## Prefix
 
 Unless `raw: true`, sends are prefixed:

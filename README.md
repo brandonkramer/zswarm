@@ -339,6 +339,33 @@ Remote crew over SSH: `ZSWARM_SSH=user@host` routes every zellij call through
 ssh (`BatchMode=yes` unless you set your own). Optional: `ZSWARM_SSH_BIN`,
 `ZSWARM_SSH_OPTS` (whitespace split), `ZSWARM_REMOTE_BIN` (default `zellij`).
 
+## Harness Conformance
+
+zSwarm has been verified live against five CLI harnesses in one Zellij session: **codex**, **cursor**, **pi**, **opencode**, and **gemini**.
+
+| Harness | Submit Strategy | Read Ops (`dump`, `tail`, `status`, `wait --for idle`, `expect`) | Notes |
+|---------|-----------------|--------------------------------------------------|-------|
+| `codex` | `double-enter` | Verified | TUI composer requires a second Enter; zSwarm selects `double-enter` automatically |
+| `cursor` | `auto` | Verified | Standard TUI submit |
+| `pi` | `auto` | Verified | Standard TUI submit |
+| `opencode` | `auto` | Verified | Standard TUI submit |
+| `gemini` | `auto` | Verified | Standard TUI submit |
+
+Read operations (`dump`, `tail`, `status`, `wait --for idle`, and `expect`) work across all five harnesses. `send` lands on all five, with `codex` automatically resolved to `submit=double-enter`.
+
+### Operational Considerations
+
+- **Replies can take longer than a minute.** Budget timeouts accordingly (e.g. 120s per task); do not treat a quiet pane as a failed prompt delivery.
+- **`wait --match` on full-screen TUIs is viewport-and-moment dependent.** Full-screen CLI TUI apps own the alternate screen, so there is no scrollback and `--full` returns identical output (measured identical). A reply can drop out of the viewport transiently during redrawing between polls. Prefer `wait --for idle`, which worked on every harness in one poll, or match on something the harness leaves pinned on screen.
+
+### Conformance Verification
+
+To re-run multi-harness conformance checks against live panes:
+
+```bash
+node scripts/harness-check.mjs <pane-1> <pane-2> ...
+```
+
 ## Env
 
 | Variable | Purpose |
