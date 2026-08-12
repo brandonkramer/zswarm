@@ -25,9 +25,9 @@ CLI backup: `zswarm list|send|dump|sessions` (same ops; package `@zswarm/cli`).
 
 | op | Purpose |
 |----|---------|
-| `list` | Terminal panes (id, title, command, tab) |
-| `send` | Paste body + Enter into pane (`to` = id / title / command) |
-| `dump` | Read pane screen (`full` for scrollback — token-heavy) |
+| `list` | Terminal panes (id, title, command, tab); `verbose` adds cwd/flags |
+| `send` | Paste body + Enter into pane (`to` = id / title / command); ack is lean unless `verbose` |
+| `dump` | Read pane screen; capped at 8000 chars (tail) by default — `max`, `head`, `full` |
 | `sessions` | Live Zellij session names |
 
 ## Prefix
@@ -42,6 +42,6 @@ Unless `raw: true`, sends are prefixed:
 ## Rules
 
 1. Target **pane ids** from `list` — do not invent transports.
-2. Prefer `send` over `dump`. If you dump, avoid `full` unless needed.
+2. Prefer `send` over `dump`. If you dump, avoid `full`; keep default `max` unless needed.
 3. Not for IDE side-panel chats — only Zellij terminal panes.
 4. Local machine only (same host as Zellij).

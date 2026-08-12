@@ -8,6 +8,8 @@ import {
   resolveZellijBinary,
   sanitizeZellijEnv,
   dispatchZswarm,
+  truncateDumpText,
+  DEFAULT_DUMP_MAX_CHARS,
 } from "../dist/index.js";
 
 test("sanitizeZellijEnv drops non-strings", () => {
@@ -188,6 +190,20 @@ test("dispatch list sorts panes and send uses paste+Enter", async () => {
     listed.data.panes.map((p) => p.id),
     ["terminal_1", "terminal_2"],
   );
+  assert.deepEqual(Object.keys(listed.data.panes[0]).sort(), [
+    "command",
+    "id",
+    "tab",
+    "title",
+  ]);
+
+  const listedVerbose = await dispatchZswarm(
+    { op: "list", verbose: true },
+    client,
+  );
+  assert.equal(listedVerbose.ok, true);
+  assert.ok("focused" in listedVerbose.data.panes[0]);
+  assert.ok("cwd" in listedVerbose.data.panes[0]);
 
   const sent = await dispatchZswarm(
     { op: "send", to: "1", body: "ping", from: "alice" },
@@ -195,10 +211,57 @@ test("dispatch list sorts panes and send uses paste+Enter", async () => {
   );
   assert.equal(sent.ok, true);
   assert.equal(sent.data.delivery, "zellij_paste");
+  assert.equal(sent.data.pane, undefined);
   assert.ok(calls.some((a) => a.includes("paste")));
   assert.ok(calls.some((a) => a.includes("Enter")));
   const paste = calls.find((a) => a.includes("paste"));
   assert.ok(paste.some((x) => String(x).includes("[zswarm from=alice]")));
+
+  const sentVerbose = await dispatchZswarm(
+    { op: "send", to: "1", body: "ping", from: "alice", verbose: true },
+    client,
+  );
+  assert.equal(sentVerbose.ok, true);
+  assert.equal(sentVerbose.data.pane.id, "terminal_1");
+
+  const big = "x".repeat(DEFAULT_DUMP_MAX_CHARS + 50);
+  const dumpClient = createZellijClient({
+    env: {},
+    exec: async (args) => {
+      if (args.includes("list-sessions")) {
+        return { code: 0, stdout: "demo\n", stderr: "" };
+      }
+      if (args.includes("list-panes")) {
+        return { code: 0, stdout: panesJson, stderr: "" };
+      }
+      if (args.includes("dump-screen")) {
+        return { code: 0, stdout: big, stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const dumped = await dispatchZswarm({ op: "dump", to: "1" }, dumpClient);
+  assert.equal(dumped.ok, true);
+  assert.equal(dumped.data.truncated, true);
+  assert.equal(dumped.data.text.length, DEFAULT_DUMP_MAX_CHARS);
+  assert.equal(dumped.data.chars, big.length);
+  assert.equal(dumped.data.max, DEFAULT_DUMP_MAX_CHARS);
+
+  const headDump = await dispatchZswarm(
+    { op: "dump", to: "1", head: true, max: 10 },
+    dumpClient,
+  );
+  assert.equal(headDump.ok, true);
+  assert.equal(headDump.data.text, "x".repeat(10));
+});
+
+test("truncateDumpText keeps tail by default", () => {
+  const r = truncateDumpText("abcdefghij", 4);
+  assert.deepEqual(r, { text: "ghij", truncated: true, chars: 10 });
+  const h = truncateDumpText("abcdefghij", 4, "head");
+  assert.deepEqual(h, { text: "abcd", truncated: true, chars: 10 });
+  const ok = truncateDumpText("ab", 4);
+  assert.deepEqual(ok, { text: "ab", truncated: false, chars: 2 });
 });
 
 test("resolveZellijBinary finds LocalAppData on Windows when present", () => {

@@ -10,4 +10,9 @@ export {
   type ZellijPane,
   type ZellijSessionResolve,
 } from "./zellij.js";
-export { dispatchZswarm, type OpsResult } from "./ops.js";
+export {
+  dispatchZswarm,
+  truncateDumpText,
+  DEFAULT_DUMP_MAX_CHARS,
+  type OpsResult,
+} from "./ops.js";

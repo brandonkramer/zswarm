@@ -67,7 +67,8 @@ MCP:
 ```text
 zswarm({ op: "list" })
 zswarm({ op: "send", to: "terminal_2", body: "ping" })
-zswarm({ op: "dump", to: "terminal_2" })
+zswarm({ op: "dump", to: "terminal_2" })           # capped 8000 chars (tail)
+zswarm({ op: "list", verbose: true })              # cwd + focus flags
 ```
 
 CLI (same ops):
@@ -75,7 +76,8 @@ CLI (same ops):
 ```bash
 pnpm run cli -- list
 pnpm run cli -- send --to terminal_2 --body ping
-pnpm run cli -- dump --to terminal_2
+pnpm run cli -- dump --to terminal_2 --max 4000
+pnpm run cli -- list --verbose
 # after link: pnpm --dir packages/cli exec zswarm list
 ```
 

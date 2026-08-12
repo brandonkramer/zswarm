@@ -4,10 +4,10 @@ import { dispatchZswarm } from "@zswarm/core";
 function usage(): string {
   return `usage: zswarm <list|send|dump|sessions> [options]
 
-  zswarm list [--session NAME]
+  zswarm list [--session NAME] [--verbose]
   zswarm sessions
-  zswarm send --to PANE --body TEXT [--from LABEL] [--session NAME] [--raw]
-  zswarm dump --to PANE [--session NAME] [--full]
+  zswarm send --to PANE --body TEXT [--from LABEL] [--session NAME] [--raw] [--verbose]
+  zswarm dump --to PANE [--session NAME] [--full] [--max N] [--head]
 
 Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZELLIJ_SESSION_NAME
 `;
@@ -34,6 +34,12 @@ function parseArgs(argv: string[]): Record<string, unknown> {
       out.raw = true;
     } else if (a === "--full") {
       out.full = true;
+    } else if (a === "--verbose" || a === "-v") {
+      out.verbose = true;
+    } else if (a === "--head") {
+      out.head = true;
+    } else if (a === "--max") {
+      out.max = Number(rest[++i]);
     } else if (!a.startsWith("-") && !out.to && (op === "send" || op === "dump")) {
       out.to = a;
     } else if (!a.startsWith("-") && !out.body && op === "send") {

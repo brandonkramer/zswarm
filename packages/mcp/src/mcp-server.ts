@@ -57,6 +57,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "boolean",
             description: "dump: include full scrollback (default false)",
           },
+          max: {
+            type: "number",
+            description:
+              "dump: max text chars (default 8000, keeps tail; 0 = unlimited)",
+          },
+          head: {
+            type: "boolean",
+            description: "dump: keep start instead of tail when truncating",
+          },
+          verbose: {
+            type: "boolean",
+            description:
+              "list/send: include cwd/focus/exited/floating (and pane on send)",
+          },
         },
         required: ["op"],
       },
