@@ -6,8 +6,8 @@ Coordinate CLI AI crews across **Zellij** terminal panes. Control agents, pass p
                        you ──▶ any agent ──┐
                                            │ zswarm({op:"send", to:"reviewer"})
                                            ▼
-      every pane can call zswarm ──▶ ┌─────────┐ ◀── and every pane is a target,
-      so agents drive each other     │ zswarm  │     so a crew loops without you
+      every pane can call zswarm ──▶ ┌─────────┐
+      so agents drive each other     │ zswarm  │
                                      │ cli/mcp │
                                      └────┬────┘
                        paste + Enter ┌────┴────┐ read screen / pushed state
@@ -29,13 +29,6 @@ Coordinate CLI AI crews across **Zellij** terminal panes. Control agents, pass p
      one pane = one agent + one role + optionally its own worktree
      any pane can drive any other, on this machine or across the ssh boundary
 ```
-
-A pane is just a terminal, so zSwarm drives agents it knows nothing about —
-`send` is a paste plus Enter, `dump` reads the screen back. Any CLI works,
-including a plain shell.
-
-`ZSWARM_SSH=user@host` points every call at a Zellij on another machine, so one
-crew can span your workstation and a build box.
 
 ---
 
