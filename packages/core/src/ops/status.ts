@@ -61,12 +61,20 @@ export async function peerStatus(
   const requested = numberArg(args, "sampleMs", 400, { min: 0, max: 10_000 });
   if (requested === 0) {
     const peers = targets
-      .map((pane) => ({
-        id: pane.id,
-        title: pane.title,
-        state: pane.exited ? ("exited" as const) : ("running" as const),
-      }))
-      .sort((a, b) => a.id.localeCompare(b.id));
+      .map((pane) => {
+        const entry: Record<string, unknown> = {
+          id: pane.id,
+          title: pane.title,
+          state: pane.exited ? "exited" : "running",
+        };
+        if (isTrue(args.verbose)) {
+          entry.command = pane.command ?? null;
+          entry.cwd = pane.cwd ?? null;
+          entry.tab = pane.tabName ?? null;
+        }
+        return entry;
+      })
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
     // No `free`: without sampling there is no way to tell busy from idle.
     return {
       ok: true,

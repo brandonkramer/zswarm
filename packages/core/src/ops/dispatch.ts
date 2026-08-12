@@ -46,6 +46,9 @@ import { listPeerWorktrees, removePeerWorktree } from "./worktree.js";
 async function resolveTarget(
   client: ZellijClient,
   args: Record<string, unknown>,
+  state: StateStore,
+  clock: Clock,
+  env?: NodeJS.ProcessEnv,
   policy?: Policy,
   op?: string,
 ): Promise<{ session: string; panes: ZellijPane[]; pane: ZellijPane }> {
@@ -54,7 +57,22 @@ async function resolveTarget(
   const { session } = await client.resolveSession(
     typeof args.session === "string" ? args.session : undefined,
   );
-  const panes = await client.listPanes(session);
+  // The plugin manifest carries no cwd/command/floating, so verbose
+  // responses have to go the polling route.
+  const bus = isVerbose(args)
+    ? null
+    : await busSnapshot(client, state, session, clock, env);
+  let panes: ZellijPane[] | null = null;
+  if (bus) {
+    const busPanes = busToPanes(bus.snapshot);
+    try {
+      client.resolvePane(busPanes, to);
+      panes = busPanes;
+    } catch {
+      // A command-shaped `to` only matches the polled list.
+    }
+  }
+  if (!panes) panes = await client.listPanes(session);
   const pane = client.resolvePane(panes, to);
   if (policy && op) assertPaneAllowed(policy, pane, op);
   return { session, panes, pane };
@@ -113,7 +131,15 @@ export async function dispatchZswarm(
       case "send": {
         const body = String(args.body ?? args.text ?? "");
         if (!body.trim()) throw new ZellijError("missing_body", "body required");
-        const { session, pane } = await resolveTarget(client, args, policy, op);
+        const { session, pane } = await resolveTarget(
+          client,
+          args,
+          state(),
+          clock,
+          deps.env,
+          policy,
+          op,
+        );
         assertWritable(client, pane, args, "send");
         const result = await deliverTo(client, state(), args, {
           session,
@@ -140,7 +166,15 @@ export async function dispatchZswarm(
         return await broadcast(client, state(), args, clock, policy);
       case "keys":
       case "interrupt": {
-        const { session, pane } = await resolveTarget(client, args, policy, op);
+        const { session, pane } = await resolveTarget(
+          client,
+          args,
+          state(),
+          clock,
+          deps.env,
+          policy,
+          op,
+        );
         assertWritable(client, pane, args, op);
         const chars = typeof args.chars === "string" ? args.chars : "";
         if (op === "keys" && chars) {
@@ -195,7 +229,13 @@ export async function dispatchZswarm(
         };
       }
       case "dump": {
-        const { session, pane } = await resolveTarget(client, args);
+        const { session, pane } = await resolveTarget(
+          client,
+          args,
+          state(),
+          clock,
+          deps.env,
+        );
         const dumped = await client.dumpPane({
           session,
           paneId: pane.id,
@@ -217,18 +257,33 @@ export async function dispatchZswarm(
         };
       }
       case "tail": {
-        const target = await resolveTarget(client, args);
+        const target = await resolveTarget(
+          client,
+          args,
+          state(),
+          clock,
+          deps.env,
+        );
         return await tailPane(client, state(), args, target);
       }
       case "wait": {
-        const target = await resolveTarget(client, args);
+        const target = await resolveTarget(
+          client,
+          args,
+          state(),
+          clock,
+          deps.env,
+        );
         return await waitForPane(client, target, args, clock);
       }
       case "status": {
         const { session } = await client.resolveSession(
           typeof args.session === "string" ? args.session : undefined,
         );
-        const bus = await busSnapshot(client, state(), session, clock, deps.env);
+        // Verbose reports cwd and command, which the plugin manifest lacks.
+        const bus = verbose
+          ? null
+          : await busSnapshot(client, state(), session, clock, deps.env);
         let supplied = bus
           ? {
               session,
@@ -279,7 +334,15 @@ export async function dispatchZswarm(
       case "unworktree":
         return await removePeerWorktree(git(), client, args);
       case "close": {
-        const { session, pane } = await resolveTarget(client, args, policy, op);
+        const { session, pane } = await resolveTarget(
+          client,
+          args,
+          state(),
+          clock,
+          deps.env,
+          policy,
+          op,
+        );
         // Not assertWritable: closing an exited pane is the point of close.
         assertNotPlugin(pane, "close");
         assertNotSelf(client, pane, args, "close");

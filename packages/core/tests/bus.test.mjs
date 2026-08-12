@@ -303,6 +303,32 @@ test("verbose list skips the bus, which has no cwd to give", async () => {
   assert.equal(pipes().length, 0);
 });
 
+test("verbose status skips the bus, which has no command to give", async () => {
+  resetBusCache();
+  const store = installed(tempState());
+  const panesJson = JSON.stringify([
+    {
+      id: 2,
+      is_plugin: false,
+      is_focused: true,
+      title: "builder",
+      exited: false,
+      is_floating: false,
+      tab_name: "work",
+      pane_cwd: "/repo",
+      pane_command: "claude",
+    },
+  ]);
+  const { client, pipes } = busClient({ panesJson });
+  const status = await dispatchZswarm(
+    { op: "status", sampleMs: 0, verbose: true },
+    client,
+    { state: store, env: {} },
+  );
+  assert.equal(status.data.source, "zellij");
+  assert.equal(pipes().length, 0);
+});
+
 test("status with sampleMs=0 answers from the bus without dumping screens", async () => {
   resetBusCache();
   const store = installed(tempState());
