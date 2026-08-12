@@ -1,21 +1,18 @@
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
+import {
+  createExec,
+  NOT_FOUND_EXIT,
+  type ExecFn,
+  type ExecResult,
+} from "../exec.js";
 
-export type ZellijExecResult = {
-  code: number;
-  stdout: string;
-  stderr: string;
-};
-
-export type ZellijExecFn = (
-  args: string[],
-  options: { timeoutMs: number },
-) => Promise<ZellijExecResult>;
+export type ZellijExecResult = ExecResult;
+export type ZellijExecFn = ExecFn;
 
 export const DEFAULT_TIMEOUT_MS = 15_000;
-export const NOT_FOUND_EXIT = 127;
+export { NOT_FOUND_EXIT };
 
 /** Expand a leading `~/` or `~\` using USERPROFILE/HOME. */
 export function expandHomePath(
@@ -95,60 +92,10 @@ export function sanitizeZellijEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
-/** execFile-backed runner; never rejects, so callers branch on `code`. */
+/** Runner bound to the resolved zellij binary and a cleaned environment. */
 export function defaultExec(
   zellijPath: string,
   env: NodeJS.ProcessEnv,
 ): ZellijExecFn {
-  const cleanEnv = sanitizeZellijEnv(env);
-  return (args, options) =>
-    new Promise<ZellijExecResult>((resolve) => {
-      execFile(
-        zellijPath,
-        args,
-        {
-          timeout: options.timeoutMs,
-          maxBuffer: 8 * 1024 * 1024,
-          windowsHide: true,
-          env: cleanEnv,
-        },
-        (error, stdout, stderr) => {
-          const failure = error as
-            | (Error & { code?: unknown; killed?: boolean; signal?: string })
-            | null;
-          if (failure && typeof failure.code === "string") {
-            const missing =
-              failure.code === "ENOENT" || failure.code === "ENOTDIR";
-            resolve({
-              code: missing ? NOT_FOUND_EXIT : 1,
-              stdout: "",
-              stderr: `${failure.code}: ${failure.message} (bin=${zellijPath})`,
-            });
-            return;
-          }
-          if (
-            failure &&
-            (failure.killed === true || typeof failure.signal === "string")
-          ) {
-            resolve({
-              code: -1,
-              stdout: String(stdout ?? ""),
-              stderr: `zellij timed out after ${options.timeoutMs}ms`,
-            });
-            return;
-          }
-          const code =
-            failure && typeof failure.code === "number"
-              ? failure.code
-              : failure
-                ? 1
-                : 0;
-          resolve({
-            code,
-            stdout: String(stdout ?? ""),
-            stderr: String(stderr ?? ""),
-          });
-        },
-      );
-    });
+  return createExec(zellijPath, sanitizeZellijEnv(env));
 }

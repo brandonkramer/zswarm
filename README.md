@@ -70,7 +70,10 @@ zswarm({ op: "send", to: "terminal_2", body: "ping" })
 zswarm({ op: "dump", to: "terminal_2" })           # capped 8000 chars (tail)
 zswarm({ op: "list", verbose: true })              # cwd + focus flags
 
-zswarm({ op: "spawn", command: "claude", cwd: "/repo", name: "reviewer" })
+zswarm({ op: "spawn", command: "claude", cwd: "/path/to/repo", name: "reviewer" })
+zswarm({ op: "spawn", command: "claude", worktree: "review-auth", name: "reviewer" })
+zswarm({ op: "worktrees", cwd: "/path/to/repo" })
+zswarm({ op: "unworktree", branch: "review-auth", cwd: "/path/to/repo" })
 zswarm({ op: "wait", to: "terminal_5", match: "DONE" })
 zswarm({ op: "wait", to: "terminal_5", for: "idle", idleMs: 3000 })
 zswarm({ op: "keys", to: "terminal_5", keys: ["Ctrl c"] })
@@ -85,7 +88,10 @@ CLI (same ops):
 pnpm run cli -- list
 pnpm run cli -- send --to terminal_2 --body ping
 pnpm run cli -- dump --to terminal_2 --max 4000
-pnpm run cli -- spawn --command "claude" --cwd /repo --name reviewer --floating
+pnpm run cli -- spawn --command "claude" --cwd /path/to/repo --name reviewer --floating
+pnpm run cli -- spawn --command "claude" --worktree review-auth --name reviewer
+pnpm run cli -- worktrees --cwd /path/to/repo
+pnpm run cli -- unworktree --branch review-auth --cwd /path/to/repo
 pnpm run cli -- wait --to terminal_5 --match DONE --timeout-ms 30000
 pnpm run cli -- keys --to terminal_5 --key "Ctrl c"
 pnpm run cli -- close --to terminal_5
@@ -104,9 +110,16 @@ pnpm run cli -- close --to terminal_5
 | `interrupt` | `Esc` by default, `hard` sends `Ctrl c` |
 | `spawn` | Open a pane (or `tab`) with a `command`, `cwd`, and `name` |
 | `close` | Close a pane |
+| `worktrees` | List the repo's git worktrees, each with panes working in it |
+| `unworktree` | Remove a worktree (`path` or `branch`; `worktree` aliases `branch`) |
 
 `spawn` runs the command directly — there is no shell, so pass an executable
 that resolves on PATH plus argv-style arguments.
+
+`spawn` with `worktree=<branch>` gives the peer its own git worktree + branch
+(overrides `cwd`). Optional `worktreeRoot` and `baseRef`. Worktrees default to
+`<repo>-worktrees` beside the repo (`--worktree-root` / `ZSWARM_WORKTREE_ROOT`).
+If a worktree already exists at the target path, `spawn` reuses it.
 
 ### Write guards
 
@@ -119,6 +132,9 @@ refuse panes whose command has exited.
 | Own pane | `self_target` | `allowSelf: true` |
 | Exited pane | `pane_exited` | `force: true` |
 | Plugin pane | `pane_is_plugin` | — |
+| Main worktree | `worktree_is_main` | — |
+| Pane still in worktree | `worktree_busy` | `force: true` |
+| Dirty worktree | `worktree_dirty` | `force: true` |
 
 ## Env
 
@@ -128,6 +144,8 @@ refuse panes whose command has exited.
 | `ZSWARM_SESSION` | Default Zellij session name |
 | `ZELLIJ_SESSION_NAME` | Used when already inside Zellij |
 | `ZSWARM_SELF_PANE` | Pane to treat as zSwarm's own (defaults to `ZELLIJ_PANE_ID`; `none` disables the guard) |
+| `ZSWARM_WORKTREE_ROOT` | Directory for linked worktrees (default `<repo>-worktrees` beside the repo) |
+| `ZSWARM_GIT_BIN` | Absolute path to `git` / `git.exe` when not on PATH |
 
 ## License
 

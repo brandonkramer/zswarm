@@ -1,4 +1,5 @@
 import { ZellijError } from "../errors.js";
+import { createGitClient, type GitClient } from "../git.js";
 import { normalizeKeys } from "../keys.js";
 import { createZellijClient, type ZellijClient } from "../zellij/client.js";
 import type { ZellijPane } from "../zellij/panes.js";
@@ -16,6 +17,7 @@ import {
   truncateDumpText,
 } from "./util.js";
 import { waitForPane } from "./wait.js";
+import { listPeerWorktrees, removePeerWorktree } from "./worktree.js";
 
 async function resolveTarget(
   client: ZellijClient,
@@ -44,6 +46,9 @@ export async function dispatchZswarm(
       deps.sleep ??
       ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))),
   };
+  // Only the worktree ops need git, so the client is built on demand.
+  let gitClient: GitClient | null = deps.git ?? null;
+  const git = () => (gitClient ??= createGitClient());
   try {
     switch (op) {
       case "sessions": {
@@ -153,7 +158,11 @@ export async function dispatchZswarm(
         return await waitForPane(client, target, args, clock);
       }
       case "spawn":
-        return await spawnPane(client, args);
+        return await spawnPane(client, args, deps.git);
+      case "worktrees":
+        return await listPeerWorktrees(git(), client, args);
+      case "unworktree":
+        return await removePeerWorktree(git(), client, args);
       case "close": {
         const { session, pane } = await resolveTarget(client, args);
         // Not assertWritable: closing an exited pane is the point of close.

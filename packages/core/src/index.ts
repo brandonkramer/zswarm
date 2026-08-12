@@ -1,5 +1,22 @@
 export { ZellijError } from "./errors.js";
 export {
+  createExec,
+  NOT_FOUND_EXIT,
+  type ExecFn,
+  type ExecOptions,
+  type ExecResult,
+} from "./exec.js";
+export {
+  createGitClient,
+  defaultWorktreeRoot,
+  normalizeRepoPath,
+  parseWorktreeList,
+  worktreeDirName,
+  type GitClient,
+  type GitClientOptions,
+  type Worktree,
+} from "./git.js";
+export {
   expandHomePath,
   resolveZellijBinary,
   sanitizeZellijEnv,

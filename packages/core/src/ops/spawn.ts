@@ -1,9 +1,11 @@
 import { ZellijError } from "../errors.js";
+import { createGitClient, type GitClient } from "../git.js";
 import { tokenizeCommand } from "../keys.js";
 import type { NewPaneInput, PaneDirection } from "../zellij/args.js";
 import type { ZellijClient } from "../zellij/client.js";
 import type { OpsResult } from "./types.js";
 import { isTrue, isVerbose, optionalString, paneViewFull } from "./util.js";
+import { ensurePeerWorktree, type PeerWorktree } from "./worktree.js";
 
 function paneDirection(value: unknown): PaneDirection | null {
   const dir = optionalString(value);
@@ -19,13 +21,18 @@ function paneDirection(value: unknown): PaneDirection | null {
 export async function spawnPane(
   client: ZellijClient,
   args: Record<string, unknown>,
+  git?: GitClient,
 ): Promise<OpsResult> {
   const { session } = await client.resolveSession(
     typeof args.session === "string" ? args.session : undefined,
   );
   const command = tokenizeCommand(args.command ?? args.cmd);
-  const cwd = optionalString(args.cwd);
-  const name = optionalString(args.name);
+  // A worktree peer works on its own branch, in its own directory.
+  const worktree: PeerWorktree | null = optionalString(args.worktree)
+    ? await ensurePeerWorktree(git ?? createGitClient(), args)
+    : null;
+  const cwd = worktree ? worktree.path : optionalString(args.cwd);
+  const name = optionalString(args.name) ?? worktree?.branch ?? null;
   const closeOnExit = isTrue(args.closeOnExit);
   const before = new Set((await client.listPanes(session)).map((p) => p.id));
 
@@ -82,6 +89,13 @@ export async function spawnPane(
     live: pane !== null,
     command: command.length > 0 ? command : null,
   };
+  if (worktree) {
+    data.worktree = {
+      path: worktree.path,
+      branch: worktree.branch,
+      created: worktree.created,
+    };
+  }
   if (tabId !== null) data.tabId = tabId;
   if (pane && isVerbose(args)) data.pane = paneViewFull(pane);
   return { ok: true, data };

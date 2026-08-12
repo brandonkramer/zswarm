@@ -15,6 +15,8 @@ export const OP_NAMES = [
   "spawn",
   "close",
   "sessions",
+  "worktrees",
+  "unworktree",
 ] as const;
 
 export type OpName = (typeof OP_NAMES)[number];
@@ -182,7 +184,40 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "cwd",
     type: "string",
     flags: ["--cwd"],
-    description: "spawn: working directory for the new pane",
+    description:
+      "spawn: working directory for the new pane; worktrees/unworktree: any directory inside the repo",
+  },
+  {
+    name: "worktree",
+    type: "string",
+    flags: ["--worktree", "-w"],
+    description:
+      "spawn: branch to give the peer its own git worktree (overrides cwd); unworktree: alias for branch",
+  },
+  {
+    name: "worktreeRoot",
+    type: "string",
+    flags: ["--worktree-root"],
+    description:
+      "where worktrees live (default <repo>-worktrees beside the repo, or ZSWARM_WORKTREE_ROOT)",
+  },
+  {
+    name: "baseRef",
+    type: "string",
+    flags: ["--base-ref", "--base"],
+    description: "spawn: ref to branch from when the worktree branch is new",
+  },
+  {
+    name: "path",
+    type: "string",
+    flags: ["--path"],
+    description: "unworktree: worktree path to remove",
+  },
+  {
+    name: "branch",
+    type: "string",
+    flags: ["--branch"],
+    description: "unworktree: remove the worktree holding this branch",
   },
   {
     name: "name",
@@ -244,7 +279,8 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "force",
     type: "boolean",
     flags: ["--force"],
-    description: "send/keys: write to a pane whose command has exited",
+    description:
+      "send/keys: write to a pane whose command has exited; unworktree: remove a busy or dirty worktree",
   },
   {
     name: "verbose",
@@ -290,7 +326,7 @@ export function mcpInputSchema(): Record<string, unknown> {
 export const MCP_TOOL_DESCRIPTION =
   `zSwarm Zellij pane coordination (op=${OP_NAMES.join("|")}). ` +
   "List panes, send text into a CLI pane (paste+Enter), block until a pane goes idle or prints a match, " +
-  "send raw keys, open or close panes. Local Zellij only.";
+  "send raw keys, open or close panes, and give a peer its own git worktree. Local Zellij only.";
 
 const FLAG_INDEX = new Map<string, ParamSpec>(
   PARAMS.flatMap((p) => p.flags.map((flag) => [flag, p] as const)),

@@ -1,0 +1,202 @@
+import { basename, dirname, join } from "node:path";
+import { ZellijError } from "./errors.js";
+import { createExec, NOT_FOUND_EXIT, type ExecFn } from "./exec.js";
+
+const DEFAULT_TIMEOUT_MS = 20_000;
+
+export type Worktree = {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  bare: boolean;
+  detached: boolean;
+  locked: boolean;
+  prunable: boolean;
+};
+
+/** Compare paths across separators and case, so pane cwds match git output. */
+export function normalizeRepoPath(input: string): string {
+  return input
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+/** Branch names may contain `/`; directory names may not. */
+export function worktreeDirName(branch: string): string {
+  const cleaned = branch
+    .trim()
+    .replace(/^refs\/heads\//, "")
+    .replace(/[\\/]+/g, "-")
+    .replace(/[^A-Za-z0-9._-]/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!cleaned) {
+    throw new ZellijError("bad_branch", `branch "${branch}" has no usable name`);
+  }
+  return cleaned;
+}
+
+/** Sibling of the repo, matching the common `<repo>-worktrees` convention. */
+export function defaultWorktreeRoot(repoRoot: string): string {
+  return join(dirname(repoRoot), `${basename(repoRoot)}-worktrees`);
+}
+
+export function parseWorktreeList(stdout: string): Worktree[] {
+  const trees: Worktree[] = [];
+  let current: Worktree | null = null;
+  const push = () => {
+    if (current) trees.push(current);
+    current = null;
+  };
+  for (const raw of stdout.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) {
+      push();
+      continue;
+    }
+    if (line.startsWith("worktree ")) {
+      push();
+      current = {
+        path: line.slice("worktree ".length),
+        head: null,
+        branch: null,
+        bare: false,
+        detached: false,
+        locked: false,
+        prunable: false,
+      };
+      continue;
+    }
+    if (!current) continue;
+    if (line.startsWith("HEAD ")) current.head = line.slice("HEAD ".length);
+    else if (line.startsWith("branch "))
+      current.branch = line.slice("branch ".length).replace(/^refs\/heads\//, "");
+    else if (line === "bare") current.bare = true;
+    else if (line === "detached") current.detached = true;
+    else if (line.startsWith("locked")) current.locked = true;
+    else if (line.startsWith("prunable")) current.prunable = true;
+  }
+  push();
+  return trees;
+}
+
+export type GitClientOptions = {
+  exec?: ExecFn;
+  gitPath?: string;
+  timeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
+};
+
+export function createGitClient(options: GitClientOptions = {}) {
+  const env = options.env ?? process.env;
+  const gitPath = options.gitPath ?? env.ZSWARM_GIT_BIN?.trim() ?? "git";
+  const exec = options.exec ?? createExec(gitPath, env);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  async function run(args: string[], cwd: string, label: string) {
+    const result = await exec(args, { timeoutMs, cwd });
+    if (result.code === NOT_FOUND_EXIT) {
+      throw new ZellijError(
+        "git_missing",
+        `git not found (${gitPath}); install git or set ZSWARM_GIT_BIN`,
+      );
+    }
+    if (result.code !== 0) {
+      throw new ZellijError(
+        "git_failed",
+        `${label} failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim() || "no output"}`,
+      );
+    }
+    return result;
+  }
+
+  /** Top level of the working tree containing `cwd`. */
+  async function repoRoot(cwd: string): Promise<string> {
+    const result = await exec(["rev-parse", "--show-toplevel"], {
+      timeoutMs,
+      cwd,
+    });
+    if (result.code === NOT_FOUND_EXIT) {
+      throw new ZellijError(
+        "git_missing",
+        `git not found (${gitPath}); install git or set ZSWARM_GIT_BIN`,
+      );
+    }
+    if (result.code !== 0) {
+      throw new ZellijError(
+        "not_a_repo",
+        `${cwd} is not inside a git repository`,
+      );
+    }
+    return result.stdout.trim();
+  }
+
+  async function branchExists(root: string, branch: string): Promise<boolean> {
+    const result = await exec(
+      ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+      { timeoutMs, cwd: root },
+    );
+    return result.code === 0;
+  }
+
+  async function listWorktrees(root: string): Promise<Worktree[]> {
+    const result = await run(
+      ["worktree", "list", "--porcelain"],
+      root,
+      "git worktree list",
+    );
+    return parseWorktreeList(result.stdout);
+  }
+
+  async function addWorktree(input: {
+    root: string;
+    path: string;
+    branch: string;
+    baseRef?: string | null;
+    createBranch: boolean;
+  }): Promise<void> {
+    const args = ["worktree", "add"];
+    if (input.createBranch) args.push("-b", input.branch);
+    args.push(input.path);
+    if (input.createBranch) {
+      if (input.baseRef) args.push(input.baseRef);
+    } else {
+      args.push(input.branch);
+    }
+    await run(args, input.root, "git worktree add");
+  }
+
+  async function removeWorktree(input: {
+    root: string;
+    path: string;
+    force?: boolean;
+  }): Promise<void> {
+    const args = ["worktree", "remove"];
+    if (input.force) args.push("--force");
+    args.push(input.path);
+    await run(args, input.root, "git worktree remove");
+  }
+
+  /** Uncommitted changes, including untracked files. */
+  async function isDirty(path: string): Promise<boolean> {
+    const result = await run(
+      ["status", "--porcelain"],
+      path,
+      "git status",
+    );
+    return result.stdout.trim().length > 0;
+  }
+
+  return {
+    gitPath,
+    repoRoot,
+    branchExists,
+    listWorktrees,
+    addWorktree,
+    removeWorktree,
+    isDirty,
+  };
+}
+
+export type GitClient = ReturnType<typeof createGitClient>;
