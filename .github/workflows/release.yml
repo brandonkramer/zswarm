@@ -30,7 +30,8 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # changesets 3.x calls module.enableCompileCache(), added in Node 22.
+          node-version: 22
           cache: pnpm
           # Writes an .npmrc that reads NODE_AUTH_TOKEN; without it a publish
           # fails with ENEEDAUTH even though the token is in the environment.
