@@ -3,50 +3,39 @@
 Coordinate CLI AI crews across **Zellij** terminal panes. Control agents, pass prompts between panes, manage git worktrees, inspect outputs, and sync crew tasks via CLI or Model Context Protocol (MCP).
 
 ```text
-┌─────────────────────────────────────────────────────────┐
-│                    AI Host / Agent                      │
-│            (Claude, Codex, Cursor, CLI, etc.)           │
-└────────────────────────────┬────────────────────────────┘
-                             │ MCP / CLI Ops
-                             ▼
-┌─────────────────────────────────────────────────────────┐
-│                         zSwarm                          │
-│               (Core / Event-Bus Plugin)                 │
-└────────────────────────────┬────────────────────────────┘
-                             │ Zellij IPC / Screen I/O
-         ┌───────────────────┼───────────────────┐
-         ▼                   ▼                   ▼
-┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│   Zellij Pane   │ │   Zellij Pane   │ │   Zellij Pane   │
-│  (Worker Agent) │ │ (Reviewer Agent)│ │ (Terminal Task) │
-│ [wt: feat-auth] │ │ [wt: rev-auth]  │ │  [cwd: /repo]   │
-└─────────────────┘ └─────────────────┘ └─────────────────┘
+                       you ──▶ any agent ──┐
+                                           │ zswarm({op:"send", to:"reviewer"})
+                                           ▼
+      every pane can call zswarm ──▶ ┌─────────┐ ◀── and every pane is a target,
+      so agents drive each other     │ zswarm  │     so a crew loops without you
+                                     │ cli/mcp │
+                                     └────┬────┘
+                       paste + Enter ┌────┴────┐ read screen / pushed state
+                                     ▼         ▼
+ ══ this machine ══════════════════════════════╗ ══ ssh user@build-01 ═════════╗
+   zellij "crew"                               ║   zellij "ci"                 ║
+                                               ║                               ║
+   ┌────────────┐  send   ┌────────────┐       ║   ┌────────────┐              ║
+   │ codex      │────────▶│ claude     │───────╫──▶│ opencode   │              ║
+   │ builder    │◀────────│ reviewer   │  send ║   │ test-runner│              ║
+   │ wt:feat-a  │ signal  │ wt:rev-a   │       ║   │ wt:feat-a  │              ║
+   └────────────┘         └────────────┘       ║   └──────┬─────┘              ║
+   ┌────────────┐         ┌────────────┐       ║   ┌──────▼─────┐              ║
+   │ cursor     │         │ agy        │       ║   │ pi         │              ║
+   │ refactor   │         │ docs       │       ║   │ deploy     │              ║
+   │ wt:feat-b  │         │ wt:docs    │       ║   │ cwd:/srv   │              ║
+   └────────────┘         └────────────┘       ║   └────────────┘              ║
+ ═══════════════════════════════════════════════╝ ══════════════════════════════╝
+     one pane = one agent + one role + optionally its own worktree
+     any pane can drive any other, on this machine or across the ssh boundary
 ```
 
-<!-- ALTERNATE DIAGRAM — for comparison, delete one -->
+A pane is just a terminal, so zSwarm drives agents it knows nothing about —
+`send` is a paste plus Enter, `dump` reads the screen back. Any CLI works,
+including a plain shell.
 
-```text
-  you ──▶ any agent ──┐
-                      │  zswarm({op:"send", to:"reviewer", …})
-                      ▼
-                 ┌─────────┐        ┌──────────────────┐
-                 │ zswarm  │───────▶│ zellij           │
-                 │ cli/mcp │◀───────│  session "crew"  │
-                 └────┬────┘  push  └──────────────────┘
-                      │              │       │       │
-          paste+Enter │              ▼       ▼       ▼
-          read screen │           builder reviewer  shell
-                      └──────────────┴───────┴───────┘
-                           each pane = one CLI agent
-                           each may hold its own git worktree
-```
-
-Every pane is just a terminal, so zSwarm drives agents it knows nothing about —
-`send` is a paste plus Enter, `dump` reads the screen. The event bus is the
-return path: Zellij pushes pane changes to a plugin, so `list` and `status`
-answer from memory instead of polling.
-
-<!-- END ALTERNATE -->
+`ZSWARM_SSH=user@host` points every call at a Zellij on another machine, so one
+crew can span your workstation and a build box.
 
 ---
 
@@ -99,7 +88,7 @@ zswarm status                                   # Check status: busy | waiting |
 
 # 2. Spawn Panes & Worktrees
 zswarm spawn --command "claude" --name reviewer # Spawn agent pane
-zswarm spawn --command "claude" --worktree feature-auth --name auth-dev  # Isolated git worktree pane
+zswarm spawn --command "codex" --worktree feature-auth --name auth-dev   # Isolated git worktree pane
 
 # 3. Pass Prompts & Input
 zswarm send --to reviewer --body "Review changes in src/" --submit auto
@@ -111,7 +100,7 @@ zswarm tail --to reviewer                       # Incremental read since last ch
 zswarm wait --to reviewer --match "DONE"        # Block until pattern matched or pane idle
 
 # 5. Coordinate Crew & Sync Signals
-zswarm broadcast --all --group claude --body "Run test suite"
+zswarm broadcast --all --group builder --body "Run test suite"  # group matches pane title or command
 zswarm signal --channel tests --payload ok      # Send signal to durable channel
 zswarm await --channel tests --count 3          # Wait for 3 worker signals
 ```
