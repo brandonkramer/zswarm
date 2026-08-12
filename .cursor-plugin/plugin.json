@@ -1,0 +1,8 @@
+{
+  "name": "zswarm",
+  "version": "0.1.0",
+  "description": "zSwarm — coordinate CLI crews in Zellij panes (list, send, dump).",
+  "keywords": ["zellij", "panes", "mcp", "swarm", "cli"],
+  "skills": "./skills/",
+  "mcpServers": "mcp.json"
+}

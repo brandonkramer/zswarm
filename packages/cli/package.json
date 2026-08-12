@@ -1,0 +1,24 @@
+{
+  "name": "@zswarm/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "zSwarm CLI — list, send, dump Zellij panes",
+  "bin": {
+    "zswarm": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "cli": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@zswarm/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.14.1",
+    "typescript": "5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

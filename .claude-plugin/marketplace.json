@@ -1,0 +1,15 @@
+{
+  "name": "zswarm-local",
+  "owner": { "name": "local" },
+  "metadata": {
+    "description": "Local zSwarm Zellij pane coordination plugin"
+  },
+  "plugins": [
+    {
+      "name": "zswarm",
+      "description": "List, send, and dump Zellij panes for CLI crew coordination",
+      "source": ".",
+      "category": "developer-tools"
+    }
+  ]
+}

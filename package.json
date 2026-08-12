@@ -1,0 +1,17 @@
+{
+  "name": "zswarm",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "zSwarm — coordinate CLI crews in Zellij panes (list, send, dump).",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm --dir packages/core test",
+    "cli": "pnpm --dir packages/cli exec node dist/cli.js",
+    "mcp": "pnpm --dir packages/mcp exec node dist/mcp-server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.9"
+}
