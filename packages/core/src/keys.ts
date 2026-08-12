@@ -1,4 +1,4 @@
-import { ZellijError } from "./zellij.js";
+import { ZellijError } from "./errors.js";
 
 /** Named keys Zellij accepts verbatim, keyed by their lowercase spelling. */
 const NAMED_KEYS: Record<string, string> = {

@@ -1,26 +1,59 @@
+export { ZellijError } from "./errors.js";
 export {
-  createZellijClient,
+  expandHomePath,
   resolveZellijBinary,
-  resolveSelfPaneId,
   sanitizeZellijEnv,
-  ZellijError,
+  type ZellijExecFn,
+  type ZellijExecResult,
+} from "./zellij/binary.js";
+export {
+  normalizePaneId,
+  parsePaneList,
+  resolvePane,
+  type ZellijPane,
+} from "./zellij/panes.js";
+export {
+  parseSessionList,
+  resolveSelfPaneId,
+  type ZellijSessionResolve,
+} from "./zellij/session.js";
+export {
+  buildClosePaneArgs,
+  buildDumpArgs,
+  buildListPanesArgs,
+  buildNewPaneArgs,
+  buildNewTabArgs,
+  buildPasteArgs,
+  buildSendEnterArgs,
+  buildSendKeysArgs,
+  buildWriteCharsArgs,
   type NewPaneInput,
   type NewTabInput,
   type PaneDirection,
+} from "./zellij/args.js";
+export {
+  createZellijClient,
   type ZellijClient,
   type ZellijClientOptions,
-  type ZellijExecFn,
-  type ZellijExecResult,
-  type ZellijPane,
-  type ZellijSessionResolve,
-} from "./zellij.js";
+} from "./zellij/client.js";
+export { dispatchZswarm } from "./ops/dispatch.js";
 export {
-  dispatchZswarm,
   normalizeScreen,
   truncateDumpText,
   DEFAULT_DUMP_MAX_CHARS,
   DEFAULT_WAIT_MAX_CHARS,
-  type DispatchDeps,
-  type OpsResult,
-} from "./ops.js";
+} from "./ops/util.js";
+export type { DispatchDeps, OpsResult } from "./ops/types.js";
 export { normalizeKey, normalizeKeys, tokenizeCommand } from "./keys.js";
+export {
+  cliUsage,
+  mcpInputSchema,
+  parseCliArgv,
+  MCP_TOOL_DESCRIPTION,
+  OP_NAMES,
+  PARAMS,
+  TARGET_OPS,
+  type OpName,
+  type ParamSpec,
+  type ParamType,
+} from "./schema.js";
