@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "pnpm run build && node --test tests/*.test.mjs",
+    "test": "pnpm run build && node --test",
     "prepublishOnly": "node ../../scripts/check-publish.mjs"
   },
   "devDependencies": {

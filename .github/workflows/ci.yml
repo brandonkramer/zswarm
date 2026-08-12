@@ -43,4 +43,8 @@ jobs:
         run: pnpm -r build
 
       - name: Run tests
-        run: node --test packages/core/tests/*.test.mjs
+        # No glob: PowerShell is the default shell on Windows runners and does
+        # not expand one, so the pattern reached node as a literal path.
+        # Node discovers **/*.test.mjs itself when given no paths.
+        working-directory: packages/core
+        run: node --test
