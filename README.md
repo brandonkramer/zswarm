@@ -60,6 +60,48 @@ ZSWARM_BIN = '~/AppData/Local/Zellij/zellij.exe'
 # ZSWARM_BIN = '~/.cargo/bin/zellij'
 ```
 
+### Session selection (MCP)
+
+zSwarm resolves the session in this order:
+
+```
+  session arg → ZSWARM_SESSION → ZELLIJ_SESSION_NAME → sole live session
+                                 (set only inside a pane)
+```
+
+So auto-detection depends on where the MCP host starts the server. A host that
+spawns it as a child of the pane process inherits `ZELLIJ_SESSION_NAME` and
+resolves correctly; hosts that spawn MCP servers outside the pane inherit no
+Zellij env at all. Verified live with two sessions running: the second kind
+failed every call with `zellij_session_ambiguous` until `ZSWARM_SESSION` was set.
+
+With exactly one live session this is invisible — resolution succeeds by
+elimination — and it only surfaces the day a second session exists. Set
+`ZSWARM_SESSION` in the MCP server config rather than relying on inheritance:
+
+```json
+{
+  "mcpServers": {
+    "zswarm": {
+      "command": "node",
+      "args": ["./bin/launch-mcp.mjs"],
+      "env": { "ZSWARM_SESSION": "<session-name>" }
+    }
+  }
+}
+```
+
+Hosts configured in TOML take the same key:
+
+```toml
+[mcp_servers.zswarm.env]
+ZSWARM_SESSION = '<session-name>'
+```
+
+The mechanism was already there — `mcp.json` declares `ZSWARM_SESSION` in
+`env_vars` and `bin/launch-mcp.mjs` forwards the environment through. Only the
+note that you need it was missing.
+
 ## Usage
 
 MCP:
@@ -371,8 +413,8 @@ node scripts/harness-check.mjs <pane-1> <pane-2> ...
 | Variable | Purpose |
 |----------|---------|
 | `ZSWARM_BIN` / `ZSWARM_PATH` | Absolute path to `zellij` / `zellij.exe` |
-| `ZSWARM_SESSION` | Default Zellij session name |
-| `ZELLIJ_SESSION_NAME` | Used when already inside Zellij |
+| `ZSWARM_SESSION` | Default Zellij session name; effectively required for MCP hosts that spawn the server outside the Zellij pane (see [Session selection](#session-selection-mcp)) |
+| `ZELLIJ_SESSION_NAME` | Used when already inside Zellij; only set inside a pane |
 | `ZSWARM_SELF_PANE` | Pane to treat as zSwarm's own (defaults to `ZELLIJ_PANE_ID`; `none` disables the guard) |
 | `ZSWARM_WORKTREE_ROOT` | Directory for linked worktrees (default `<repo>-worktrees` beside the repo) |
 | `ZSWARM_GIT_BIN` | Absolute path to `git` / `git.exe` when not on PATH |

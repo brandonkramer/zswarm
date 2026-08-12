@@ -33,12 +33,16 @@ const QUESTION =
   /(\(y\/n\)|\[y\/n\]|\(yes\/no\)|\[y\/n\/a\]|password:|passphrase:|(?:continue|proceed|overwrite|confirm)\?|press\s+enter\s+to\s+continue)/i;
 
 /**
- * How many trailing non-empty lines `status` inspects for a prompt. A
+ * How many trailing non-empty lines `status` inspects for a named prompt. A
  * full-screen TUI hides its prompt under chrome, so the last line alone is
  * the wrong place to look — measured live, gemini's question sat 4 lines
- * above "esc to cancel".
+ * above "esc to cancel", and a six-option permission menu with wrapped
+ * lines put it 12 lines up. 24 clears the measured 12 with headroom for
+ * wider menus. Widening is safe for the named patterns because they are
+ * specific strings; the legacy last-line QUESTION fallback stays exactly
+ * where it is or it would fire on chrome.
  */
-const PROMPT_WINDOW = 10;
+const PROMPT_WINDOW = 24;
 
 export function lastLine(screen: string): string {
   const lines = screen.split("\n").filter((l) => l.trim());

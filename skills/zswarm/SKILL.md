@@ -25,6 +25,15 @@ zswarm({ op: "wait", to: "reviewer", for: "idle" })
 ```
 
 Optional: `session` when multiple Zellij sessions exist, or set `ZSWARM_SESSION`.
+
+`zellij_session_ambiguous` means resolution ran out of answers. The order is
+`session` arg → `ZSWARM_SESSION` → `ZELLIJ_SESSION_NAME` (set only inside a
+Zellij pane) → the sole live session. Some MCP hosts spawn servers outside the
+pane process, so the server inherits no Zellij env and gets by only while
+exactly one session is live — the error appears the day a second one starts.
+Pass `session` to unblock the call now; set `ZSWARM_SESSION` in the MCP server
+config to fix it for good.
+
 CLI backup: `zswarm list|send|dump|tail|wait|status|keys|interrupt|spawn|close|broadcast|signal|signals|await|log|worktrees|unworktree|rename|focus|tabs|layout|stack|diff|checkpoint|bus|sessions`
 (same ops; package `@zswarm/cli`).
 

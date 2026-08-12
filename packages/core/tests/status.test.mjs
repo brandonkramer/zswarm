@@ -137,12 +137,39 @@ test("full-screen chrome alone does not read as waiting", () => {
   assert.equal(classify({ exited: false, before: screen, after: screen, profile: gemini }), "idle");
 });
 
-test("a prompt scrolled out of the 10-line window is not claimed", () => {
+test("a prompt scrolled out of the 24-line window is not claimed", () => {
   const screen = [
     "Do you want to proceed?",
-    ...Array.from({ length: 15 }, (_, i) => `[${i}] working...`),
+    ...Array.from({ length: 30 }, (_, i) => `[${i}] working...`),
   ].join("\n");
   assert.equal(classify({ exited: false, before: screen, after: screen, profile: gemini }), "idle");
+});
+
+// Real gemini six-option MCP-permission menu, wrapped. Counted from the
+// bottom: 1 esc to cancel, 2 up/down Navigate, 3 settings.json), ..., 11
+// > 1. Yes, 12 Do you want to proceed?, 13 zswarm (server: zswarm). The
+// question sits 12 non-empty lines up — outside the old 10-line window.
+const GEMINI_SIX_OPTION = [
+  "zswarm (server: zswarm)",
+  "Do you want to proceed?",
+  "> 1. Yes",
+  "2. Yes, and always allow 'zswarm/zswarm' in this",
+  "conversation",
+  "3. Yes, and always allow 'zswarm/zswarm' (Persist to",
+  "settings.json)",
+  "4. No",
+  "5. No, and always deny 'zswarm/zswarm' in this conversation",
+  "6. No, and always deny 'zswarm/zswarm' (Persist to",
+  "settings.json)",
+  "up/down Navigate - tab Amend - ctrl+g edit/expand command",
+  "esc to cancel                          Gemini 3.6 Flash - high",
+].join("\n");
+
+test("gemini's six-option MCP menu, 12 lines up, reads waiting", () => {
+  assert.equal(
+    classify({ exited: false, before: GEMINI_SIX_OPTION, after: GEMINI_SIX_OPTION, profile: gemini }),
+    "waiting",
+  );
 });
 
 test("classify keeps exited, busy, and idle semantics", () => {
