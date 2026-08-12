@@ -1,18 +1,40 @@
 {
   "name": "zswarm",
-  "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "zSwarm — coordinate CLI crews in Zellij panes (list, send, dump).",
+  "description": "Coordinate CLI agent crews in Zellij panes",
   "scripts": {
     "build": "pnpm -r run build",
-    "build:plugin": "cd plugin/zswarm-events && cargo build --release --target wasm32-wasip1 && node -e \"require('node:fs').copyFileSync('target/wasm32-wasip1/release/zswarm-events.wasm','../prebuilt/zswarm-bus-v2.wasm')\"",
+    "build:plugin": "cd plugin/zswarm-events && cargo build --release --target wasm32-wasip1 && node -e \"require('node:fs').copyFileSync('target/wasm32-wasip1/release/zswarm-events.wasm','../../packages/wasm/zswarm-bus-v3.wasm')\"",
     "test": "pnpm --dir packages/core test",
     "cli": "pnpm --dir packages/cli exec node dist/cli.js",
-    "mcp": "pnpm --dir packages/mcp exec node dist/mcp-server.js"
+    "mcp": "pnpm --dir packages/mcp exec node dist/mcp-server.js",
+    "prepublishOnly": "node scripts/check-publish.mjs"
   },
   "engines": {
     "node": ">=20"
   },
-  "packageManager": "pnpm@9.15.9"
+  "packageManager": "pnpm@9.15.9",
+  "license": "MIT",
+  "keywords": [
+    "zellij",
+    "mcp",
+    "agents",
+    "cli"
+  ],
+  "bin": {
+    "zswarm": "./bin/zswarm.mjs",
+    "zswarm-mcp": "./bin/zswarm-mcp.mjs"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "dependencies": {
+    "@zswarm/cli": "workspace:*",
+    "@zswarm/mcp": "workspace:*"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

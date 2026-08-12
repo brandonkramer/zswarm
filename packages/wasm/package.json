@@ -1,0 +1,26 @@
+{
+  "name": "@zswarm/wasm",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Compiled Zellij event-bus plugin for zSwarm",
+  "keywords": [
+    "zellij",
+    "zswarm",
+    "wasm"
+  ],
+  "license": "MIT",
+  "exports": {
+    "./zswarm-bus-v3.wasm": "./zswarm-bus-v3.wasm",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "*.wasm",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

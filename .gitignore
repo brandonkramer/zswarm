@@ -5,3 +5,7 @@ dist/
 .env
 .env.*
 target/
+
+# pi installs packages beside its project settings; keep the settings, not the payload
+.pi/npm/
+.pi/git/

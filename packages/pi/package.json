@@ -1,0 +1,42 @@
+{
+  "name": "@zswarm/pi",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Bridge stdio MCP servers into pi as native tools",
+  "keywords": [
+    "pi-package",
+    "mcp",
+    "zellij",
+    "zswarm"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "files": [
+    "extensions",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@zswarm/mcp": "workspace:*"
+  },
+  "scripts": {
+    "prepublishOnly": "node ../../scripts/check-publish.mjs"
+  }
+}

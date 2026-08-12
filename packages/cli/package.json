@@ -1,15 +1,15 @@
 {
   "name": "@zswarm/cli",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "zSwarm CLI — list, send, dump Zellij panes",
+  "description": "zSwarm CLI \u2014 list, send, dump Zellij panes",
   "bin": {
     "zswarm": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "cli": "node dist/cli.js"
+    "cli": "node dist/cli.js",
+    "prepublishOnly": "node ../../scripts/check-publish.mjs"
   },
   "dependencies": {
     "@zswarm/core": "workspace:*"
@@ -20,5 +20,17 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": "./dist/cli.js",
+    "./package.json": "./package.json"
   }
 }

@@ -1,15 +1,15 @@
 {
   "name": "@zswarm/mcp",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "zSwarm MCP server — Zellij pane coordination",
+  "description": "zSwarm MCP server \u2014 Zellij pane coordination",
   "bin": {
     "zswarm-mcp": "./dist/mcp-server.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "mcp": "node dist/mcp-server.js"
+    "mcp": "node dist/mcp-server.js",
+    "prepublishOnly": "node ../../scripts/check-publish.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -21,5 +21,17 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": "./dist/mcp-server.js",
+    "./package.json": "./package.json"
   }
 }

@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expandHomePath } from "./binary.js";
@@ -24,7 +25,8 @@ export const DEFAULT_BUS_TIMEOUT_MS = 2_500;
  * approved set — it denies the new one silently. A build that gains a
  * permission has to ship under a new name; `-v2` is the ReadPaneContents one.
  */
-const PREBUILT_RELATIVE = join("plugin", "prebuilt", "zswarm-bus-v3.wasm");
+const PREBUILT_WASM = "zswarm-bus-v3.wasm";
+const PREBUILT_RELATIVE = join("packages", "wasm", PREBUILT_WASM);
 
 export type BusPane = {
   id: string;
@@ -149,6 +151,23 @@ export function parseChangedReply(stdout: string): BusChanged | null {
   return null;
 }
 
+/**
+ * The plugin ships as its own package so it can version independently: Zellij
+ * caches permission grants per URL, so a build asking for a new permission has
+ * to arrive under a new filename. Resolving by name works wherever the package
+ * manager put it; the walk-up is the fallback for a checkout with nothing
+ * installed yet.
+ */
+function resolvePluginPackage(): string | null {
+  try {
+    return createRequire(import.meta.url).resolve(
+      `@zswarm/wasm/${PREBUILT_WASM}`,
+    );
+  } catch {
+    return null;
+  }
+}
+
 /** Absolute path of the plugin wasm, or null when there is nothing to load. */
 export function resolveBusPlugin(
   env: NodeJS.ProcessEnv = process.env,
@@ -159,8 +178,10 @@ export function resolveBusPlugin(
   );
   if (explicit) return existsSync(explicit) ? resolve(explicit) : null;
 
-  // Walk up from this module so the same lookup works from src/, dist/, and
-  // from inside node_modules once the package is published.
+  const installed = resolvePluginPackage();
+  if (installed && existsSync(installed)) return installed;
+
+  // Walk up from this module so a checkout works before anything is installed.
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let depth = 0; depth < 8; depth++) {
     const candidate = join(dir, PREBUILT_RELATIVE);

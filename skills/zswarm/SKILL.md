@@ -34,6 +34,13 @@ exactly one session is live — the error appears the day a second one starts.
 Pass `session` to unblock the call now; set `ZSWARM_SESSION` in the MCP server
 config to fix it for good.
 
+Those hosts inherit no PATH either, so a bare `"command": "node"` can fail to
+launch at all (`exec: "node": executable file not found in $PATH`). Give the
+config an absolute interpreter path (`/path/to/node`) next to `ZSWARM_SESSION`:
+what the host does not inherit, it cannot infer. That failure shows up only in
+the host's own MCP log — zswarm prints nothing because it never ran — so if the
+tool is reported unavailable, read that log before re-checking config placement.
+
 CLI backup: `zswarm list|send|dump|tail|wait|status|keys|interrupt|spawn|close|broadcast|signal|signals|await|log|worktrees|unworktree|rename|focus|tabs|layout|stack|diff|checkpoint|bus|sessions`
 (same ops; package `@zswarm/cli`).
 
@@ -178,6 +185,19 @@ zSwarm is verified live against five CLI harnesses: **codex**, **cursor**, **pi*
 - **Replies can take > 60s.** Budget timeouts accordingly; a quiet pane is rarely a failed send.
 - **`wait --match` on full-screen TUIs is viewport-and-moment dependent.** Full-screen TUIs own the alternate screen (no scrollback; `--full` is identical). Viewports can transiently redraw during output. Prefer `wait --for idle` (verified 100% in 1 poll across all harnesses) or match pinned UI text.
 - **Re-testing**: Run `node scripts/harness-check.mjs <panes...>` to check live conformance.
+
+Reaching zswarm from a harness is a separate question from driving one:
+
+- **4 of the 5 have an MCP client**, and all four reached zswarm once the
+  session and the interpreter path were stated explicitly in the server config.
+- **1 ships no MCP client by design** — its docs argue a CLI plus a README is
+  the better interface. Use the `@zswarm/cli` backup there, or the generic MCP
+  bridge this repo ships at `.pi/extensions/zswarm-mcp.ts`, which spawns a stdio
+  MCP server and registers every tool it lists (`ZSWARM_MCP_SERVERS`, JSON, the
+  usual server-spec shape, points it at servers other than zswarm's).
+- **Being a target needs no integration.** All five are drivable from outside
+  with `send` / `dump` / `tail` / `wait` / `status`; that path is terminal I/O
+  and asks nothing of the harness.
 
 ## Prefix
 

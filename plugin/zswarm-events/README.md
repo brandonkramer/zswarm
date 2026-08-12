@@ -4,7 +4,7 @@ Zellij pushes pane and tab state into this plugin as it changes, so `zswarm list
 and `zswarm status` can read the current picture out of memory instead of
 spawning `dump-screen` per pane on a timer.
 
-The compiled artifact is committed at `plugin/prebuilt/zswarm-bus-v2.wasm`, so
+The compiled artifact is committed at `packages/wasm/zswarm-bus-v3.wasm`, so
 using the bus needs no Rust. This crate is only for changing it.
 
 ## Build
@@ -12,7 +12,7 @@ using the bus needs no Rust. This crate is only for changing it.
 ```bash
 rustup target add wasm32-wasip1
 cargo build --release --target wasm32-wasip1
-cp target/wasm32-wasip1/release/zswarm-events.wasm ../prebuilt/zswarm-bus-v2.wasm
+cp target/wasm32-wasip1/release/zswarm-events.wasm ../../packages/wasm/zswarm-bus-v3.wasm
 ```
 
 ## Run
@@ -27,8 +27,8 @@ By hand:
 
 ```bash
 zellij action launch-or-focus-plugin --configuration instance=zswarm-bus \
-  file:/abs/path/zswarm-bus-v2.wasm
-zellij pipe --plugin file:/abs/path/zswarm-bus-v2.wasm \
+  file:/abs/path/zswarm-bus-v3.wasm
+zellij pipe --plugin file:/abs/path/zswarm-bus-v3.wasm \
   --plugin-configuration instance=zswarm-bus --name zswarm -- status
 ```
 

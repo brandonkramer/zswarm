@@ -7,100 +7,114 @@ pane, dump short screen content. MCP tool: `zswarm`.
 
 | Package | Role |
 |---------|------|
+| `zswarm` | Everything below; what `npm i -g zswarm` installs |
 | `@zswarm/core` | Zellij client + shared `dispatchZswarm` |
 | `@zswarm/cli` | `zswarm` CLI |
 | `@zswarm/mcp` | MCP server (`zswarm` tool) |
+| `@zswarm/wasm` | Compiled Zellij event-bus plugin |
+| `@zswarm/pi` | MCP bridge for harnesses with extensions but no MCP client |
 
-Plugin manifests (`mcp.json`, `skills/`, `.cursor-plugin/`, …) stay at the repo root.
 
 ## Requirements
 
 - [Zellij](https://zellij.dev) ≥ 0.42 on PATH (or set `ZSWARM_BIN` / `ZSWARM_PATH`)
 - Node ≥ 20
-- pnpm
 
-## Install (dev)
-
-```bash
-cd /path/to/zswarm
-pnpm install
-pnpm run build
-```
-
-### Cursor
+## Install
 
 ```bash
-mkdir -p ~/.cursor/plugins/local
-# macOS / Linux:
-ln -sfn "$PWD" ~/.cursor/plugins/local/zswarm
-# Windows PowerShell:
-# New-Item -ItemType Junction -Path "$HOME\.cursor\plugins\local\zswarm" -Target (Get-Location)
+npm i -g zswarm
+zswarm list
 ```
 
-Enable the plugin; MCP launches via `bin/launch-mcp.mjs` → `packages/mcp`.
+That gives you the `zswarm` command, the `zswarm-mcp` server, and the event bus.
+Works on macOS, Linux, and Windows.
 
-### Claude Code
+Turn the bus on once per machine so `list` and `status` read pushed state
+instead of polling:
 
 ```bash
-claude plugin marketplace add "$PWD"
-claude plugin install zswarm@zswarm-local
+zswarm bus --install        # approve the prompt it opens
 ```
 
-### Codex
+### As an MCP server
 
-Point a local marketplace at this directory and enable `zswarm@zswarm-local`.
-Set MCP env if needed:
-
-```toml
-[plugins."zswarm@zswarm-local".mcp_servers.zswarm.env]
-# Windows:
-ZSWARM_BIN = '~/AppData/Local/Zellij/zellij.exe'
-# macOS (Homebrew or cargo):
-# ZSWARM_BIN = '/opt/homebrew/bin/zellij'
-# ZSWARM_BIN = '~/.cargo/bin/zellij'
-```
-
-### Session selection (MCP)
-
-zSwarm resolves the session in this order:
-
-```
-  session arg → ZSWARM_SESSION → ZELLIJ_SESSION_NAME → sole live session
-                                 (set only inside a pane)
-```
-
-So auto-detection depends on where the MCP host starts the server. A host that
-spawns it as a child of the pane process inherits `ZELLIJ_SESSION_NAME` and
-resolves correctly; hosts that spawn MCP servers outside the pane inherit no
-Zellij env at all. Verified live with two sessions running: the second kind
-failed every call with `zellij_session_ambiguous` until `ZSWARM_SESSION` was set.
-
-With exactly one live session this is invisible — resolution succeeds by
-elimination — and it only surfaces the day a second session exists. Set
-`ZSWARM_SESSION` in the MCP server config rather than relying on inheritance:
+`zswarm-mcp` speaks stdio and comes with the install above. The config below
+covers the two things a host may not pass through — see
+[MCP host configuration](#mcp-host-configuration):
 
 ```json
 {
   "mcpServers": {
     "zswarm": {
-      "command": "node",
-      "args": ["./bin/launch-mcp.mjs"],
+      "command": "/abs/path/to/zswarm-mcp",
       "env": { "ZSWARM_SESSION": "<session-name>" }
     }
   }
 }
 ```
 
-Hosts configured in TOML take the same key:
+Harnesses with extensions but no MCP client: `pi install npm:@zswarm/pi`.
 
-```toml
-[mcp_servers.zswarm.env]
-ZSWARM_SESSION = '<session-name>'
+### From a checkout
+
+```bash
+pnpm install
+pnpm run build
+pnpm run cli -- list
 ```
 
-The mechanism was already there — `mcp.json` declares `ZSWARM_SESSION` in
-`env_vars` and `bin/launch-mcp.mjs` forwards the environment through. Only the
-note that you need it was missing.
+Local plugin manifests (`mcp.json`, `skills/`, `.cursor-plugin/`, …) live at the
+repo root, and `bin/launch-mcp.mjs` is the entry point a host execs.
+
+
+### MCP host configuration
+
+Two things a host may not pass to the server it spawns, and cannot infer:
+
+| Missing | Symptom | Fix |
+|---|---|---|
+| Zellij env | `zellij_session_ambiguous` once a second session exists | set `ZSWARM_SESSION` |
+| `PATH` | `exec: "zswarm-mcp": executable file not found in $PATH` | absolute path, never a bare name |
+
+From a checkout the entry point is `bin/launch-mcp.mjs`, which needs an
+interpreter:
+
+```json
+{
+  "mcpServers": {
+    "zswarm": {
+      "command": "/abs/path/to/node",
+      "args": ["/abs/path/to/zswarm/bin/launch-mcp.mjs"],
+      "env": { "ZSWARM_SESSION": "<session-name>" }
+    }
+  }
+}
+```
+
+TOML hosts take the same key under `[mcp_servers.zswarm.env]`.
+
+Hosts that spawn the server inside the pane inherit both and need neither. With
+one live session the ambiguity is invisible — resolution succeeds by
+elimination — so it surfaces the day a second session starts. A launch failure
+appears only in the host's own MCP log, since zswarm never ran.
+
+Session resolution order:
+
+```
+  session arg → ZSWARM_SESSION → ZELLIJ_SESSION_NAME → sole live session
+                                 (set only inside a pane)
+```
+
+### Harnesses without MCP
+
+Some ship no MCP client by design, arguing a CLI plus a README is the better
+interface. `@zswarm/cli` covers those. For harnesses that take extensions,
+`packages/pi` is a generic MCP-to-extension bridge — it spawns a stdio server,
+enumerates `tools/list`, and registers everything it finds.
+
+Being driven *as a target* needs no integration at all: `send`, `dump`, `tail`,
+`wait`, and `status` are terminal I/O.
 
 ## Usage
 
@@ -148,36 +162,35 @@ zswarm({ op: "checkpoint", branch: "review-auth", cwd: "/path/to/repo", message:
 CLI (same ops):
 
 ```bash
-pnpm run cli -- list
-pnpm run cli -- send --to terminal_2 --body ping
-pnpm run cli -- send --to reviewer --body "look again" --submit auto
-pnpm run cli -- dump --to terminal_2 --max 4000
-pnpm run cli -- spawn --command "claude" --cwd /path/to/repo --name reviewer --floating
-pnpm run cli -- spawn --command "claude" --worktree review-auth --name reviewer
-pnpm run cli -- spawn --command "claude" --tab crew --name builder
-pnpm run cli -- spawn --command "claude" --new-tab --name solo
-pnpm run cli -- worktrees --cwd /path/to/repo
-pnpm run cli -- unworktree --branch review-auth --cwd /path/to/repo
-pnpm run cli -- wait --to terminal_5 --match DONE --timeout-ms 30000
-pnpm run cli -- keys --to terminal_5 --key "Ctrl c"
-pnpm run cli -- close --to terminal_5
-pnpm run cli -- broadcast --all --group claude --body "run tests"
-pnpm run cli -- tail --to terminal_5
-pnpm run cli -- status
-pnpm run cli -- signal --channel done --payload ok
-pnpm run cli -- signals
-pnpm run cli -- await --channel done --count 3
-pnpm run cli -- log --failed --limit 20
-pnpm run cli -- rename --to terminal_11 --name reviewer
-pnpm run cli -- rename --tab "Tab #1" --name crew
-pnpm run cli -- focus --to reviewer
-pnpm run cli -- tabs
-pnpm run cli -- layout --max 4000
-pnpm run cli -- stack --to terminal_2,terminal_3
-pnpm run cli -- diff --branch review-auth --cwd /path/to/repo
-pnpm run cli -- diff --path /path/to/repo-worktrees/review-auth --stat
-pnpm run cli -- checkpoint --branch review-auth --cwd /path/to/repo --message wip
-# after link: pnpm --dir packages/cli exec zswarm list
+zswarm list
+zswarm send --to terminal_2 --body ping
+zswarm send --to reviewer --body "look again" --submit auto
+zswarm dump --to terminal_2 --max 4000
+zswarm spawn --command "claude" --cwd /path/to/repo --name reviewer --floating
+zswarm spawn --command "claude" --worktree review-auth --name reviewer
+zswarm spawn --command "claude" --tab crew --name builder
+zswarm spawn --command "claude" --new-tab --name solo
+zswarm worktrees --cwd /path/to/repo
+zswarm unworktree --branch review-auth --cwd /path/to/repo
+zswarm wait --to terminal_5 --match DONE --timeout-ms 30000
+zswarm keys --to terminal_5 --key "Ctrl c"
+zswarm close --to terminal_5
+zswarm broadcast --all --group claude --body "run tests"
+zswarm tail --to terminal_5
+zswarm status
+zswarm signal --channel done --payload ok
+zswarm signals
+zswarm await --channel done --count 3
+zswarm log --failed --limit 20
+zswarm rename --to terminal_11 --name reviewer
+zswarm rename --tab "Tab #1" --name crew
+zswarm focus --to reviewer
+zswarm tabs
+zswarm layout --max 4000
+zswarm stack --to terminal_2,terminal_3
+zswarm diff --branch review-auth --cwd /path/to/repo
+zswarm diff --path /path/to/repo-worktrees/review-auth --stat
+zswarm checkpoint --branch review-auth --cwd /path/to/repo --message wip
 ```
 
 ### Ops
@@ -251,89 +264,41 @@ returns the whole screen. Fields: `text`, `reset`, `fresh`, `chars`.
 
 ### Event bus
 
-`list` and `status` normally cost one zellij process per question, plus two
-`dump-screen` calls per pane for `status`. A small Zellij plugin can hold that
-state instead: Zellij pushes pane and tab changes into it, and one `zellij pipe`
-call reads the current picture back out of memory.
+`list` and `status` normally cost a zellij process per question, plus two
+`dump-screen` calls per pane for `status`. A Zellij plugin can hold that state
+instead — Zellij pushes changes into it, and one `zellij pipe` reads it back.
 
 ```bash
-zswarm bus --install   # loads the plugin, approve its permission prompt once
-zswarm bus             # enabled? ready? how many pushes so far?
-zswarm bus --clear     # forget it; everything goes back to polling
+zswarm bus --install   # loads the plugin, approve the prompt once
+zswarm bus             # enabled? ready? how many pushes?
+zswarm bus --clear     # forget it; back to polling
 ```
 
-Install is remembered in `~/.zswarm/bus.json`, so until you run it the bus is
-off and nothing pays for a pipe that was never going to answer. Every reply
-carries `source: "plugin" | "zellij"` so you can tell which path served it.
+Off until installed (remembered in `~/.zswarm/bus.json`), and every reply
+carries `source: "plugin" | "zellij"`. The pane `--install` opens only renders
+the permission prompt — close it once approved.
 
-The pane `--install` opens exists only to render the permission prompt — close
-it once you have approved. Later calls relaunch the plugin headless, and the
-first one after a relaunch waits for Zellij to push it a manifest.
+| Path | Served by | Measured |
+|---|---|---|
+| `list`, `status` panes | pushed state, free to read | — |
+| `status` sampling | batched scrollback, one pipe | 0.055s + 0.0143s/pane vs 0.050s/pane polled |
+| `wait` | one pipe held open, 50ms polls | 3348ms / 1 process vs 3782ms / 6 |
+| `status --since-last` | "moved since you last asked" | 0.30s vs 0.84s |
+| `dump`, `tail` | polling | one pane is cheaper as a process |
 
-What the bus can and cannot serve:
+`--since-last` answers a different question than sampling does — ask twice
+quickly and everything reads idle — so it is opt-in.
 
-```
-  pushed by Zellij         read on demand         not available
-  ────────────────         ──────────────         ─────────────
-  pane opened / closed     pane screen text       pane cwd
-  pane exited              (get_pane_scrollback)  pane command
-  focus moved                                     floating
-  tab added / renamed
+The manifest carries no command or cwd, so a bus-served `list` omits `command`
+rather than reporting null; `--verbose` and `status --to <command>` always poll.
+A `regex` needle the plugin declines, and `wait` falls back on its own.
 
-  → list, status           → status sampling      → list --verbose
-```
-
-Two different mechanisms. Pane state is **pushed**, so reading it is free.
-Screen text is **pulled** — the same work `dump-screen` does, just done inside
-the server so N panes cost one process instead of N. Measured here:
-
-```
-  scrollback pipe   0.055s fixed + 0.0143s per pane
-  dump-screen                       0.050s per pane
-  → a loss for one pane, a win from two upward
-```
-
-So `status` sampling batches through the plugin, while `dump` and `tail` keep
-polling: they read one pane, where polling is faster.
-
-`wait` works a third way. The plugin **holds the pipe open** and answers only
-once the condition is met, so one process covers the whole wait and it polls far
-tighter than spawning a process allows:
-
-```
-                 detection   processes
-  polling          3782ms        6       600ms poll interval
-  held pipe        3348ms        1        50ms poll interval
-```
-
-measured against the same event. Over a 60s wait that is ~100 processes against
-one. A `regex` needle the plugin declines — it has no engine — and the caller
-falls back to its own loop automatically.
-
-`status --since-last` drops the sample gap entirely by asking the plugin what
-moved since the previous call: **0.30s against 0.84s**. It answers a different
-question, though — "moved since you last asked" rather than "moved in the last
-400ms" — so two calls in quick succession read everything as idle. Right for a
-polling loop, wrong for a one-shot check, which is why it is opt-in.
-
-Because the manifest carries no command, a bus-served `list` omits `command`
-rather than reporting it as null, and `status --to <command>` falls back to
-polling. `--verbose` always polls.
-
-Screen text comes back as viewport lines padded to the terminal width, where
-`dump-screen` returns them ragged. `normalizeScreen` erases exactly that, and
-every consumer normalizes before comparing — verified identical across live
-panes. Any path that would hand raw text to a caller keeps polling.
-
-Rebuilding the plugin needs Rust; the compiled artifact is committed so users
-do not:
+Rebuilding needs Rust; the artifact is committed so users do not:
 
 ```bash
-cd plugin/zswarm-events
-rustup target add wasm32-wasip1
-cargo build --release --target wasm32-wasip1
-cp target/wasm32-wasip1/release/zswarm-events.wasm ../prebuilt/zswarm-bus-v2.wasm
+pnpm run build:plugin      # needs Rust + the wasm32-wasip1 target
 ```
+
 
 `signal` / `signals` / `await` use durable channels under `ZSWARM_STATE_DIR`
 (default `~/.zswarm`: `log.jsonl`, `signals.json`, `cursors.json`).
@@ -381,46 +346,28 @@ Remote crew over SSH: `ZSWARM_SSH=user@host` routes every zellij call through
 ssh (`BatchMode=yes` unless you set your own). Optional: `ZSWARM_SSH_BIN`,
 `ZSWARM_SSH_OPTS` (whitespace split), `ZSWARM_REMOTE_BIN` (default `zellij`).
 
-## Harness Conformance
+## Tested harnesses
 
-zSwarm has been verified live against five CLI harnesses in one Zellij session: **codex**, **cursor**, **pi**, **opencode**, and **gemini**.
+Verified live against codex, cursor, pi, opencode, and gemini. All work as
+targets; `codex` needs a second Enter to submit, which zSwarm handles itself.
 
-| Harness | Submit Strategy | Read Ops (`dump`, `tail`, `status`, `wait --for idle`, `expect`) | Notes |
-|---------|-----------------|--------------------------------------------------|-------|
-| `codex` | `double-enter` | Verified | TUI composer requires a second Enter; zSwarm selects `double-enter` automatically |
-| `cursor` | `auto` | Verified | Standard TUI submit |
-| `pi` | `auto` | Verified | Standard TUI submit |
-| `opencode` | `auto` | Verified | Standard TUI submit |
-| `gemini` | `auto` | Verified | Standard TUI submit |
+Re-run against live panes: `node scripts/harness-check.mjs <pane> ...`
 
-Read operations (`dump`, `tail`, `status`, `wait --for idle`, and `expect`) work across all five harnesses. `send` lands on all five, with `codex` automatically resolved to `submit=double-enter`.
-
-### Operational Considerations
-
-- **Replies can take longer than a minute.** Budget timeouts accordingly (e.g. 120s per task); do not treat a quiet pane as a failed prompt delivery.
-- **`wait --match` on full-screen TUIs is viewport-and-moment dependent.** Full-screen CLI TUI apps own the alternate screen, so there is no scrollback and `--full` returns identical output (measured identical). A reply can drop out of the viewport transiently during redrawing between polls. Prefer `wait --for idle`, which worked on every harness in one poll, or match on something the harness leaves pinned on screen.
-
-### Conformance Verification
-
-To re-run multi-harness conformance checks against live panes:
-
-```bash
-node scripts/harness-check.mjs <pane-1> <pane-2> ...
-```
 
 ## Env
 
 | Variable | Purpose |
 |----------|---------|
 | `ZSWARM_BIN` / `ZSWARM_PATH` | Absolute path to `zellij` / `zellij.exe` |
-| `ZSWARM_SESSION` | Default Zellij session name; effectively required for MCP hosts that spawn the server outside the Zellij pane (see [Session selection](#session-selection-mcp)) |
+| `ZSWARM_SESSION` | Default Zellij session name; effectively required for MCP hosts that spawn the server outside the Zellij pane (see [MCP host configuration](#mcp-host-configuration)) |
 | `ZELLIJ_SESSION_NAME` | Used when already inside Zellij; only set inside a pane |
+| `ZSWARM_MCP_SERVERS` | JSON map of stdio MCP servers for the bundled extension bridge (default: zswarm's own server) |
 | `ZSWARM_SELF_PANE` | Pane to treat as zSwarm's own (defaults to `ZELLIJ_PANE_ID`; `none` disables the guard) |
 | `ZSWARM_WORKTREE_ROOT` | Directory for linked worktrees (default `<repo>-worktrees` beside the repo) |
 | `ZSWARM_GIT_BIN` | Absolute path to `git` / `git.exe` when not on PATH |
 | `ZSWARM_STATE_DIR` | Durable state dir for log / signals / tail cursors / bus marker (default `~/.zswarm`) |
 | `ZSWARM_BUS` | `0` never asks the event bus; `1` asks it without `bus --install` |
-| `ZSWARM_BUS_PLUGIN` | Path to the plugin wasm (default `plugin/prebuilt/zswarm-bus-v2.wasm`) |
+| `ZSWARM_BUS_PLUGIN` | Path to the plugin wasm (default: resolved from `@zswarm/wasm`) |
 | `ZSWARM_LOG` | Set to `0` to disable the delivery log |
 | `ZSWARM_READONLY` | `1` blocks write ops (see Policy) |
 | `ZSWARM_ALLOW_PANES` | Comma allow-list for pane id / title substring |
