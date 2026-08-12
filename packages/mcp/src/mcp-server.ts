@@ -17,15 +17,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "zswarm",
       description:
-        "zSwarm Zellij pane coordination (op=list|send|dump|sessions). list panes, send text into a CLI pane (paste+Enter), dump scrollback. Local Zellij only.",
+        "zSwarm Zellij pane coordination (op=list|send|dump|wait|keys|interrupt|spawn|close|sessions). List panes, send text into a CLI pane (paste+Enter), block until a pane goes idle or prints a match, send raw keys, open or close panes. Local Zellij only.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
         properties: {
           op: {
             type: "string",
-            enum: ["list", "send", "dump", "sessions"],
-            description: "list | send | dump | sessions",
+            enum: [
+              "list",
+              "send",
+              "dump",
+              "wait",
+              "keys",
+              "interrupt",
+              "spawn",
+              "close",
+              "sessions",
+            ],
+            description:
+              "list | send | dump | wait | keys | interrupt | spawn | close | sessions",
           },
           session: {
             type: "string",
@@ -35,7 +46,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           to: {
             type: "string",
             description:
-              "send/dump: pane id (3 / terminal_3) or unique title/command",
+              "send/dump/wait/keys/interrupt/close: pane id (3 / terminal_3) or unique title/command",
           },
           body: {
             type: "string",
@@ -55,21 +66,114 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           full: {
             type: "boolean",
-            description: "dump: include full scrollback (default false)",
+            description: "dump/wait: include full scrollback (default false)",
           },
           max: {
             type: "number",
             description:
-              "dump: max text chars (default 8000, keeps tail; 0 = unlimited)",
+              "dump/wait: max text chars (dump 8000, wait 2000; keeps tail, 0 = unlimited)",
           },
           head: {
             type: "boolean",
             description: "dump: keep start instead of tail when truncating",
           },
+          for: {
+            type: "string",
+            enum: ["idle", "match", "either"],
+            description:
+              "wait: stop on quiet screen, on match, or whichever lands first (default: match if match= given, else idle)",
+          },
+          match: {
+            type: "string",
+            description: "wait: text to look for in the pane screen",
+          },
+          regex: {
+            type: "boolean",
+            description: "wait: treat match as a regex (default false)",
+          },
+          ignoreCase: {
+            type: "boolean",
+            description: "wait: case-insensitive match (default false)",
+          },
+          idleMs: {
+            type: "number",
+            description:
+              "wait: screen must be unchanged this long to count as idle (default 2000)",
+          },
+          pollMs: {
+            type: "number",
+            description: "wait: poll interval (default 600)",
+          },
+          timeoutMs: {
+            type: "number",
+            description: "wait: give up after this long (default 60000)",
+          },
+          keys: {
+            anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+            description:
+              'keys: key specs, one per array entry — "Ctrl c", "Esc", "F1", "Up". A bare string is one key; comma-separate for several.',
+          },
+          chars: {
+            type: "string",
+            description:
+              "keys: literal characters to type instead of key specs (no Enter unless enter=true)",
+          },
+          enter: {
+            type: "boolean",
+            description: "keys: press Enter after the keys/chars",
+          },
+          hard: {
+            type: "boolean",
+            description:
+              "interrupt: send Ctrl c instead of the default Esc",
+          },
+          command: {
+            anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+            description:
+              "spawn: program to run in the new pane, argv-style (no shell). Empty starts a plain shell.",
+          },
+          cwd: {
+            type: "string",
+            description: "spawn: working directory for the new pane",
+          },
+          name: {
+            type: "string",
+            description: "spawn: pane (or tab) name",
+          },
+          direction: {
+            type: "string",
+            enum: ["right", "left", "up", "down"],
+            description: "spawn: split direction",
+          },
+          floating: {
+            type: "boolean",
+            description: "spawn: open the pane floating",
+          },
+          tab: {
+            type: "boolean",
+            description: "spawn: open a new tab instead of splitting",
+          },
+          layout: {
+            type: "string",
+            description: "spawn: layout name for the new tab (tab=true)",
+          },
+          closeOnExit: {
+            type: "boolean",
+            description: "spawn: close the pane when its command exits",
+          },
+          allowSelf: {
+            type: "boolean",
+            description:
+              "send/keys/close: allow targeting zswarm's own pane (default false)",
+          },
+          force: {
+            type: "boolean",
+            description: "send/keys: write to a pane whose command has exited",
+          },
           verbose: {
             type: "boolean",
             description:
-              "list/send: include cwd/focus/exited/floating (and pane on send)",
+              "list/send/spawn: include cwd/focus/exited/floating (and pane on send/spawn)",
           },
         },
         required: ["op"],

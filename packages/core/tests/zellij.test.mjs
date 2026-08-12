@@ -87,6 +87,7 @@ test("formatPeerMessage and argv builders", () => {
     "paste",
     "--pane-id",
     "terminal_3",
+    "--",
     "hello",
   ]);
   assert.deepEqual(client.buildSendEnterArgs("sess", "terminal_0"), [

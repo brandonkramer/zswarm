@@ -33,6 +33,30 @@ export type ZellijSessionResolve = {
   source: "arg" | "env_zswarm" | "env_zellij" | "sole_live";
 };
 
+export type PaneDirection = "right" | "left" | "up" | "down";
+
+export type NewPaneInput = {
+  session: string;
+  command?: string[];
+  cwd?: string | null;
+  name?: string | null;
+  direction?: PaneDirection | null;
+  floating?: boolean;
+  closeOnExit?: boolean;
+  tabId?: number | null;
+  width?: string | null;
+  height?: string | null;
+};
+
+export type NewTabInput = {
+  session: string;
+  command?: string[];
+  cwd?: string | null;
+  name?: string | null;
+  layout?: string | null;
+  closeOnExit?: boolean;
+};
+
 export class ZellijError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
@@ -105,6 +129,20 @@ export function resolveZellijBinary(
     if (existsSync(cand)) return cand;
   }
   return process.platform === "win32" ? "zellij.exe" : "zellij";
+}
+
+/**
+ * Pane hosting the caller, so writes can refuse to loop back into it.
+ * `ZSWARM_SELF_PANE` wins; Zellij exports `ZELLIJ_PANE_ID` inside a pane.
+ */
+export function resolveSelfPaneId(
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const raw = (env.ZSWARM_SELF_PANE ?? env.ZELLIJ_PANE_ID ?? "").trim();
+  if (!raw || raw.toLowerCase() === "none") return null;
+  if (/^\d+$/.test(raw)) return `terminal_${raw}`;
+  if (/^(terminal|plugin)_\d+$/i.test(raw)) return raw.toLowerCase();
+  return null;
 }
 
 export function sanitizeZellijEnv(
@@ -191,6 +229,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   const zellijPath = options.zellijPath ?? resolveZellijBinary(env);
   const exec = options.exec ?? defaultExec(zellijPath, env);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const selfPaneId = resolveSelfPaneId(env);
 
   async function run(args: string[], label: string): Promise<ZellijExecResult> {
     const result = await exec(args, { timeoutMs });
@@ -289,15 +328,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
 
   async function listPanes(session: string): Promise<ZellijPane[]> {
     const result = await run(
-      [
-        ...sessionPrefix(session),
-        "action",
-        "list-panes",
-        "--json",
-        "--command",
-        "--state",
-        "--tab",
-      ],
+      buildListPanesArgs(session),
       "zellij action list-panes",
     );
     let parsed: unknown;
@@ -404,25 +435,11 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
       throw new ZellijError("missing_body", "inject text required");
     }
     await run(
-      [
-        ...sessionPrefix(input.session),
-        "action",
-        "paste",
-        "--pane-id",
-        paneId,
-        text,
-      ],
+      buildPasteArgs(input.session, paneId, text),
       "zellij action paste",
     );
     await run(
-      [
-        ...sessionPrefix(input.session),
-        "action",
-        "send-keys",
-        "--pane-id",
-        paneId,
-        "Enter",
-      ],
+      buildSendEnterArgs(input.session, paneId),
       "zellij action send-keys",
     );
     return { paneId, session: input.session };
@@ -434,16 +451,87 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     full?: boolean;
   }): Promise<{ paneId: string; session: string; text: string }> {
     const paneId = normalizePaneId(input.paneId);
-    const args = [
-      ...sessionPrefix(input.session),
-      "action",
-      "dump-screen",
-      "--pane-id",
-      paneId,
-    ];
-    if (input.full) args.push("--full");
-    const result = await run(args, "zellij action dump-screen");
+    const result = await run(
+      buildDumpArgs(input.session, paneId, input.full),
+      "zellij action dump-screen",
+    );
     return { paneId, session: input.session, text: result.stdout };
+  }
+
+  async function sendKeys(input: {
+    session: string;
+    paneId: string;
+    keys: string[];
+  }): Promise<{ paneId: string; session: string; keys: string[] }> {
+    const paneId = normalizePaneId(input.paneId);
+    if (input.keys.length === 0) {
+      throw new ZellijError("bad_key", "no keys given");
+    }
+    await run(
+      buildSendKeysArgs(input.session, paneId, input.keys),
+      "zellij action send-keys",
+    );
+    return { paneId, session: input.session, keys: input.keys };
+  }
+
+  async function writeChars(input: {
+    session: string;
+    paneId: string;
+    chars: string;
+  }): Promise<{ paneId: string; session: string }> {
+    const paneId = normalizePaneId(input.paneId);
+    if (!input.chars) {
+      throw new ZellijError("missing_body", "chars required");
+    }
+    await run(
+      buildWriteCharsArgs(input.session, paneId, input.chars),
+      "zellij action write-chars",
+    );
+    return { paneId, session: input.session };
+  }
+
+  async function closePane(input: {
+    session: string;
+    paneId: string;
+  }): Promise<{ paneId: string; session: string }> {
+    const paneId = normalizePaneId(input.paneId);
+    await run(
+      buildClosePaneArgs(input.session, paneId),
+      "zellij action close-pane",
+    );
+    return { paneId, session: input.session };
+  }
+
+  /** `new-pane` prints the created pane id; `new-tab` prints a tab id instead. */
+  function parseCreatedPaneId(stdout: string): string | null {
+    const match = /(terminal|plugin)_\d+/i.exec(stdout);
+    return match ? match[0].toLowerCase() : null;
+  }
+
+  async function newPane(
+    input: NewPaneInput,
+  ): Promise<{ session: string; paneId: string | null; stdout: string }> {
+    const result = await run(
+      buildNewPaneArgs(input),
+      "zellij action new-pane",
+    );
+    return {
+      session: input.session,
+      paneId: parseCreatedPaneId(result.stdout),
+      stdout: result.stdout.trim(),
+    };
+  }
+
+  async function newTab(
+    input: NewTabInput,
+  ): Promise<{ session: string; tabId: number | null; stdout: string }> {
+    const result = await run(buildNewTabArgs(input), "zellij action new-tab");
+    const digits = /-?\d+/.exec(result.stdout);
+    return {
+      session: input.session,
+      tabId: digits ? Number(digits[0]) : null,
+      stdout: result.stdout.trim(),
+    };
   }
 
   /** Visible prefix so peer CLIs can tell zSwarm injects from human prompts. */
@@ -475,6 +563,9 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
       "paste",
       "--pane-id",
       normalizePaneId(paneId),
+      // Without the end-of-options marker, a body starting with `-` is parsed
+      // as a zellij flag instead of being typed.
+      "--",
       text,
     ];
   }
@@ -506,20 +597,107 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     return args;
   }
 
+  function buildSendKeysArgs(
+    session: string,
+    paneId: string,
+    keys: string[],
+  ): string[] {
+    for (const key of keys) {
+      if (key.length > 1 && key.startsWith("-")) {
+        throw new ZellijError("bad_key", `key "${key}" looks like a flag`);
+      }
+    }
+    return [
+      ...sessionPrefix(session),
+      "action",
+      "send-keys",
+      "--pane-id",
+      normalizePaneId(paneId),
+      ...keys,
+    ];
+  }
+
+  function buildWriteCharsArgs(
+    session: string,
+    paneId: string,
+    chars: string,
+  ): string[] {
+    return [
+      ...sessionPrefix(session),
+      "action",
+      "write-chars",
+      "--pane-id",
+      normalizePaneId(paneId),
+      "--",
+      chars,
+    ];
+  }
+
+  function buildClosePaneArgs(session: string, paneId: string): string[] {
+    return [
+      ...sessionPrefix(session),
+      "action",
+      "close-pane",
+      "--pane-id",
+      normalizePaneId(paneId),
+    ];
+  }
+
+  function buildNewPaneArgs(input: NewPaneInput): string[] {
+    const args = [...sessionPrefix(input.session), "action", "new-pane"];
+    if (input.cwd) args.push("--cwd", input.cwd);
+    if (input.name) args.push("--name", input.name);
+    if (input.direction) args.push("--direction", input.direction);
+    if (input.floating) args.push("--floating");
+    if (input.width) args.push("--width", input.width);
+    if (input.height) args.push("--height", input.height);
+    if (typeof input.tabId === "number") {
+      args.push("--tab-id", String(input.tabId));
+    }
+    if (input.closeOnExit) args.push("--close-on-exit");
+    if (input.command && input.command.length > 0) {
+      args.push("--", ...input.command);
+    }
+    return args;
+  }
+
+  function buildNewTabArgs(input: NewTabInput): string[] {
+    const args = [...sessionPrefix(input.session), "action", "new-tab"];
+    if (input.cwd) args.push("--cwd", input.cwd);
+    if (input.name) args.push("--name", input.name);
+    if (input.layout) args.push("--layout", input.layout);
+    if (input.closeOnExit) args.push("--close-on-exit");
+    if (input.command && input.command.length > 0) {
+      args.push("--", ...input.command);
+    }
+    return args;
+  }
+
   return {
     zellijPath,
+    selfPaneId,
     listSessions,
     resolveSession,
     listPanes,
     resolvePane,
     injectPane,
     dumpPane,
+    sendKeys,
+    writeChars,
+    closePane,
+    newPane,
+    newTab,
     normalizePaneId,
     formatPeerMessage,
     buildListPanesArgs,
     buildPasteArgs,
     buildSendEnterArgs,
     buildDumpArgs,
+    buildSendKeysArgs,
+    buildWriteCharsArgs,
+    buildClosePaneArgs,
+    buildNewPaneArgs,
+    buildNewTabArgs,
   };
 }
 
