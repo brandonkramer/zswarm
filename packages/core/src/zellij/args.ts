@@ -36,6 +36,24 @@ export type PipeInput = {
   payload: string;
 };
 
+/** JSON pipe payload for a multi-pane scrollback read. Keys match the frozen contract. */
+export type ScrollbackRequest = { panes: string[]; full?: boolean };
+
+/**
+ * Emit `{op, panes, full}` in that order. Callers must not hand-roll this JSON —
+ * a payload that does not start with `{` is treated as a bare-word bus command.
+ */
+export function scrollbackPayload(req: ScrollbackRequest): string {
+  if (req.panes.length === 0) {
+    throw new ZellijError("bad_arg", "scrollback panes must be a non-empty list");
+  }
+  return JSON.stringify({
+    op: "scrollback",
+    panes: req.panes,
+    full: req.full === true,
+  });
+}
+
 export type LaunchPluginInput = {
   session: string;
   url: string;

@@ -8,6 +8,9 @@ license = "MIT"
 
 [dependencies]
 zellij-tile = "0.44"
+# Scrollback replies carry arbitrary terminal text; hand-rolled escaping is not
+# worth the risk when zellij-tile already pulls serde in.
+serde_json = "1"
 
 [profile.release]
 opt-level = "z"

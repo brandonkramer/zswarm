@@ -11,6 +11,11 @@ export type StatusSource = {
   session: string;
   panes: ZellijPane[];
   source: "plugin" | "zellij";
+  /**
+   * Batched screen reader. Returns null when it cannot serve the whole set, and
+   * status falls back to one `dump-screen` per pane.
+   */
+  readScreens?: (paneIds: string[]) => Promise<Map<string, string> | null>;
 };
 
 /** Lines that mean the pane wants an answer rather than more time. */
@@ -82,22 +87,38 @@ export async function peerStatus(
     };
   }
   const sampleMs = Math.max(50, requested);
-  const before = new Map<string, string>();
-  for (const pane of targets) {
-    if (pane.exited) continue;
-    const dumped = await client.dumpPane({ session, paneId: pane.id });
-    before.set(pane.id, normalizeScreen(dumped.text));
-  }
+  const live = targets.filter((pane) => !pane.exited).map((pane) => pane.id);
+
+  /**
+   * One batched read when the bus can serve it, otherwise a process per pane.
+   * Both paths normalize, which is what makes them comparable: the plugin pads
+   * lines to the terminal width and `dump-screen` does not.
+   */
+  const sample = async (): Promise<Map<string, string>> => {
+    const batched = supplied?.readScreens
+      ? await supplied.readScreens(live)
+      : null;
+    if (batched) {
+      return new Map(
+        [...batched].map(([id, text]) => [id, normalizeScreen(text)]),
+      );
+    }
+    const screens = new Map<string, string>();
+    for (const id of live) {
+      const dumped = await client.dumpPane({ session, paneId: id });
+      screens.set(id, normalizeScreen(dumped.text));
+    }
+    return screens;
+  };
+
+  const before = await sample();
   await clock.sleep(sampleMs);
+  const afterScreens = await sample();
 
   const peers = [];
   for (const pane of targets) {
     const first = before.get(pane.id) ?? "";
-    const after = pane.exited
-      ? first
-      : normalizeScreen(
-          (await client.dumpPane({ session, paneId: pane.id })).text,
-        );
+    const after = pane.exited ? first : (afterScreens.get(pane.id) ?? "");
     const state = classify({ exited: pane.exited, before: first, after });
     const entry: Record<string, unknown> = {
       id: pane.id,

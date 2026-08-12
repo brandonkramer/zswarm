@@ -17,12 +17,17 @@ import {
   buildSendKeysArgs,
   buildStackPanesArgs,
   buildWriteCharsArgs,
+  scrollbackPayload,
   type LaunchPluginInput,
   type NewPaneInput,
   type NewTabInput,
   type PipeInput,
 } from "./args.js";
-import { DEFAULT_BUS_TIMEOUT_MS, parseBusReply } from "./bus.js";
+import {
+  DEFAULT_BUS_TIMEOUT_MS,
+  parseBusReply,
+  parseScrollbackReply,
+} from "./bus.js";
 import { parseTabList, resolveTab, type ZellijTab } from "./tabs.js";
 import { createSshExec } from "../exec.js";
 import {
@@ -307,6 +312,34 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     });
   }
 
+  /**
+   * Multi-pane scrollback over the same pipe. Missing/unresponsive plugin is a
+   * value, not a throw — same fallback contract as pipePlugin. Wait on the JSON
+   * reply, not process exit: zellij pipe answers in ~40ms but stays resident
+   * when it has no terminal.
+   */
+  async function scrollbackPlugin(input: {
+    session: string;
+    url: string;
+    configKey: string;
+    panes: string[];
+    full?: boolean;
+    timeoutMs?: number;
+  }): Promise<{ code: number; stdout: string; stderr: string }> {
+    return exec(
+      buildPipeArgs({
+        session: input.session,
+        url: input.url,
+        configKey: input.configKey,
+        payload: scrollbackPayload({ panes: input.panes, full: input.full }),
+      }),
+      {
+        timeoutMs: input.timeoutMs ?? DEFAULT_BUS_TIMEOUT_MS,
+        until: (stdout) => parseScrollbackReply(stdout) !== null,
+      },
+    );
+  }
+
   async function launchPlugin(
     input: LaunchPluginInput,
   ): Promise<{ session: string; paneId: string | null }> {
@@ -349,6 +382,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     dumpLayout,
     stackPanes,
     pipePlugin,
+    scrollbackPlugin,
     launchPlugin,
     resolveTab,
     normalizePaneId,

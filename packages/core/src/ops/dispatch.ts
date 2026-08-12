@@ -12,7 +12,7 @@ import {
 import { createStateStore, type StateStore } from "../state.js";
 import { busToPanes } from "../zellij/bus.js";
 import { broadcast } from "./broadcast.js";
-import { busOp, busSnapshot } from "./bus.js";
+import { busOp, busScreens, busSnapshot } from "./bus.js";
 import {
   dumpLayoutOp,
   focusTarget,
@@ -289,6 +289,9 @@ export async function dispatchZswarm(
               session,
               panes: busToPanes(bus.snapshot),
               source: "plugin" as const,
+              // Sampling is 2N dumps; the plugin reads them all in one pipe.
+              readScreens: (paneIds: string[]) =>
+                busScreens(client, state(), session, paneIds, clock, deps.env),
             }
           : null;
         const only = typeof args.to === "string" ? args.to.trim() : "";

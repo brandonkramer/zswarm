@@ -37,6 +37,23 @@ struct PaneRow {
     tab: usize,
 }
 
+/// Callers treat any reply without `ok: true` as no reply and fall back to
+/// polling, so an error still has to be well-formed JSON on one line.
+fn error_json(message: &str) -> String {
+    serde_json::json!({ "ok": false, "error": message }).to_string()
+}
+
+/// `terminal_3` / `plugin_1` — the same typed ids the CLI and MCP surface use.
+fn parse_pane_id(raw: &str) -> Option<PaneId> {
+    let (kind, number) = raw.split_once('_')?;
+    let id = number.parse::<u32>().ok()?;
+    match kind {
+        "terminal" => Some(PaneId::Terminal(id)),
+        "plugin" => Some(PaneId::Plugin(id)),
+        _ => None,
+    }
+}
+
 fn escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -91,6 +108,49 @@ impl State {
         )
     }
 
+    /// Read N pane screens inside the server, so the caller spawns one process
+    /// instead of one `dump-screen` per pane. Unknown ids are reported in
+    /// `missing` rather than failing the whole batch — a pane closing between
+    /// the ask and the read is normal, not an error.
+    fn scrollback_json(&self, request: &serde_json::Value) -> String {
+        let full = request
+            .get("full")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let requested: Vec<&str> = request
+            .get("panes")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| items.iter().filter_map(serde_json::Value::as_str).collect())
+            .unwrap_or_default();
+
+        let mut panes = Vec::new();
+        let mut missing = Vec::new();
+        for id in requested {
+            let Some(pane_id) = parse_pane_id(id) else {
+                missing.push(id);
+                continue;
+            };
+            match get_pane_scrollback(pane_id, full) {
+                Ok(contents) => panes.push(serde_json::json!({
+                    "id": id,
+                    "viewport": contents.viewport,
+                    "above": contents.lines_above_viewport,
+                    "below": contents.lines_below_viewport,
+                })),
+                Err(_) => missing.push(id),
+            }
+        }
+
+        serde_json::json!({
+            "ok": true,
+            "source": "plugin",
+            "ready": self.pane_updates > 0,
+            "panes": panes,
+            "missing": missing,
+        })
+        .to_string()
+    }
+
     fn counters_json(&self) -> String {
         format!(
             "{{\"ok\":true,\"paneUpdates\":{},\"tabUpdates\":{},\"panes\":{}}}",
@@ -105,9 +165,13 @@ impl ZellijPlugin for State {
     fn load(&mut self, _configuration: BTreeMap<String, String>) {
         // ReadApplicationState: pane/tab events. ReadCliPipes: answering a
         // `zellij pipe` caller at all (cli_pipe_output / unblock_cli_pipe_input).
+        // ReadPaneContents is a third, separate grant for get_pane_scrollback.
+        // Adding it to an already-approved URL is silently denied, so a build
+        // that gains a permission has to ship under a new filename.
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ReadCliPipes,
+            PermissionType::ReadPaneContents,
         ]);
         subscribe(&[EventType::PaneUpdate, EventType::TabUpdate]);
     }
@@ -165,9 +229,21 @@ impl ZellijPlugin for State {
                 return false;
             }
         };
-        let body = match query.as_str() {
-            "events" => self.counters_json(),
-            _ => self.panes_json(),
+        // A payload that opens a brace is a structured request; anything else
+        // stays a bare word, so the original `status` / `events` pipes still work.
+        let body = if query.starts_with('{') {
+            match serde_json::from_str::<serde_json::Value>(&query) {
+                Ok(request) => match request.get("op").and_then(serde_json::Value::as_str) {
+                    Some("scrollback") => self.scrollback_json(&request),
+                    other => error_json(&format!("unknown op {:?}", other)),
+                },
+                Err(err) => error_json(&format!("bad json: {}", err)),
+            }
+        } else {
+            match query.as_str() {
+                "events" => self.counters_json(),
+                _ => self.panes_json(),
+            }
         };
         // First argument is the CLI pipe id (a uuid), not the `--name` value.
         cli_pipe_output(id, &format!("{}\n", body));

@@ -69,6 +69,7 @@ function busClient(options = {}) {
     reply = REPLY,
     coldFirst = false,
     panesJson = "[]",
+    scrollback = null,
   } = options;
   const calls = [];
   let asked = 0;
@@ -83,6 +84,24 @@ function busClient(options = {}) {
         return { code: 0, stdout: panesJson, stderr: "" };
       }
       if (args.includes("pipe")) {
+        const payload = args[args.length - 1];
+        if (typeof payload === "string" && payload.includes('"scrollback"')) {
+          if (!scrollback) return { code: 0, stdout: "", stderr: "" };
+          const asked = JSON.parse(payload).panes;
+          const panes = asked
+            .filter((id) => scrollback[id])
+            .map((id) => ({
+              id,
+              viewport: scrollback[id],
+              above: [],
+              below: [],
+            }));
+          return {
+            code: 0,
+            stdout: `${JSON.stringify({ ok: true, ready: true, panes, missing: [] })}\n`,
+            stderr: "",
+          };
+        }
         const key = args[args.indexOf("--plugin-configuration") + 1];
         if (!answering.includes(key.replace("instance=", ""))) {
           // A stale instance swallows the message and says nothing.
@@ -350,6 +369,65 @@ test("status with sampleMs=0 answers from the bus without dumping screens", asyn
   // No `free`: busy and idle are indistinguishable without sampling.
   assert.equal(status.data.free, undefined);
   assert.equal(calls.some((a) => a.includes("dump-screen")), false);
+});
+
+test("sampled status batches its screen reads through one pipe", async () => {
+  resetBusCache();
+  const store = installed(tempState());
+  const screens = { terminal_2: ["hello"], terminal_5: ["world"] };
+  const { client, calls } = busClient({
+    scrollback: screens,
+    reply: REPLY.replace('"exited":true', '"exited":false'),
+  });
+  const status = await dispatchZswarm({ op: "status", sampleMs: 50 }, client, {
+    state: store,
+    env: {},
+    sleep: async () => {},
+  });
+  assert.equal(status.ok, true);
+  assert.equal(status.data.source, "plugin");
+  // Two samples, two pipes — not two dumps per pane.
+  assert.equal(calls.filter((a) => a.includes("dump-screen")).length, 0);
+  const scrollbacks = calls.filter((a) =>
+    a.some((arg) => typeof arg === "string" && arg.includes('"scrollback"')),
+  );
+  assert.equal(scrollbacks.length, 2);
+});
+
+test("a partial scrollback reply falls back rather than reporting quiet panes", async () => {
+  resetBusCache();
+  const store = installed(tempState());
+  const { client, calls } = busClient({
+    // Only one of the two live panes comes back.
+    scrollback: { terminal_2: ["hello"] },
+    reply: REPLY.replace('"exited":true', '"exited":false'),
+  });
+  const status = await dispatchZswarm({ op: "status", sampleMs: 50 }, client, {
+    state: store,
+    env: {},
+    sleep: async () => {},
+  });
+  assert.equal(status.ok, true);
+  // Missing screens would read as "unchanged", so status polls both samples.
+  assert.equal(calls.filter((a) => a.includes("dump-screen")).length, 4);
+});
+
+test("a single-pane read never goes through the bus", async () => {
+  resetBusCache();
+  const store = installed(tempState());
+  const { client, calls } = busClient({ scrollback: { terminal_2: ["hi"] } });
+  await dispatchZswarm({ op: "status", to: "builder", sampleMs: 50 }, client, {
+    state: store,
+    env: {},
+    sleep: async () => {},
+  });
+  // One pane costs more over a pipe than it does as a process.
+  assert.equal(
+    calls.filter((a) =>
+      a.some((arg) => typeof arg === "string" && arg.includes('"scrollback"')),
+    ).length,
+    0,
+  );
 });
 
 test("bus reports itself and can be forgotten", async () => {

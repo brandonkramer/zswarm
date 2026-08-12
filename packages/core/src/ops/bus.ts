@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { ZellijError } from "../errors.js";
 import type { Policy } from "../policy.js";
 import type { StateStore } from "../state.js";
@@ -6,7 +7,9 @@ import {
   busPluginUrl,
   nextConfigKey,
   parseBusReply,
+  parseScrollbackReply,
   resolveBusPlugin,
+  scrollbackToScreen,
   type BusSnapshot,
 } from "../zellij/bus.js";
 import type { ZellijClient } from "../zellij/client.js";
@@ -63,8 +66,11 @@ export function planBus(
   env: NodeJS.ProcessEnv = process.env,
 ): BusPlan {
   const marker = state.readBus();
-  const plugin = marker?.plugin ?? resolveBusPlugin(env);
-  const configKey = marker?.configKey ?? DEFAULT_BUS_KEY;
+  // A marker can outlive the wasm it names — an upgrade renames the artifact,
+  // so a remembered path that no longer exists must not shadow the current one.
+  const remembered = marker && existsSync(marker.plugin) ? marker : null;
+  const plugin = remembered?.plugin ?? resolveBusPlugin(env);
+  const configKey = remembered?.configKey ?? DEFAULT_BUS_KEY;
   const base: BusPlan = {
     enabled: false,
     reason: "",
@@ -149,6 +155,46 @@ export async function busSnapshot(
 
   processDisabled = "plugin did not answer; using zellij polling for this run";
   return null;
+}
+
+/**
+ * Read several pane screens in one pipe, or null to make the caller poll.
+ *
+ * Measured on this tree: the pipe costs ~0.055s fixed plus ~0.014s per pane,
+ * `dump-screen` ~0.050s per pane. So this is a loss for one pane and a win from
+ * two upward — callers must not route single-pane reads here.
+ *
+ * The text comes back as viewport lines padded to the terminal width, where
+ * `dump-screen` returns them ragged. `normalizeScreen` erases exactly that
+ * difference, and every caller here already normalizes before comparing.
+ */
+export async function busScreens(
+  client: ZellijClient,
+  state: StateStore,
+  session: string,
+  paneIds: string[],
+  clock: Clock,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Map<string, string> | null> {
+  if (paneIds.length < 2) return null;
+  const plan = planBus(client, state, env);
+  if (!plan.enabled || !plan.url) return null;
+  const configKey = answeredWith.get(session) ?? plan.configKey;
+  const reply = await client.scrollbackPlugin({
+    session,
+    url: plan.url,
+    configKey,
+    panes: paneIds,
+  });
+  const parsed = parseScrollbackReply(reply.stdout);
+  if (!parsed || !parsed.ready) return null;
+  const screens = new Map<string, string>();
+  for (const pane of parsed.panes) {
+    screens.set(pane.id, scrollbackToScreen(pane));
+  }
+  // A pane that vanished mid-read is normal; a wholesale miss is not, and
+  // silently returning fewer screens would read as "those panes are quiet".
+  return screens.size === paneIds.length ? screens : null;
 }
 
 /** Report on the bus, install it, or forget it. */

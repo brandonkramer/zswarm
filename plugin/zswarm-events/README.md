@@ -4,7 +4,7 @@ Zellij pushes pane and tab state into this plugin as it changes, so `zswarm list
 and `zswarm status` can read the current picture out of memory instead of
 spawning `dump-screen` per pane on a timer.
 
-The compiled artifact is committed at `plugin/prebuilt/zswarm-bus.wasm`, so
+The compiled artifact is committed at `plugin/prebuilt/zswarm-bus-v2.wasm`, so
 using the bus needs no Rust. This crate is only for changing it.
 
 ## Build
@@ -12,7 +12,7 @@ using the bus needs no Rust. This crate is only for changing it.
 ```bash
 rustup target add wasm32-wasip1
 cargo build --release --target wasm32-wasip1
-cp target/wasm32-wasip1/release/zswarm-events.wasm ../prebuilt/zswarm-bus.wasm
+cp target/wasm32-wasip1/release/zswarm-events.wasm ../prebuilt/zswarm-bus-v2.wasm
 ```
 
 ## Run
@@ -27,15 +27,25 @@ By hand:
 
 ```bash
 zellij action launch-or-focus-plugin --configuration instance=zswarm-bus \
-  file:/abs/path/zswarm-bus.wasm
-zellij pipe --plugin file:/abs/path/zswarm-bus.wasm \
+  file:/abs/path/zswarm-bus-v2.wasm
+zellij pipe --plugin file:/abs/path/zswarm-bus-v2.wasm \
   --plugin-configuration instance=zswarm-bus --name zswarm -- status
 ```
 
 The pane renders `zswarm events — <n> panes, <n> pushes`. The push counter is
 the point: it climbs on its own as panes open, close, and exit. Nothing polls.
 
-Pipe payloads: `status` (pane snapshot), `events` (counters only).
+Pipe payloads. A payload opening with `{` is a structured request; anything
+else stays a bare word, so the original pipes keep working.
+
+| payload | answer |
+|---|---|
+| `status` | pane + tab snapshot, from pushed state |
+| `events` | push counters only |
+| `{"op":"scrollback","panes":["terminal_4"],"full":false}` | pane screens, read on demand |
+
+`scrollback` reports unresolvable ids in `missing` instead of failing the batch —
+a pane closing between the ask and the read is normal.
 
 ## Findings
 
@@ -53,9 +63,11 @@ Build traps — all three fail with the same unhelpful
 
 Permissions:
 
-- `ReadApplicationState` covers the pane/tab events. `ReadCliPipes` is required
-  separately for `cli_pipe_output` / `unblock_cli_pipe_input` — without it the
-  plugin holds correct state but cannot answer a pipe.
+- Three separate grants, and missing any one fails differently:
+  `ReadApplicationState` for the pane/tab events, `ReadCliPipes` for
+  `cli_pipe_output` / `unblock_cli_pipe_input` (without it the plugin holds
+  correct state but cannot answer a pipe), and `ReadPaneContents` for
+  `get_pane_scrollback`.
 - The decision is cached per plugin **URL**. Adding a permission to an
   already-approved plugin does not re-prompt; it is silently denied. Copy the
   wasm to a new filename to force a fresh prompt.
@@ -82,7 +94,19 @@ Answering a pipe:
 
 ## Scope
 
-Zellij's pane manifest carries id, title, tab, focus, and exited — not the pane
-command, cwd, floating flag, or any output text. So this replaces the polling
-behind `list` and `status`; `dump`, `tail`, and `wait --match` keep using
-`dump-screen`, and anything needing a command or cwd falls back to `list-panes`.
+Two mechanisms, not one. Pane state is **pushed** — the manifest carries id,
+title, tab, focus, and exited, so reading it is free. Screen text is **pulled**
+via `get_pane_scrollback`, which is the same work `dump-screen` does, relocated
+inside the server.
+
+Measured here: the pipe costs ~0.055s fixed plus ~0.0143s per pane, against
+~0.050s per pane for `dump-screen`. That is a loss for one pane and a win from
+two upward, so only `status` sampling batches through the plugin. `dump`, `tail`,
+and `wait` read one pane and keep polling.
+
+Never available from either path: pane command, cwd, floating. Those fall back
+to `list-panes`.
+
+`PaneContents.viewport` pads lines to the terminal width where `dump-screen`
+leaves them ragged. `normalizeScreen` erases exactly that difference — verified
+identical across live panes — so every consumer must normalize before comparing.

@@ -225,19 +225,37 @@ first one after a relaunch waits for Zellij to push it a manifest.
 What the bus can and cannot serve:
 
 ```
-  pushed by Zellij            not an event
-  ────────────────            ────────────
-  pane opened / closed        pane output text
-  pane exited                 pane cwd
-  focus moved                 pane command
-  tab added / renamed         floating
+  pushed by Zellij         read on demand         not available
+  ────────────────         ──────────────         ─────────────
+  pane opened / closed     pane screen text       pane cwd
+  pane exited              (get_pane_scrollback)  pane command
+  focus moved                                     floating
+  tab added / renamed
 
-  → list, status              → dump, tail, wait, list --verbose
+  → list, status           → status sampling      → list --verbose
 ```
+
+Two different mechanisms. Pane state is **pushed**, so reading it is free.
+Screen text is **pulled** — the same work `dump-screen` does, just done inside
+the server so N panes cost one process instead of N. Measured here:
+
+```
+  scrollback pipe   0.055s fixed + 0.0143s per pane
+  dump-screen                       0.050s per pane
+  → a loss for one pane, a win from two upward
+```
+
+So `status` sampling batches through the plugin, while `dump`, `tail`, and
+`wait` keep polling: they read one pane, where polling is faster.
 
 Because the manifest carries no command, a bus-served `list` omits `command`
 rather than reporting it as null, and `status --to <command>` falls back to
 polling. `--verbose` always polls.
+
+Screen text comes back as viewport lines padded to the terminal width, where
+`dump-screen` returns them ragged. `normalizeScreen` erases exactly that, and
+every consumer normalizes before comparing — verified identical across live
+panes. Any path that would hand raw text to a caller keeps polling.
 
 Rebuilding the plugin needs Rust; the compiled artifact is committed so users
 do not:
@@ -246,7 +264,7 @@ do not:
 cd plugin/zswarm-events
 rustup target add wasm32-wasip1
 cargo build --release --target wasm32-wasip1
-cp target/wasm32-wasip1/release/zswarm-events.wasm ../prebuilt/zswarm-bus.wasm
+cp target/wasm32-wasip1/release/zswarm-events.wasm ../prebuilt/zswarm-bus-v2.wasm
 ```
 
 `signal` / `signals` / `await` use durable channels under `ZSWARM_STATE_DIR`
@@ -307,7 +325,7 @@ ssh (`BatchMode=yes` unless you set your own). Optional: `ZSWARM_SSH_BIN`,
 | `ZSWARM_GIT_BIN` | Absolute path to `git` / `git.exe` when not on PATH |
 | `ZSWARM_STATE_DIR` | Durable state dir for log / signals / tail cursors / bus marker (default `~/.zswarm`) |
 | `ZSWARM_BUS` | `0` never asks the event bus; `1` asks it without `bus --install` |
-| `ZSWARM_BUS_PLUGIN` | Path to the plugin wasm (default `plugin/prebuilt/zswarm-bus.wasm`) |
+| `ZSWARM_BUS_PLUGIN` | Path to the plugin wasm (default `plugin/prebuilt/zswarm-bus-v2.wasm`) |
 | `ZSWARM_LOG` | Set to `0` to disable the delivery log |
 | `ZSWARM_READONLY` | `1` blocks write ops (see Policy) |
 | `ZSWARM_ALLOW_PANES` | Comma allow-list for pane id / title substring |

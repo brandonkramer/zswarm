@@ -16,8 +16,15 @@ export const DEFAULT_BUS_KEY = "zswarm-bus";
 /** A stalled instance answers nothing, so the pipe must not inherit the long timeout. */
 export const DEFAULT_BUS_TIMEOUT_MS = 2_500;
 
-/** Where a published zswarm keeps the compiled plugin, relative to the tree root. */
-const PREBUILT_RELATIVE = join("plugin", "prebuilt", "zswarm-bus.wasm");
+/**
+ * Where a published zswarm keeps the compiled plugin, relative to the tree root.
+ *
+ * The version suffix is load-bearing. Zellij caches a permission decision per
+ * plugin URL and will not re-prompt when a build asks for more than the
+ * approved set — it denies the new one silently. A build that gains a
+ * permission has to ship under a new name; `-v2` is the ReadPaneContents one.
+ */
+const PREBUILT_RELATIVE = join("plugin", "prebuilt", "zswarm-bus-v2.wasm");
 
 export type BusPane = {
   id: string;
@@ -41,6 +48,19 @@ export type BusMarker = {
   plugin: string;
   configKey: string;
   installedAt: number;
+};
+
+export type BusScrollbackPane = {
+  id: string;
+  viewport: string[];
+  above: string[];
+  below: string[];
+};
+
+export type BusScrollback = {
+  ready: boolean;
+  panes: BusScrollbackPane[];
+  missing: string[];
 };
 
 /** Absolute path of the plugin wasm, or null when there is nothing to load. */
@@ -127,6 +147,61 @@ export function parseBusReply(stdout: string): BusSnapshot | null {
     }
   }
   return null;
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function toScrollback(value: Record<string, unknown>): BusScrollback | null {
+  if (value.ok !== true || !Array.isArray(value.panes)) return null;
+  const panes: BusScrollbackPane[] = [];
+  for (const row of value.panes) {
+    if (!row || typeof row !== "object") continue;
+    const p = row as Record<string, unknown>;
+    if (typeof p.id !== "string") continue;
+    panes.push({
+      id: p.id,
+      viewport: stringList(p.viewport),
+      above: stringList(p.above),
+      below: stringList(p.below),
+    });
+  }
+  return {
+    ready: value.ready === true,
+    panes,
+    missing: stringList(value.missing),
+  };
+}
+
+/**
+ * Same scan as parseBusReply: Zellij prints "Action CliPipe did not complete
+ * within 1s timeout" on successful pipes, so the JSON is never the whole of
+ * stdout. First line with ok===true and a panes array wins; anything else is
+ * no reply and the caller falls back.
+ */
+export function parseScrollbackReply(stdout: string): BusScrollback | null {
+  for (const line of stdout.split("\n")) {
+    const text = line.trim();
+    if (!text.startsWith("{")) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      continue;
+    }
+    if (parsed && typeof parsed === "object") {
+      const reply = toScrollback(parsed as Record<string, unknown>);
+      if (reply) return reply;
+    }
+  }
+  return null;
+}
+
+/** Rebuild dump-screen-shaped text. Byte-identity with dump-screen is unproven. */
+export function scrollbackToScreen(pane: BusScrollbackPane): string {
+  return pane.above.concat(pane.viewport).concat(pane.below).join("\n");
 }
 
 /**
