@@ -115,12 +115,29 @@ async function askOnce(
 }
 
 /**
+ * Zellij pushes a pane manifest on change, never on subscribe — there is no
+ * get_pane_manifest(). A quiet session leaves a freshly launched instance
+ * blind (ready:false, paneUpdates:0) until something moves. Renaming a pane
+ * to the title it already has is an invisible change that forces the push.
+ */
+async function nudgeManifest(
+  client: ZellijClient,
+  session: string,
+): Promise<void> {
+  const panes = await client.listPanes(session);
+  const pane = panes.find((p) => !p.isPlugin && !p.exited && p.title.trim());
+  if (!pane) return;
+  await client.renamePane({ session, paneId: pane.id, name: pane.title });
+}
+
+/**
  * One pipe, one answer — or null, and the caller polls instead.
  *
  * Two things go wrong in practice. A stale instance under the same key eats the
  * message and replies with nothing, so each attempt rotates to a new key. And a
  * freshly launched instance replies before Zellij has pushed it a manifest, so
  * a not-ready answer is retried once rather than reported as an empty session.
+ * If it is still cold after that, one same-title rename nudges Zellij to push.
  */
 export async function busSnapshot(
   client: ZellijClient,
@@ -135,6 +152,7 @@ export async function busSnapshot(
   if (!plan.enabled || !plan.url || !pluginPath) return null;
 
   let configKey = answeredWith.get(session) ?? plan.configKey;
+  let nudged = false;
   for (let attempt = 0; attempt < MAX_KEY_ATTEMPTS; attempt++) {
     let snapshot = await askOnce(client, session, plan.url, configKey, payload);
     if (snapshot && !snapshot.ready) {
@@ -142,6 +160,17 @@ export async function busSnapshot(
       snapshot =
         (await askOnce(client, session, plan.url, configKey, payload)) ??
         snapshot;
+    }
+    if (snapshot && !snapshot.ready && !nudged) {
+      nudged = true;
+      try {
+        await nudgeManifest(client, session);
+        snapshot =
+          (await askOnce(client, session, plan.url, configKey, payload)) ??
+          snapshot;
+      } catch {
+        // A failed nudge must not fail the op — the caller polls instead.
+      }
     }
     if (snapshot) {
       answeredWith.set(session, configKey);

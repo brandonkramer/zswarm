@@ -68,11 +68,13 @@ function busClient(options = {}) {
     answering = ["zswarm-bus"],
     reply = REPLY,
     coldFirst = false,
+    stayColdUntilRename = false,
     panesJson = "[]",
     scrollback = null,
   } = options;
   const calls = [];
   let asked = 0;
+  let renamed = 0;
   const client = createZellijClient({
     env: {},
     exec: async (args) => {
@@ -82,6 +84,10 @@ function busClient(options = {}) {
       }
       if (args.includes("list-panes")) {
         return { code: 0, stdout: panesJson, stderr: "" };
+      }
+      if (args.includes("rename-pane")) {
+        renamed += 1;
+        return { code: 0, stdout: "", stderr: "" };
       }
       if (args.includes("pipe")) {
         const payload = args[args.length - 1];
@@ -108,6 +114,13 @@ function busClient(options = {}) {
           return { code: 0, stdout: "", stderr: "" };
         }
         asked += 1;
+        if (stayColdUntilRename && renamed === 0) {
+          return {
+            code: 0,
+            stdout: `${reply.replace('"ready":true', '"ready":false')}\n`,
+            stderr: "",
+          };
+        }
         if (coldFirst && asked === 1) {
           return {
             code: 0,
@@ -264,6 +277,48 @@ test("busSnapshot asks a cold instance twice before believing it", async () => {
   const result = await busSnapshot(client, store, "demo", clock, {});
   assert.equal(result.snapshot.ready, true);
   assert.equal(pipes().length, 2);
+});
+
+test("a quiet session nudges the bus once; a ready one never does", async () => {
+  const panesJson = JSON.stringify([
+    {
+      id: 2,
+      is_plugin: false,
+      is_focused: true,
+      title: "builder",
+      exited: false,
+      is_floating: false,
+      tab_name: "work",
+    },
+  ]);
+
+  resetBusCache();
+  const cold = busClient({ stayColdUntilRename: true, panesJson });
+  const coldResult = await busSnapshot(
+    cold.client,
+    installed(tempState()),
+    "demo",
+    clock,
+    {},
+  );
+  assert.equal(coldResult.snapshot.ready, true);
+  const renames = cold.calls.filter((a) => a.includes("rename-pane"));
+  assert.equal(renames.length, 1);
+  assert.equal(renames[0].at(-1), "builder");
+  assert.equal(cold.pipes().length, 3);
+
+  resetBusCache();
+  const warm = busClient({ panesJson });
+  const warmResult = await busSnapshot(
+    warm.client,
+    installed(tempState()),
+    "demo",
+    clock,
+    {},
+  );
+  assert.equal(warmResult.snapshot.ready, true);
+  assert.equal(warm.calls.filter((a) => a.includes("rename-pane")).length, 0);
+  assert.equal(warm.pipes().length, 1);
 });
 
 test("a bus that never answers costs one round, then falls back", async () => {
