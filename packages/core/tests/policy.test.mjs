@@ -3,11 +3,14 @@ process.env.ZSWARM_BUS = "0";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   loadPolicy,
   isWriteOp,
   assertOpAllowed,
   assertPaneAllowed,
+  createStateStore,
   createZellijClient,
   dispatchZswarm,
   ZellijError,
@@ -54,6 +57,14 @@ function paneClient() {
     },
   });
   return { client, calls };
+}
+
+let stateSeq = 0;
+function tempState() {
+  const dir = join(tmpdir(), `zswarm-policy-${process.pid}-${stateSeq++}`);
+  const store = createStateStore({ dir, env: {} });
+  store.reset();
+  return store;
 }
 
 const emptyEnv = {};
@@ -241,4 +252,29 @@ test("rename, focus, and stack honor ZSWARM_DENY_PANES / ZSWARM_ALLOW_PANES", as
   assert.equal(allowlist.ok, false);
   assert.equal(allowlist.error.code, "policy_denied");
   assert.match(allowlist.error.message, /ZSWARM_ALLOW_PANES/);
+});
+
+test("ZSWARM_SSH refuses client-local signal/signals/await", async () => {
+  const ssh = { env: { ZSWARM_SSH: "user@host" } };
+  for (const op of ["signal", "signals", "await"]) {
+    const args =
+      op === "signals"
+        ? { op }
+        : { op, channel: "build" };
+    const res = await dispatchZswarm(args, undefined, ssh);
+    assert.equal(res.ok, false, op);
+    assert.equal(res.error.code, "ssh_git_unsupported", op);
+    assert.match(res.error.message, /client-local barrier/);
+  }
+
+  const viaServe = await dispatchZswarm(
+    { op: "signal", channel: "build" },
+    paneClient().client,
+    {
+      env: { ZSWARM_SSH: "user@host", ZSWARM_SERVE: "127.0.0.1:9419" },
+      state: tempState(),
+    },
+  );
+  assert.equal(viaServe.ok, true);
+  assert.equal(viaServe.data.channel, "build");
 });

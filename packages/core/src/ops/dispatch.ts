@@ -71,9 +71,12 @@ const SSH_GIT_OPS = new Set([
   "checkpoint",
 ]);
 
+const SSH_LOCAL_BARRIER_OPS = new Set(["signal", "signals", "await"]);
+
 /**
  * SSH only forwards Zellij. Git worktrees, diffs, and checkpoints stay on this
  * machine, so mixing them with a remote pane cwd is how you delete the wrong tree.
+ * Client-local signal barriers cannot rendezvous with a remote crew either.
  */
 function assertSshGitAllowed(
   env: NodeJS.ProcessEnv,
@@ -82,10 +85,15 @@ function assertSshGitAllowed(
 ): void {
   if (!env.ZSWARM_SSH?.trim() || env.ZSWARM_SERVE?.trim()) return;
   const worktreeSpawn = op === "spawn" && optionalString(args.worktree);
-  if (!worktreeSpawn && !SSH_GIT_OPS.has(op)) return;
+  if (!worktreeSpawn && !SSH_GIT_OPS.has(op) && !SSH_LOCAL_BARRIER_OPS.has(op)) {
+    return;
+  }
+  const why = SSH_LOCAL_BARRIER_OPS.has(op)
+    ? "is a client-local barrier"
+    : "uses local git";
   throw new ZellijError(
     "ssh_git_unsupported",
-    `${op} uses local git; ZSWARM_SSH only forwards Zellij. Run zswarm serve on the host that owns the session`,
+    `${op} ${why}; ZSWARM_SSH only forwards Zellij. Run zswarm serve on the host that owns the session`,
   );
 }
 
