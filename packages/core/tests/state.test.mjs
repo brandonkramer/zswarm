@@ -71,6 +71,8 @@ test("postSignal steals an empty leftover signals.lock older than the wait", () 
 });
 
 test("writeCursor serializes writers across processes", async () => {
+  // 80 at once is the Windows case: open(wx) returns EPERM while the holder
+  // still has cursors.lock, not EEXIST. Fewer workers never hit it on CI.
   const dir = mkdtempSync(join(tmpdir(), "zswarm-cur-"));
   const worker = join(dir, "worker.mjs");
   writeFileSync(

@@ -159,6 +159,32 @@ export function createStateStore(options: StateStoreOptions = {}) {
     }
   }
 
+  function lockBusy(code: string | undefined): boolean {
+    // Unix: O_EXCL on an existing file is EEXIST. Windows: a holder that still
+    // has the handle open (or a delete-pending name) is EPERM / EACCES / EBUSY.
+    return (
+      code === "EEXIST" ||
+      code === "EPERM" ||
+      code === "EACCES" ||
+      code === "EBUSY"
+    );
+  }
+
+  function unlinkLock(lockPath: string): void {
+    const until = Date.now() + 500;
+    while (true) {
+      try {
+        rmSync(lockPath, { force: true });
+        return;
+      } catch (err) {
+        if (!lockBusy((err as NodeJS.ErrnoException).code) || Date.now() >= until) {
+          return;
+        }
+        sleepSync(10);
+      }
+    }
+  }
+
   function withFileLock<T>(lockName: string, fn: () => T): T {
     ensureDir();
     const lockPath = join(dir, lockName);
@@ -171,17 +197,13 @@ export function createStateStore(options: StateStoreOptions = {}) {
           return fn();
         } finally {
           closeSync(fd);
-          rmSync(lockPath, { force: true });
+          unlinkLock(lockPath);
         }
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
-        if (code !== "EEXIST") throw err;
-        if (lockIsStale(lockPath)) {
-          try {
-            rmSync(lockPath, { force: true });
-          } catch {
-            // Another waiter already took it.
-          }
+        if (!lockBusy(code)) throw err;
+        if (code === "EEXIST" && lockIsStale(lockPath)) {
+          unlinkLock(lockPath);
           continue;
         }
         if (Date.now() >= deadline) {
