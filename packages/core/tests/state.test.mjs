@@ -69,3 +69,32 @@ test("postSignal steals an empty leftover signals.lock older than the wait", () 
   assert.ok(Date.now() - t0 < 1000);
   assert.equal(store.readSignals().ch.count, 1);
 });
+
+test("writeCursor serializes writers across processes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "zswarm-cur-"));
+  const worker = join(dir, "worker.mjs");
+  writeFileSync(
+    worker,
+    `import { createStateStore } from ${JSON.stringify(pathToFileURL(DIST).href)};
+const store = createStateStore({ dir: process.argv[2], env: { ZSWARM_LOG: "0" } });
+store.writeCursor(process.argv[3], process.argv[3]);
+`,
+  );
+  const workers = 80;
+  await Promise.all(
+    Array.from({ length: workers }, (_, i) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [worker, dir, `k${i}`], {
+          stdio: "inherit",
+        });
+        child.on("exit", (code) =>
+          code === 0 ? resolve() : reject(new Error(`worker exit ${code}`)),
+        );
+      }),
+    ),
+  );
+  const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
+  for (let i = 0; i < workers; i++) {
+    assert.equal(store.readCursor(`k${i}`), `k${i}`);
+  }
+});

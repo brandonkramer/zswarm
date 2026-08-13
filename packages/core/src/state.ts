@@ -40,6 +40,7 @@ const LOG_FILE = "log.jsonl";
 const SIGNALS_FILE = "signals.json";
 const SIGNALS_LOCK = "signals.lock";
 const CURSORS_FILE = "cursors.json";
+const CURSORS_LOCK = "cursors.lock";
 const BUS_FILE = "bus.json";
 /** Keeps the log bounded without needing a rotation daemon. */
 const LOG_TAIL_BYTES = 512 * 1024;
@@ -236,15 +237,19 @@ export function createStateStore(options: StateStoreOptions = {}) {
   }
 
   function writeCursor(key: string, text: string): void {
-    const all = readJson<Record<string, string>>(CURSORS_FILE, {});
-    all[key] = text;
-    writeJson(CURSORS_FILE, all);
+    withFileLock(CURSORS_LOCK, () => {
+      const all = readJson<Record<string, string>>(CURSORS_FILE, {});
+      all[key] = text;
+      writeJson(CURSORS_FILE, all);
+    });
   }
 
   function clearCursor(key: string): void {
-    const all = readJson<Record<string, string>>(CURSORS_FILE, {});
-    delete all[key];
-    writeJson(CURSORS_FILE, all);
+    withFileLock(CURSORS_LOCK, () => {
+      const all = readJson<Record<string, string>>(CURSORS_FILE, {});
+      delete all[key];
+      writeJson(CURSORS_FILE, all);
+    });
   }
 
   function readBus(): BusMarkerRecord | null {
