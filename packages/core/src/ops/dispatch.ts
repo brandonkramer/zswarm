@@ -442,15 +442,15 @@ export async function dispatchZswarm(
       case "log":
         return readDeliveryLog(state(), args);
       case "rename":
-        return await renameTarget(client, args);
+        return await renameTarget(client, args, policy);
       case "focus":
-        return await focusTarget(client, args);
+        return await focusTarget(client, args, policy);
       case "tabs":
         return await listTabsOp(client, args);
       case "layout":
         return await dumpLayoutOp(client, args);
       case "stack":
-        return await stackTargets(client, args);
+        return await stackTargets(client, args, policy);
       case "diff":
         return await peerDiff(git(), args);
       case "checkpoint":

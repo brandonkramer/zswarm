@@ -1,4 +1,5 @@
 import { ZellijError } from "../errors.js";
+import { assertPaneAllowed, type Policy } from "../policy.js";
 import type { ZellijClient } from "../zellij/client.js";
 import type { OpsResult } from "./types.js";
 import { dumpMaxChars, optionalString, truncateDumpText } from "./util.js";
@@ -20,6 +21,7 @@ async function session(
 export async function renameTarget(
   client: ZellijClient,
   args: Record<string, unknown>,
+  policy?: Policy,
 ): Promise<OpsResult> {
   const name = optionalString(args.name);
   if (!name) throw new ZellijError("missing_name", "name required");
@@ -42,6 +44,7 @@ export async function renameTarget(
   const to = optionalString(args.to);
   if (!to) throw new ZellijError("missing_peer", "to (or tab) required");
   const pane = client.resolvePane(await client.listPanes(sess), to);
+  if (policy) assertPaneAllowed(policy, pane, "rename");
   await client.renamePane({ session: sess, paneId: pane.id, name });
   return {
     ok: true,
@@ -52,11 +55,13 @@ export async function renameTarget(
 export async function focusTarget(
   client: ZellijClient,
   args: Record<string, unknown>,
+  policy?: Policy,
 ): Promise<OpsResult> {
   const to = optionalString(args.to);
   if (!to) throw new ZellijError("missing_peer", "to required");
   const sess = await session(client, args);
   const pane = client.resolvePane(await client.listPanes(sess), to);
+  if (policy) assertPaneAllowed(policy, pane, "focus");
   // Zellij exits non-zero when asked to focus the already-focused pane.
   if (pane.focused) {
     return {
@@ -121,6 +126,7 @@ export async function dumpLayoutOp(
 export async function stackTargets(
   client: ZellijClient,
   args: Record<string, unknown>,
+  policy?: Policy,
 ): Promise<OpsResult> {
   const list = optionalString(args.to);
   if (!list) throw new ZellijError("missing_peer", "to (comma list) required");
@@ -130,7 +136,11 @@ export async function stackTargets(
     .split(",")
     .map((k) => k.trim())
     .filter(Boolean)
-    .map((key) => client.resolvePane(panes, key).id);
+    .map((key) => {
+      const pane = client.resolvePane(panes, key);
+      if (policy) assertPaneAllowed(policy, pane, "stack");
+      return pane.id;
+    });
   const unique = [...new Set(ids)];
   const stacked = await client.stackPanes({ session: sess, paneIds: unique });
   return { ok: true, data: { session: sess, stacked: stacked.paneIds } };
