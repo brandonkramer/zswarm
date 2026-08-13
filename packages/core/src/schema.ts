@@ -47,6 +47,9 @@ export const TARGET_OPS: readonly OpName[] = [
   "keys",
   "interrupt",
   "close",
+  "rename",
+  "focus",
+  "stack",
 ];
 
 export type ParamType = "string" | "number" | "boolean" | "stringOrArray";
@@ -501,7 +504,7 @@ export function cliUsage(): string {
     "",
     "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force). --expect requires the screen to contain a substring first.",
     "Bus: `zswarm bus --install` once, then list and status use it now.",
-    "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE (+ ZSWARM_SERVE_TOKEN off loopback).",
+    "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE (+ ZSWARM_SERVE_TOKEN). Serve binds loopback only and always requires a token.",
     "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZSWARM_FROM, ZELLIJ_PANE_ID, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN",
     "",
   );

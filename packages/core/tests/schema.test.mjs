@@ -72,6 +72,18 @@ test("parseCliArgv keeps the positional shorthands", () => {
     body: "ping",
   });
   assert.deepEqual(parseCliArgv(["dump", "2"]), { op: "dump", to: "2" });
+  assert.deepEqual(parseCliArgv(["focus", "reviewer"]), {
+    op: "focus",
+    to: "reviewer",
+  });
+  assert.deepEqual(parseCliArgv(["rename", "reviewer"]), {
+    op: "rename",
+    to: "reviewer",
+  });
+  assert.deepEqual(parseCliArgv(["stack", "reviewer,builder"]), {
+    op: "stack",
+    to: "reviewer,builder",
+  });
   // list takes no target, so a bare argument is an error rather than a silent to=
   assert.throws(() => parseCliArgv(["list", "2"]), /unexpected argument/);
 });
@@ -88,6 +100,8 @@ test("cliUsage lists every flagged param", () => {
     assert.ok(usage.includes(param.flags[0]), `usage missing ${param.flags[0]}`);
   }
   for (const op of OP_NAMES) assert.ok(usage.includes(op));
+  assert.ok(usage.includes("always requires a token"));
+  assert.equal(usage.includes("off loopback"), false);
 });
 
 test("parseCliArgv finds the op when flags come first", () => {
