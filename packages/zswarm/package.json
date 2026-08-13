@@ -1,0 +1,34 @@
+{
+  "name": "zswarm",
+  "version": "0.1.1",
+  "type": "module",
+  "description": "Coordinate CLI agent crews in Zellij panes",
+  "scripts": {
+    "prepublishOnly": "node ../../scripts/check-publish.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "keywords": [
+    "zellij",
+    "mcp",
+    "agents",
+    "cli"
+  ],
+  "bin": {
+    "zswarm": "./bin/zswarm.mjs",
+    "zswarm-mcp": "./bin/zswarm-mcp.mjs"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "dependencies": {
+    "@zswarm/cli": "workspace:*",
+    "@zswarm/mcp": "workspace:*"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

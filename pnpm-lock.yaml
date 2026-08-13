@@ -7,13 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@zswarm/cli':
-        specifier: workspace:*
-        version: link:packages/cli
-      '@zswarm/mcp':
-        specifier: workspace:*
-        version: link:packages/mcp
     devDependencies:
       '@changesets/cli':
         specifier: ^3.0.0
@@ -71,6 +64,15 @@ importers:
         version: link:../mcp
 
   packages/wasm: {}
+
+  packages/zswarm:
+    dependencies:
+      '@zswarm/cli':
+        specifier: workspace:*
+        version: link:../cli
+      '@zswarm/mcp':
+        specifier: workspace:*
+        version: link:../mcp
 
 packages:
 

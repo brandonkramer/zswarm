@@ -1,6 +1,6 @@
 {
   "name": "zswarm",
-  "version": "0.1.0",
+  "private": true,
   "type": "module",
   "description": "Coordinate CLI agent crews in Zellij panes",
   "scripts": {
@@ -9,7 +9,6 @@
     "test": "pnpm --dir packages/core test",
     "cli": "pnpm --dir packages/cli exec node dist/cli.js",
     "mcp": "pnpm --dir packages/mcp exec node dist/mcp-server.js",
-    "prepublishOnly": "node scripts/check-publish.mjs",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "pnpm -r build && changeset publish"
@@ -18,28 +17,6 @@
     "node": ">=20"
   },
   "packageManager": "pnpm@9.15.9",
-  "license": "MIT",
-  "keywords": [
-    "zellij",
-    "mcp",
-    "agents",
-    "cli"
-  ],
-  "bin": {
-    "zswarm": "./bin/zswarm.mjs",
-    "zswarm-mcp": "./bin/zswarm-mcp.mjs"
-  },
-  "files": [
-    "bin",
-    "README.md"
-  ],
-  "dependencies": {
-    "@zswarm/cli": "workspace:*",
-    "@zswarm/mcp": "workspace:*"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
   "devDependencies": {
     "@changesets/cli": "^3.0.0"
   }
