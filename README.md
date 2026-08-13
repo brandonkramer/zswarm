@@ -158,7 +158,7 @@ zswarm await --channel tests --count 3          # Wait for 3 worker signals
 | `ZSWARM_TMP` | Remote IPC temp directory, or `auto` to parse live `zellij --server` paths |
 | `ZSWARM_SSH_MODE` | `interactive` — Windows only: run each CLI call in the desktop session (scheduled task, same idea as `schtasks /IT`) |
 | `ZSWARM_REMOTE_SHELL` | `cmd` or `sh` — override remote quoting (inferred from `.exe` / Windows tmp / interactive) |
-| `ZSWARM_SERVE` | `127.0.0.1:9419` — Forward ops to `zswarm serve` (usually over an SSH tunnel) |
+| `ZSWARM_SERVE` | `127.0.0.1:9419` — Forward ops to `zswarm serve` (SSH tunnel to loopback; non-loopback listen is refused) |
 | `ZSWARM_SERVE_TOKEN` | Shared secret for `zswarm serve`. Required even on loopback (another local OS user can connect to 127.0.0.1); send the same value on the client |
 
 ### Remote crews
@@ -175,8 +175,8 @@ ZSWARM_SSH=user@host ZSWARM_TMP=auto zswarm sessions
 # Windows: run the CLI inside the desktop session. Discovers TEMP unless ZSWARM_TMP is set.
 ZSWARM_SSH=user@host ZSWARM_SSH_MODE=interactive zswarm list
 
-# Any OS: run zswarm next to Zellij; another machine talks over a tunnel
-# On the host, in the session that owns Zellij:
+# Any OS: run zswarm next to Zellij; another machine talks over a tunnel to 127.0.0.1
+# On the host, in the session that owns Zellij (loopback only; a token is not a bind substitute):
 ZSWARM_SERVE_TOKEN=secret zswarm serve --listen 127.0.0.1:9419
 # Windows, once: zswarm serve --install
 # On the client:

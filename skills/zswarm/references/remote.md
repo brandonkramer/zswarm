@@ -46,6 +46,7 @@ op.
 # On the host, in the session that owns Zellij:
 ZSWARM_SERVE_TOKEN=secret zswarm serve --listen 127.0.0.1:9419
 # Token is required on loopback too: another local OS user can connect to 127.0.0.1.
+# Non-loopback listen is refused; off-machine access is an SSH tunnel to 127.0.0.1.
 # Windows logon task, once: zswarm serve --install
 
 # On the client:

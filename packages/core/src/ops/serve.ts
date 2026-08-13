@@ -112,6 +112,14 @@ export function startServe(
   options: StartServeOptions = {},
 ): Promise<{ label: string; close: () => Promise<void> }> {
   const { host, port } = parseListenAddress(listen);
+  if (!isLoopbackHost(host)) {
+    return Promise.reject(
+      new ZellijError(
+        "serve_auth",
+        `zswarm serve only listens on loopback (127.0.0.1 / ::1); off-machine access is an SSH tunnel to 127.0.0.1 (${host} refused)`,
+      ),
+    );
+  }
   const token = options.token?.trim() || undefined;
   if (!token) {
     return Promise.reject(
@@ -298,7 +306,13 @@ export async function installServeLogon(input: {
       "serve --install registers a Windows logon task; on Unix start `zswarm serve --listen` in the session that owns Zellij",
     );
   }
-  const { label } = parseListenAddress(input.listen);
+  const { host, label } = parseListenAddress(input.listen);
+  if (!isLoopbackHost(host)) {
+    throw new ZellijError(
+      "serve_auth",
+      `zswarm serve only listens on loopback (127.0.0.1 / ::1); off-machine access is an SSH tunnel to 127.0.0.1 (${host} refused)`,
+    );
+  }
   const execPath = input.execPath ?? process.execPath;
   const scriptPath = input.scriptPath ?? process.argv[1];
   if (!scriptPath) {
