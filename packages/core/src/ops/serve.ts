@@ -302,8 +302,35 @@ export function serveLogonCommand(
   execPath: string,
   scriptPath: string,
   listen: string,
+  token?: string,
 ): string {
-  return `"${execPath}" "${scriptPath}" serve --listen ${listen}`;
+  const launch = `"${execPath}" "${scriptPath}" serve --listen ${listen}`;
+  const secret = token?.trim();
+  if (!secret) return launch;
+  if (/[\0\r\n"%]/.test(secret)) {
+    throw new ZellijError(
+      "bad_arg",
+      "ZSWARM_SERVE_TOKEN must not contain quotes, newlines, or %",
+    );
+  }
+  return `set "ZSWARM_SERVE_TOKEN=${secret}"&& ${launch}`;
+}
+
+function serveInstallToken(input: {
+  token?: string;
+  env?: NodeJS.ProcessEnv;
+}): string {
+  const raw =
+    input.token ??
+    (input.env ? input.env.ZSWARM_SERVE_TOKEN : process.env.ZSWARM_SERVE_TOKEN);
+  const secret = raw?.trim() ?? "";
+  if (!secret) {
+    throw new ZellijError(
+      "serve_auth",
+      "zswarm serve requires ZSWARM_SERVE_TOKEN; another local OS user can connect to 127.0.0.1",
+    );
+  }
+  return secret;
 }
 
 function runPowerShell(script: string): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -340,6 +367,8 @@ export async function installServeLogon(input: {
   execPath?: string;
   scriptPath?: string;
   platform?: NodeJS.Platform;
+  token?: string;
+  env?: NodeJS.ProcessEnv;
 }): Promise<{ task: string; listen: string; command: string }> {
   if ((input.platform ?? process.platform) !== "win32") {
     throw new ZellijError(
@@ -354,12 +383,13 @@ export async function installServeLogon(input: {
       `zswarm serve only listens on loopback (127.0.0.1 / ::1); off-machine access is an SSH tunnel to 127.0.0.1 (${host} refused)`,
     );
   }
+  const token = serveInstallToken(input);
   const execPath = input.execPath ?? process.execPath;
   const scriptPath = input.scriptPath ?? process.argv[1];
   if (!scriptPath) {
     throw new ZellijError("usage", "cannot resolve the zswarm script path for the logon task");
   }
-  const command = serveLogonCommand(execPath, scriptPath, label);
+  const command = serveLogonCommand(execPath, scriptPath, label, token);
   const commandB64 = Buffer.from(command, "utf8").toString("base64");
   const script = [
     "$cmd = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" +

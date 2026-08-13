@@ -58,6 +58,28 @@ test("serveLogonCommand is node + script + serve --listen", () => {
   assert.equal(SERVE_TASK_NAME, "zswarm-serve");
 });
 
+test("serveLogonCommand persists ZSWARM_SERVE_TOKEN in the logon command", () => {
+  assert.equal(
+    serveLogonCommand(
+      String.raw`C:\Program Files\nodejs\node.exe`,
+      String.raw`C:\zswarm\cli.js`,
+      "127.0.0.1:9419",
+      "s3cret",
+    ),
+    `set "ZSWARM_SERVE_TOKEN=s3cret"&& "C:\\Program Files\\nodejs\\node.exe" "C:\\zswarm\\cli.js" serve --listen 127.0.0.1:9419`,
+  );
+  assert.throws(
+    () =>
+      serveLogonCommand(
+        String.raw`C:\node.exe`,
+        String.raw`C:\zswarm\cli.js`,
+        "127.0.0.1:9419",
+        'bad"token',
+      ),
+    /quotes/,
+  );
+});
+
 test("serveChildEnv drops ZSWARM_SERVE and ZSWARM_SSH so the worker stays local", () => {
   const child = serveChildEnv({
     ZSWARM_SERVE: "127.0.0.1:9419",
@@ -90,6 +112,10 @@ test("installServeLogon / --clear are Windows-only", async () => {
   await assert.rejects(
     () => uninstallServeLogon({ platform: "linux" }),
     /Windows-only/,
+  );
+  await assert.rejects(
+    () => installServeLogon({ platform: "win32", env: {} }),
+    /ZSWARM_SERVE_TOKEN/,
   );
 });
 

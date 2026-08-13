@@ -178,7 +178,7 @@ ZSWARM_SSH=user@host ZSWARM_SSH_MODE=interactive zswarm list
 # Any OS: run zswarm next to Zellij; another machine talks over a tunnel to 127.0.0.1
 # On the host, in the session that owns Zellij (loopback only; a token is not a bind substitute):
 ZSWARM_SERVE_TOKEN=secret zswarm serve --listen 127.0.0.1:9419
-# Windows, once: zswarm serve --install
+# Windows, once (bakes ZSWARM_SERVE_TOKEN into the logon task env): zswarm serve --install
 # On the client:
 ssh -fN -L 9419:127.0.0.1:9419 user@host
 ZSWARM_SERVE=127.0.0.1:9419 ZSWARM_SERVE_TOKEN=secret zswarm list
