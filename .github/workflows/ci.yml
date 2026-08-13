@@ -54,7 +54,7 @@ jobs:
 
       - name: Run script tests
         # Explicit path: same PowerShell glob trap as above.
-        run: node --test scripts/sync-plugin-versions.test.mjs
+        run: node --test scripts/sync-plugin-versions.test.mjs scripts/launch-mcp.test.mjs
 
   wasm:
     name: Wasm plugin
@@ -78,13 +78,16 @@ jobs:
       - name: Fail if the crate moved without a wasm rebuild
         # Byte-identical cmp is not portable: rustc on ubuntu-latest does not
         # emit the same wasm as a macOS rebuild (observed differ at byte 18).
-        # The crate's last commit must be an ancestor of the committed artifact.
+        # Same-commit lockstep rejects a later wasm-only copy of an old binary;
+        # the magic/size check rejects garbage that ancestry would still accept.
         run: |
           src=$(git log -1 --format=%H -- crates/zswarm-events Cargo.lock Cargo.toml)
           wasm=$(git log -1 --format=%H -- packages/wasm/zswarm-bus-v3.wasm)
-          if ! git merge-base --is-ancestor "$src" "$wasm"; then
+          if [ "$src" != "$wasm" ]; then
             echo "crates/zswarm-events last changed in $src"
             echo "packages/wasm/zswarm-bus-v3.wasm last changed in $wasm"
+            echo "Commit the rebuilt artifact in the same change as the crate."
             echo "Rebuild with: pnpm build:plugin"
             exit 1
           fi
+          python3 -c "from pathlib import Path; p=Path('packages/wasm/zswarm-bus-v3.wasm'); d=p.read_bytes(); raise SystemExit(0 if d[:4]==bytes([0,97,115,109]) and len(d)>=100000 else f'{p} is not a valid wasm artifact ({len(d)} bytes)')"
