@@ -1,4 +1,4 @@
-import { createServer, connect } from "node:net";
+import { createServer, connect, type Socket } from "node:net";
 import { execFile } from "node:child_process";
 import { ZellijError } from "../errors.js";
 import { encodePowerShellCommand } from "../zellij/ipc.js";
@@ -8,6 +8,10 @@ export const DEFAULT_SERVE_LISTEN = "127.0.0.1:9419";
 export const SERVE_TASK_NAME = "zswarm-serve";
 /** One JSONL request; a client that never sends newline cannot grow forever. */
 export const SERVE_MAX_REQUEST_BYTES = 1024 * 1024;
+/** Drop a socket that never finishes a JSONL line. */
+export const SERVE_IDLE_TIMEOUT_MS = 30_000;
+/** Concurrent TCP clients, including in-flight wait ops. */
+export const SERVE_MAX_CONNECTIONS = 32;
 /** Wait/await allow 15 minutes; this is that plus slack. */
 export const SERVE_CALL_TIMEOUT_CAP_MS = 16 * 60_000;
 const SERVE_TOKEN_FIELD = "serveToken";
@@ -82,6 +86,8 @@ export type ServeDispatch = (
 export type StartServeOptions = {
   token?: string;
   maxRequestBytes?: number;
+  idleTimeoutMs?: number;
+  maxConnections?: number;
 };
 
 function unauthorized(): OpsResult {
@@ -130,10 +136,29 @@ export function startServe(
     );
   }
   const maxRequestBytes = options.maxRequestBytes ?? SERVE_MAX_REQUEST_BYTES;
+  const idleTimeoutMs = options.idleTimeoutMs ?? SERVE_IDLE_TIMEOUT_MS;
+  const maxConnections = options.maxConnections ?? SERVE_MAX_CONNECTIONS;
   return new Promise((resolve, reject) => {
+    const sockets = new Set<Socket>();
     const server = createServer((socket) => {
+      socket.on("error", () => {
+        socket.destroy();
+      });
+      if (sockets.size >= maxConnections) {
+        socket.destroy();
+        return;
+      }
+      sockets.add(socket);
+      socket.on("close", () => {
+        sockets.delete(socket);
+      });
       let buf = "";
+      let draining = false;
       socket.setEncoding("utf8");
+      socket.setTimeout(idleTimeoutMs);
+      socket.on("timeout", () => {
+        socket.destroy();
+      });
       socket.on("data", (chunk: string) => {
         buf += chunk;
         if (buf.length > maxRequestBytes) {
@@ -152,27 +177,42 @@ export function startServe(
         void drain();
       });
       async function drain() {
-        let nl = buf.indexOf("\n");
-        while (nl !== -1) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (line) {
-            let result: OpsResult;
-            try {
-              const parsed = JSON.parse(line) as Record<string, unknown>;
-              const taken = takeServeToken(parsed);
-              if (taken.token !== token) {
-                result = unauthorized();
-              } else {
-                result = await dispatch(taken.request);
+        if (draining) return;
+        draining = true;
+        socket.setTimeout(0);
+        try {
+          let nl = buf.indexOf("\n");
+          while (nl !== -1) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (line) {
+              let result: OpsResult;
+              try {
+                const parsed = JSON.parse(line) as Record<string, unknown>;
+                const taken = takeServeToken(parsed);
+                if (taken.token !== token) {
+                  result = unauthorized();
+                } else {
+                  result = await dispatch(taken.request);
+                }
+              } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                result = { ok: false, error: { code: "bad_arg", message } };
               }
-            } catch (err) {
-              const message = err instanceof Error ? err.message : String(err);
-              result = { ok: false, error: { code: "bad_arg", message } };
+              if (!socket.destroyed) {
+                socket.write(`${JSON.stringify(result)}\n`);
+              }
             }
-            socket.write(`${JSON.stringify(result)}\n`);
+            nl = buf.indexOf("\n");
           }
-          nl = buf.indexOf("\n");
+        } finally {
+          draining = false;
+          if (socket.destroyed) return;
+          if (buf.includes("\n")) {
+            void drain();
+          } else {
+            socket.setTimeout(idleTimeoutMs);
+          }
         }
       }
     });
@@ -185,6 +225,7 @@ export function startServe(
         label: formatListenLabel(host, actualPort),
         close: () =>
           new Promise((done, fail) => {
+            for (const open of sockets) open.destroy();
             server.close((err) => (err ? fail(err) : done()));
           }),
       });

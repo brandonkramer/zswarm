@@ -3,6 +3,7 @@ process.env.ZSWARM_BUS = "0";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { connect } from "node:net";
 import {
   callServe,
   createZellijClient,
@@ -225,6 +226,77 @@ test("startServe drops an oversized request", async () => {
     const result = await callServe(label, { op: "x".repeat(64) }, 2_000, "secret");
     assert.equal(result.ok, false);
     assert.match(result.error.message, /exceeded/);
+  } finally {
+    await close();
+  }
+});
+
+test("startServe drops an idle socket that never sends a request", async () => {
+  const { label, close } = await startServe(
+    "127.0.0.1:0",
+    async () => ({ ok: true, data: {} }),
+    { token: "secret", idleTimeoutMs: 40 },
+  );
+  try {
+    const { host, port } = parseListenAddress(label);
+    await new Promise((resolve, reject) => {
+      const socket = connect({ host, port });
+      const fail = setTimeout(() => reject(new Error("idle socket was not closed")), 1_000);
+      socket.on("error", () => {});
+      socket.on("close", () => {
+        clearTimeout(fail);
+        resolve(undefined);
+      });
+    });
+  } finally {
+    await close();
+  }
+});
+
+test("startServe caps concurrent connections", async () => {
+  const { label, close } = await startServe(
+    "127.0.0.1:0",
+    async () => ({ ok: true, data: {} }),
+    { token: "secret", maxConnections: 1, idleTimeoutMs: 5_000 },
+  );
+  try {
+    const { host, port } = parseListenAddress(label);
+    const first = connect({ host, port });
+    await new Promise((resolve, reject) => {
+      first.once("connect", resolve);
+      first.once("error", reject);
+    });
+    const second = connect({ host, port });
+    await new Promise((resolve, reject) => {
+      const fail = setTimeout(() => reject(new Error("extra connection was not dropped")), 1_000);
+      second.on("error", () => {});
+      second.on("close", () => {
+        clearTimeout(fail);
+        resolve(undefined);
+      });
+    });
+    first.destroy();
+  } finally {
+    await close();
+  }
+});
+
+test("startServe handles a socket error before auth", async () => {
+  const { label, close } = await startServe(
+    "127.0.0.1:0",
+    async (args) => ({ ok: true, data: args }),
+    { token: "secret" },
+  );
+  try {
+    const { host, port } = parseListenAddress(label);
+    const socket = connect({ host, port });
+    await new Promise((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    });
+    socket.destroy();
+    const result = await callServe(label, { op: "ping" }, 2_000, "secret");
+    assert.deepEqual(result, { ok: true, data: { op: "ping" } });
   } finally {
     await close();
   }
