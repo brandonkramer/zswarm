@@ -9,6 +9,7 @@ import {
   type ExecResult,
   type SshTarget,
 } from "../exec.js";
+import { applyIpcTmpEnv } from "./ipc.js";
 
 export { createSshExec, type SshTarget };
 
@@ -81,9 +82,10 @@ export function resolveZellijBinary(
 }
 
 export function sanitizeZellijEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const withTmp = applyIpcTmpEnv(env);
   const out: Record<string, string> = {};
-  for (const key of Object.keys(env)) {
-    const value = env[key];
+  for (const key of Object.keys(withTmp)) {
+    const value = withTmp[key];
     if (typeof value === "string") out[key] = value;
   }
   if (process.platform === "win32") {
@@ -99,6 +101,8 @@ export function sanitizeZellijEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 /**
  * Remote crew: `ZSWARM_SSH=user@host` routes every zellij call over ssh.
  * `ZSWARM_SSH_OPTS` is split on whitespace; `BatchMode` keeps it non-interactive.
+ * `ZSWARM_TMP` points at the interactive session's temp (or `auto` to discover).
+ * `ZSWARM_SSH_MODE=interactive` runs each call in the Windows desktop session.
  */
 export function resolveSshTarget(
   env: NodeJS.ProcessEnv = process.env,
@@ -109,11 +113,19 @@ export function resolveSshTarget(
   if (!options.some((o) => o.startsWith("BatchMode"))) {
     options.unshift("-o", "BatchMode=yes");
   }
+  const shellRaw = (env.ZSWARM_REMOTE_SHELL ?? "").trim().toLowerCase();
+  const modeRaw = (env.ZSWARM_SSH_MODE ?? "").trim().toLowerCase();
+  const tmpRaw = env.ZSWARM_TMP?.trim();
+  const interactive = modeRaw === "interactive";
   return {
     ssh: env.ZSWARM_SSH_BIN?.trim() || "ssh",
     host,
     remoteBin: env.ZSWARM_REMOTE_BIN?.trim() || "zellij",
     options,
+    // Interactive tasks do not inherit the desktop TEMP; discover it unless set.
+    tmp: tmpRaw || (interactive ? "auto" : undefined),
+    mode: interactive ? "interactive" : "ssh",
+    remoteShell: shellRaw === "cmd" || shellRaw === "sh" ? shellRaw : undefined,
   };
 }
 

@@ -47,6 +47,12 @@ import {
 } from "./util.js";
 import { waitForPane } from "./wait.js";
 import { listPeerWorktrees, removePeerWorktree } from "./worktree.js";
+import {
+  callServe,
+  installServeLogon,
+  serveCallTimeout,
+  uninstallServeLogon,
+} from "./serve.js";
 
 /** Same default `wait` applies: match when a needle is given, else idle. */
 function waitMode(args: Record<string, unknown>): "idle" | "match" | "either" {
@@ -95,7 +101,7 @@ async function resolveTarget(
 /** Shared MCP/CLI dispatch for zswarm ops. */
 export async function dispatchZswarm(
   args: Record<string, unknown>,
-  client: ZellijClient = createZellijClient(),
+  injected?: ZellijClient,
   deps: DispatchDeps = {},
 ): Promise<OpsResult> {
   const op = String(args.op ?? "");
@@ -112,9 +118,38 @@ export async function dispatchZswarm(
   let stateStore: StateStore | null = deps.state ?? null;
   const state = () => (stateStore ??= createStateStore());
   const policy = deps.policy ?? loadPolicy(deps.env);
+  const env = deps.env ?? process.env;
   try {
     // Policy gates the op before anything touches the session.
     assertOpAllowed(policy, op);
+    if (op === "serve") {
+      if (isTrue(args.clear)) {
+        const cleared = await uninstallServeLogon({
+          platform: process.platform,
+        });
+        return { ok: true, data: cleared };
+      }
+      if (isTrue(args.install)) {
+        const installed = await installServeLogon({
+          listen: typeof args.listen === "string" ? args.listen : undefined,
+        });
+        return { ok: true, data: { ...installed, running: true } };
+      }
+      throw new ZellijError(
+        "usage",
+        "serve --listen is CLI-only; MCP/dispatch would hang the tool call. Run `zswarm serve --listen` in the session that owns Zellij",
+      );
+    }
+    // An injected client is a unit-test (or in-process) Zellij; do not skip it
+    // just because the host env has ZSWARM_SERVE set.
+    if (!injected && env.ZSWARM_SERVE?.trim()) {
+      return await callServe(
+        env.ZSWARM_SERVE.trim(),
+        args,
+        serveCallTimeout(args),
+      );
+    }
+    const client = injected ?? createZellijClient({ env: deps.env });
     switch (op) {
       case "sessions": {
         const sessions = await client.listSessions();

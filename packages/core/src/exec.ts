@@ -1,4 +1,16 @@
 import { execFile, spawn } from "node:child_process";
+import {
+  cmdQuote,
+  inferRemoteShell,
+  parseZellijServerPaths,
+  pickIpcDirs,
+  unixDiscoverRemote,
+  windowsDiscoverRemote,
+  windowsInteractiveRemote,
+  wrapWithTmpEnv,
+  type IpcDirs,
+  type RemoteShell,
+} from "./zellij/ipc.js";
 
 export type ExecResult = {
   code: number;
@@ -37,7 +49,72 @@ export type SshTarget = {
   host: string;
   remoteBin: string;
   options: string[];
+  /** Concrete IPC temp, or `auto` to read `--server` off a live zellij process. */
+  tmp?: string;
+  /** `interactive` runs the CLI in the Windows desktop session (schtasks /IT). */
+  mode?: "ssh" | "interactive";
+  remoteShell?: "cmd" | "sh";
 };
+
+export function quoteRemoteArg(arg: string, shell: RemoteShell): string {
+  return shell === "cmd" ? cmdQuote(arg) : shellQuote(arg);
+}
+
+/**
+ * The string `ssh host <this>` runs. Tests assert this rather than spawning ssh.
+ */
+export function buildSshRemoteCommand(
+  target: SshTarget,
+  args: string[],
+  tmp: string | undefined,
+  timeoutMs: number,
+  socketDir?: string,
+): string {
+  const shell = inferRemoteShell({
+    explicit: target.remoteShell,
+    tmp,
+    remoteBin: target.remoteBin,
+    mode: target.mode,
+  });
+  const zellij = [target.remoteBin, ...args]
+    .map((arg) => quoteRemoteArg(arg, shell))
+    .join(" ");
+  const withTmp = tmp ? wrapWithTmpEnv(zellij, tmp, shell, socketDir) : zellij;
+  if (target.mode === "interactive") {
+    return windowsInteractiveRemote(withTmp, timeoutMs);
+  }
+  // Windows OpenSSH often logs into PowerShell; `set "TEMP=…"` only works in cmd.
+  if (shell === "cmd") {
+    return `cmd.exe /c ${cmdQuote(withTmp)}`;
+  }
+  return withTmp;
+}
+
+async function discoverRemoteIpc(
+  runner: ExecFn,
+  target: SshTarget,
+  timeoutMs: number,
+): Promise<IpcDirs | undefined> {
+  const shell = inferRemoteShell({
+    explicit: target.remoteShell,
+    remoteBin: target.remoteBin,
+    mode: target.mode,
+  });
+  // `auto` has no tmp yet, so a Windows host with remoteBin=zellij still looks
+  // like Unix. Try both listings; pickIpcDirs ignores lines without --server.
+  const probes =
+    shell === "cmd"
+      ? [windowsDiscoverRemote(), unixDiscoverRemote()]
+      : [unixDiscoverRemote(), windowsDiscoverRemote()];
+  for (const probe of probes) {
+    const result = await runner([...target.options, target.host, probe], {
+      timeoutMs,
+    });
+    const dirs = pickIpcDirs(parseZellijServerPaths(result.stdout));
+    if (dirs) return dirs;
+  }
+  return undefined;
+}
 
 /**
  * Run the remote zellij over ssh. The whole invocation is quoted into a single
@@ -48,8 +125,28 @@ export function createSshExec(
   env: NodeJS.ProcessEnv,
 ): ExecFn {
   const runner = createExec(target.ssh, env);
-  return (args, options) => {
-    const remote = [target.remoteBin, ...args].map(shellQuote).join(" ");
+  let cached: IpcDirs | null | undefined;
+
+  async function resolveIpc(timeoutMs: number): Promise<IpcDirs | undefined> {
+    const requested = target.tmp?.trim();
+    if (!requested) return undefined;
+    if (requested.toLowerCase() !== "auto") {
+      return { tmp: requested, socketDir: "" };
+    }
+    if (cached !== undefined) return cached ?? undefined;
+    cached = (await discoverRemoteIpc(runner, target, timeoutMs)) ?? null;
+    return cached ?? undefined;
+  }
+
+  return async (args, options) => {
+    const ipc = await resolveIpc(options.timeoutMs);
+    const remote = buildSshRemoteCommand(
+      target,
+      args,
+      ipc?.tmp,
+      options.timeoutMs,
+      ipc?.socketDir,
+    );
     return runner([...target.options, target.host, remote], options);
   };
 }

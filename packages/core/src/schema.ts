@@ -32,6 +32,7 @@ export const OP_NAMES = [
   "diff",
   "checkpoint",
   "bus",
+  "serve",
 ] as const;
 
 export type OpName = (typeof OP_NAMES)[number];
@@ -112,14 +113,14 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "boolean",
     flags: ["--clear"],
     description:
-      "signal: reset the channel (all channels when none is given); bus: forget the installed plugin",
+      "signal: reset the channel (all channels when none is given); bus: forget the installed plugin; serve: unregister the Windows logon task",
   },
   {
     name: "install",
     type: "boolean",
     flags: ["--install"],
     description:
-      "bus: load the event-bus plugin in a pane so its permission prompt can be answered, then remember it",
+      "bus: load the event-bus plugin in a pane so its permission prompt can be answered, then remember it; serve: register a Windows logon task that listens for remote zswarm",
   },
   {
     name: "reset",
@@ -425,6 +426,13 @@ export const PARAMS: readonly ParamSpec[] = [
       "send/keys: write to a pane whose command has exited; unworktree: remove a busy or dirty worktree; bus: reinstall under a fresh key",
   },
   {
+    name: "listen",
+    type: "string",
+    flags: ["--listen"],
+    description:
+      "serve: bind address (default 127.0.0.1:9419). Reach it from another machine with ZSWARM_SERVE after an SSH tunnel",
+  },
+  {
     name: "verbose",
     type: "boolean",
     flags: ["--verbose", "-v"],
@@ -468,7 +476,8 @@ export function mcpInputSchema(): Record<string, unknown> {
 export const MCP_TOOL_DESCRIPTION =
   `zSwarm Zellij pane coordination (op=${OP_NAMES.join("|")}). ` +
   "List panes, send text into a CLI pane (paste+Enter), block until a pane goes idle or prints a match, " +
-  "send raw keys, open or close panes, and give a peer its own git worktree. Local Zellij only.";
+  "send raw keys, open or close panes, and give a peer its own git worktree. " +
+  "Same host as Zellij, or ZSWARM_SSH / ZSWARM_SERVE for a remote crew.";
 
 const FLAG_INDEX = new Map<string, ParamSpec>(
   PARAMS.flatMap((p) => p.flags.map((flag) => [flag, p] as const)),
@@ -490,8 +499,9 @@ export function cliUsage(): string {
   lines.push(
     "",
     "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force). --expect requires the screen to contain a substring first.",
-    "Bus: `zswarm bus --install` once, then list/status read pane state from the plugin instead of polling.",
-    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN",
+    "Bus: `zswarm bus --install` once, then list and status use it now.",
+    "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE.",
+    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE",
     "",
   );
   return lines.join("\n");

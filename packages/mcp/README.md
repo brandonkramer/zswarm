@@ -38,7 +38,8 @@ zswarm({ op: "send", to: "terminal_2", body: "ping" })
 
 Some MCP hosts spawn servers outside your shell and inherit neither PATH nor
 the Zellij environment. Give the interpreter an absolute path and set
-`ZSWARM_SESSION`. Details: the [zswarm README](../../README.md).
+`ZSWARM_SESSION`. `ZSWARM_SSH` or `ZSWARM_SERVE` routes the same tool at a
+remote crew. Details: the [zswarm README](../../README.md).
 
 ## License
 

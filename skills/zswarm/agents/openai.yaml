@@ -1,0 +1,4 @@
+interface:
+  display_name: "zSwarm"
+  short_description: "Coordinate CLI crews in Zellij panes"
+  default_prompt: "Use $zswarm to list panes, send to a peer, and wait until idle. Remote crew: read references/remote.md."

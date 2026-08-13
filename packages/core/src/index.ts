@@ -98,8 +98,42 @@ export {
   loadPolicy,
   type Policy,
 } from "./policy.js";
-export { createSshExec, shellQuote, type SshTarget } from "./exec.js";
+export {
+  buildSshRemoteCommand,
+  createSshExec,
+  quoteRemoteArg,
+  shellQuote,
+  type SshTarget,
+} from "./exec.js";
 export { resolveSshTarget } from "./zellij/binary.js";
+export {
+  applyIpcTmpEnv,
+  cmdQuote,
+  concreteTmp,
+  encodePowerShellCommand,
+  inferRemoteShell,
+  parseZellijServerPaths,
+  pickIpcDirs,
+  pickIpcTmp,
+  socketDirFromServerPath,
+  tmpFromServerPath,
+  unixDiscoverRemote,
+  windowsDiscoverRemote,
+  windowsInteractiveRemote,
+  wrapWithTmpEnv,
+} from "./zellij/ipc.js";
+export {
+  callServe,
+  DEFAULT_SERVE_LISTEN,
+  installServeLogon,
+  parseListenAddress,
+  SERVE_TASK_NAME,
+  serveCallTimeout,
+  serveChildEnv,
+  serveLogonCommand,
+  startServe,
+  uninstallServeLogon,
+} from "./ops/serve.js";
 export { parseTabList, resolveTab, type ZellijTab } from "./zellij/tabs.js";
 export { selectTargets } from "./ops/broadcast.js";
 export { diffScreens, cursorKey } from "./ops/tail.js";

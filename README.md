@@ -152,6 +152,50 @@ zswarm await --channel tests --count 3          # Wait for 3 worker signals
 | `ZSWARM_WORKTREE_ROOT` | Directory for linked worktrees (default: `<repo>-worktrees`) |
 | `ZSWARM_STATE_DIR` | State storage directory for logs, signals, and cursors (default: `~/.zswarm`) |
 | `ZSWARM_SSH` | `user@host` — Route Zellij commands across SSH |
+| `ZSWARM_REMOTE_BIN` | Remote `zellij` binary (`zellij.exe` on Windows) |
+| `ZSWARM_TMP` | Remote IPC temp directory, or `auto` to parse live `zellij --server` paths |
+| `ZSWARM_SSH_MODE` | `interactive` — Windows only: run each CLI call in the desktop session (scheduled task, same idea as `schtasks /IT`) |
+| `ZSWARM_REMOTE_SHELL` | `cmd` or `sh` — override remote quoting (inferred from `.exe` / Windows tmp / interactive) |
+| `ZSWARM_SERVE` | `127.0.0.1:9419` — Forward ops to `zswarm serve` (usually over an SSH tunnel) |
+
+### Remote crews
+
+Linux/macOS SSH works when it is the same user and `$TMPDIR`. Windows OpenSSH is session 0; live Zellij is usually the interactive desktop session. `ZSWARM_TMP=auto` points at that TEMP (enough to list sessions). Pane attach on Windows uses named pipes in the desktop session, so use `ZSWARM_SSH_MODE=interactive` or run `zswarm serve` next to Zellij.
+
+```bash
+# Linux/macOS, same user:
+ZSWARM_SSH=user@host zswarm list
+
+# Point SSH at the interactive TEMP (auto reads zellij --server …)
+ZSWARM_SSH=user@host ZSWARM_TMP=auto zswarm sessions
+
+# Windows: run the CLI inside the desktop session. Discovers TEMP unless ZSWARM_TMP is set.
+ZSWARM_SSH=user@host ZSWARM_SSH_MODE=interactive zswarm list
+
+# Any OS: run zswarm next to Zellij; another machine talks over a tunnel
+# On the host, in the session that owns Zellij:
+zswarm serve --listen 127.0.0.1:9419
+# Windows, once: zswarm serve --install
+# On the client:
+ssh -fN -L 9419:127.0.0.1:9419 user@host
+ZSWARM_SERVE=127.0.0.1:9419 zswarm list
+```
+
+`file:` plugin URLs stay on the machine that owns Zellij. A client with `ZSWARM_SERVE` never sends a local wasm path across the tunnel.
+
+```json
+{
+  "mcpServers": {
+    "zswarm": {
+      "command": "/absolute/path/to/zswarm-mcp",
+      "env": {
+        "ZSWARM_SERVE": "127.0.0.1:9419",
+        "ZSWARM_SESSION": "crew"
+      }
+    }
+  }
+}
+```
 
 ---
 
