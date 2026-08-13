@@ -45,6 +45,8 @@ const BUS_FILE = "bus.json";
 /** Keeps the log bounded without needing a rotation daemon. */
 const LOG_TAIL_BYTES = 512 * 1024;
 const LOCK_WAIT_MS = 5_000;
+/** A live pid older than this is treated as a recycle of a crashed holder. */
+const LOCK_STALE_MS = 30_000;
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -143,15 +145,22 @@ export function createStateStore(options: StateStoreOptions = {}) {
   }
 
   /**
-   * Dead pid → steal now. Empty leftover from older writers (wx with no owner
-   * bytes) → steal once mtime is older than the wait, so an in-flight create is
-   * not yanked out from under the holder.
+   * Dead pid → steal now. This process's own leftover (unlink failed, or a
+   * non-reentrant re-entry) → steal now. A live pid whose `at` is older than
+   * LOCK_STALE_MS is a recycled pid, not a holder still inside fn().
+   * Empty leftover from older writers (wx with no owner bytes) → steal once
+   * mtime is older than the wait, so an in-flight create is not yanked out
+   * from under the holder.
    * Owner is read once: a second read can see a pid that appeared after an
    * empty snapshot and would steal a live lock.
    */
   function lockIsStale(lockPath: string): boolean {
     const owner = readLockOwner(lockPath);
-    if (owner) return !pidAlive(owner.pid);
+    if (owner) {
+      if (owner.pid === process.pid) return true;
+      if (!pidAlive(owner.pid)) return true;
+      return Date.now() - owner.at >= LOCK_STALE_MS;
+    }
     try {
       return Date.now() - statSync(lockPath).mtimeMs >= LOCK_WAIT_MS;
     } catch {
@@ -202,7 +211,7 @@ export function createStateStore(options: StateStoreOptions = {}) {
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (!lockBusy(code)) throw err;
-        if (code === "EEXIST" && lockIsStale(lockPath)) {
+        if (lockIsStale(lockPath)) {
           unlinkLock(lockPath);
           continue;
         }

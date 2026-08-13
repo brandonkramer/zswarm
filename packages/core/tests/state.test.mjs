@@ -70,6 +70,32 @@ test("postSignal steals an empty leftover signals.lock older than the wait", () 
   assert.equal(store.readSignals().ch.count, 1);
 });
 
+test("postSignal steals a leftover lock owned by this process", () => {
+  const dir = mkdtempSync(join(tmpdir(), "zswarm-sig-self-"));
+  writeFileSync(
+    join(dir, "signals.lock"),
+    JSON.stringify({ pid: process.pid, at: Date.now() }),
+  );
+  const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
+  const t0 = Date.now();
+  store.postSignal("ch", "x", Date.now());
+  assert.ok(Date.now() - t0 < 1000);
+  assert.equal(store.readSignals().ch.count, 1);
+});
+
+test("postSignal steals a live-pid lock older than the stale window", () => {
+  const dir = mkdtempSync(join(tmpdir(), "zswarm-sig-recycle-"));
+  writeFileSync(
+    join(dir, "signals.lock"),
+    JSON.stringify({ pid: 1, at: 1 }),
+  );
+  const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
+  const t0 = Date.now();
+  store.postSignal("ch", "x", Date.now());
+  assert.ok(Date.now() - t0 < 1000);
+  assert.equal(store.readSignals().ch.count, 1);
+});
+
 test("writeCursor serializes writers across processes", async () => {
   // 80 at once is the Windows case: open(wx) returns EPERM while the holder
   // still has cursors.lock, not EEXIST. Fewer workers never hit it on CI.
