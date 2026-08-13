@@ -62,13 +62,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Last-commit-per-path needs parents. Depth 1 reports HEAD for every
+          # file in the tree, so a forgotten wasm rebuild would look current.
+          fetch-depth: 0
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
 
-      - name: Rebuild wasm and fail if the committed artifact is stale
+      - name: Compile the plugin
+        run: cargo build --package zswarm-events --release --target wasm32-wasip1
+
+      - name: Fail if the crate moved without a wasm rebuild
+        # Byte-identical cmp is not portable: rustc on ubuntu-latest does not
+        # emit the same wasm as a macOS rebuild (observed differ at byte 18).
+        # The crate's last commit must be an ancestor of the committed artifact.
         run: |
-          cargo build --package zswarm-events --release --target wasm32-wasip1
-          cmp target/wasm32-wasip1/release/zswarm-events.wasm packages/wasm/zswarm-bus-v3.wasm
+          src=$(git log -1 --format=%H -- crates/zswarm-events Cargo.lock Cargo.toml)
+          wasm=$(git log -1 --format=%H -- packages/wasm/zswarm-bus-v3.wasm)
+          if ! git merge-base --is-ancestor "$src" "$wasm"; then
+            echo "crates/zswarm-events last changed in $src"
+            echo "packages/wasm/zswarm-bus-v3.wasm last changed in $wasm"
+            echo "Rebuild with: pnpm build:plugin"
+            exit 1
+          fi
