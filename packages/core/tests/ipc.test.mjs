@@ -235,3 +235,29 @@ test("resolveSshTarget reads TMP, MODE, and REMOTE_SHELL", () => {
   );
   assert.equal(resolveSshTarget({}), null);
 });
+
+test("resolveSshTarget keeps quoted ZSWARM_SSH_OPTS as one arg", () => {
+  const spaced = String.raw`C:\Users\Jane Doe\.ssh\id`;
+  const target = resolveSshTarget({
+    ZSWARM_SSH: "user@host",
+    ZSWARM_SSH_OPTS: `-i "${spaced}" -o StrictHostKeyChecking=no`,
+  });
+  assert.deepEqual(target.options, [
+    "-o",
+    "BatchMode=yes",
+    "-i",
+    spaced,
+    "-o",
+    "StrictHostKeyChecking=no",
+  ]);
+  const single = resolveSshTarget({
+    ZSWARM_SSH: "user@host",
+    ZSWARM_SSH_OPTS: "-i '/home/jane doe/.ssh/id'",
+  });
+  assert.deepEqual(single.options, [
+    "-o",
+    "BatchMode=yes",
+    "-i",
+    "/home/jane doe/.ssh/id",
+  ]);
+});

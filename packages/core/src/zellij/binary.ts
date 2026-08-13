@@ -100,16 +100,44 @@ export function sanitizeZellijEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 /**
  * Remote crew: `ZSWARM_SSH=user@host` routes every zellij call over ssh.
- * `ZSWARM_SSH_OPTS` is split on whitespace; `BatchMode` keeps it non-interactive.
+ * `ZSWARM_SSH_OPTS` is split like a shell so quoted paths stay one arg;
+ * `BatchMode` keeps it non-interactive.
  * `ZSWARM_TMP` points at the interactive session's temp (or `auto` to discover).
  * `ZSWARM_SSH_MODE=interactive` runs each call in the Windows desktop session.
  */
+export function parseSshOpts(raw: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]!;
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (/\s/.test(ch)) {
+      if (cur.length > 0) {
+        out.push(cur);
+        cur = "";
+      }
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.length > 0) out.push(cur);
+  return out;
+}
+
 export function resolveSshTarget(
   env: NodeJS.ProcessEnv = process.env,
 ): SshTarget | null {
   const host = env.ZSWARM_SSH?.trim();
   if (!host) return null;
-  const options = (env.ZSWARM_SSH_OPTS ?? "").trim().split(/\s+/).filter(Boolean);
+  const options = parseSshOpts(env.ZSWARM_SSH_OPTS ?? "");
   if (!options.some((o) => o.startsWith("BatchMode"))) {
     options.unshift("-o", "BatchMode=yes");
   }
