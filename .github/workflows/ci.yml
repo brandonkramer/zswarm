@@ -7,6 +7,9 @@ on:
   pull_request:
     branches:
       - master
+  # Release pushes the version commit with GITHUB_TOKEN, which does not
+  # start this workflow. Dispatch is how to test that SHA by hand.
+  workflow_dispatch:
 
 permissions:
   contents: read
