@@ -1,17 +1,37 @@
 {
   "name": "zswarm",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "zSwarm — coordinate CLI crews in Zellij panes (list, send, dump).",
-  "author": { "name": "zSwarm" },
+  "author": {
+    "name": "zSwarm"
+  },
   "license": "MIT",
-  "keywords": ["zellij", "panes", "mcp", "swarm", "cli"],
+  "keywords": [
+    "zellij",
+    "panes",
+    "mcp",
+    "swarm",
+    "cli"
+  ],
   "skills": "./skills/",
   "mcpServers": {
     "zswarm": {
       "command": "node",
-      "args": ["./bin/launch-mcp.mjs"],
+      "args": [
+        "./bin/launch-mcp.mjs"
+      ],
       "cwd": ".",
-      "env_vars": ["ZSWARM_BIN", "ZSWARM_PATH", "ZSWARM_SESSION", "ZSWARM_SSH", "ZSWARM_TMP", "ZSWARM_SSH_MODE", "ZSWARM_REMOTE_BIN", "ZSWARM_SERVE", "ZSWARM_SERVE_TOKEN"]
+      "env_vars": [
+        "ZSWARM_BIN",
+        "ZSWARM_PATH",
+        "ZSWARM_SESSION",
+        "ZSWARM_SSH",
+        "ZSWARM_TMP",
+        "ZSWARM_SSH_MODE",
+        "ZSWARM_REMOTE_BIN",
+        "ZSWARM_SERVE",
+        "ZSWARM_SERVE_TOKEN"
+      ]
     }
   },
   "interface": {
@@ -20,7 +40,11 @@
     "longDescription": "List Zellij panes, send prompts into another CLI pane, and dump scrollback. Local Zellij only.",
     "developerName": "zSwarm",
     "category": "Developer Tools",
-    "capabilities": ["Instructions", "Read", "Write"],
+    "capabilities": [
+      "Instructions",
+      "Read",
+      "Write"
+    ],
     "defaultPrompt": [
       "Use zswarm({op:\"list\"}) to see panes, then zswarm({op:\"send\", to, body}) to message another CLI in Zellij.",
       "Use zswarm({op:\"dump\", to}) sparingly for a short screen read; prefer small dumps over full scrollback."

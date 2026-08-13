@@ -1,8 +1,14 @@
 {
   "name": "zswarm",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "zSwarm — coordinate CLI crews in Zellij panes (list, send, dump).",
-  "keywords": ["zellij", "panes", "mcp", "swarm", "cli"],
+  "keywords": [
+    "zellij",
+    "panes",
+    "mcp",
+    "swarm",
+    "cli"
+  ],
   "skills": "./skills/",
   "mcpServers": "mcp.json"
 }

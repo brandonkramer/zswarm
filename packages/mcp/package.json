@@ -1,6 +1,6 @@
 {
   "name": "@zswarm/mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "description": "zSwarm MCP server \u2014 Zellij pane coordination",
   "bin": {
