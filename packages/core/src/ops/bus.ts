@@ -92,7 +92,7 @@ export function planBus(
   if (!plugin) {
     return {
       ...base,
-      reason: "no plugin wasm found; build plugin/zswarm-events or set ZSWARM_BUS_PLUGIN",
+      reason: "no plugin wasm found; run pnpm build:plugin or set ZSWARM_BUS_PLUGIN",
     };
   }
   if (processDisabled) return { ...base, reason: processDisabled };
@@ -319,7 +319,7 @@ export async function busOp(
     if (!plugin) {
       throw new ZellijError(
         "bus_missing",
-        "no plugin wasm found; build plugin/zswarm-events or set ZSWARM_BUS_PLUGIN",
+        "no plugin wasm found; run pnpm build:plugin or set ZSWARM_BUS_PLUGIN",
       );
     }
     const previous = state.readBus();

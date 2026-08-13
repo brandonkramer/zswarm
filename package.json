@@ -5,7 +5,7 @@
   "description": "Coordinate CLI agent crews in Zellij panes",
   "scripts": {
     "build": "pnpm -r run build",
-    "build:plugin": "cd plugin/zswarm-events && cargo build --release --target wasm32-wasip1 && node -e \"require('node:fs').copyFileSync('target/wasm32-wasip1/release/zswarm-events.wasm','../../packages/wasm/zswarm-bus-v3.wasm')\"",
+    "build:plugin": "cargo build --package zswarm-events --release --target wasm32-wasip1 && node -e \"require('node:fs').copyFileSync('target/wasm32-wasip1/release/zswarm-events.wasm','packages/wasm/zswarm-bus-v3.wasm')\"",
     "test": "pnpm --dir packages/core test",
     "cli": "pnpm --dir packages/cli exec node dist/cli.js",
     "mcp": "pnpm --dir packages/mcp exec node dist/mcp-server.js",

@@ -9,10 +9,11 @@ using the bus needs no Rust. This crate is only for changing it.
 
 ## Build
 
+From the repository root:
+
 ```bash
 rustup target add wasm32-wasip1
-cargo build --release --target wasm32-wasip1
-cp target/wasm32-wasip1/release/zswarm-events.wasm ../../packages/wasm/zswarm-bus-v3.wasm
+pnpm build:plugin
 ```
 
 ## Run

@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/zswarm-events"]
+resolver = "2"
+
+[profile.release]
+opt-level = "z"
+# No `strip`/`lto`: they drop the exported functions Zellij looks for.

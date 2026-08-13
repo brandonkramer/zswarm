@@ -26,7 +26,7 @@ the same effect: re-run `zswarm bus --install --force`.
 
 ## Building
 
-Source is the `plugin/zswarm-events` crate in the zSwarm repo; needs Rust.
+Source is the `crates/zswarm-events` crate in the zSwarm repo; needs Rust.
 
 ```bash
 pnpm run build:plugin
