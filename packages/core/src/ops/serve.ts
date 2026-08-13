@@ -298,6 +298,12 @@ export function callServe(
   });
 }
 
+export function redactServeSecret(command: string, token: string): string {
+  const secret = token.trim();
+  if (!secret) return command;
+  return command.split(secret).join("***");
+}
+
 export function serveLogonCommand(
   execPath: string,
   scriptPath: string,
@@ -408,7 +414,7 @@ export async function installServeLogon(input: {
       `serve --install failed: ${(result.stderr || result.stdout).trim() || "no output"}`,
     );
   }
-  return { task: SERVE_TASK_NAME, listen: label, command };
+  return { task: SERVE_TASK_NAME, listen: label, command: redactServeSecret(command, token) };
 }
 
 export async function uninstallServeLogon(input: {

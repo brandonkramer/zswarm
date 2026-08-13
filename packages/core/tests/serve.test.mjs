@@ -16,6 +16,7 @@ import {
   serveCallTimeout,
   serveChildEnv,
   serveLogonCommand,
+  redactServeSecret,
   SERVE_TASK_NAME,
   startServe,
   uninstallServeLogon,
@@ -78,6 +79,19 @@ test("serveLogonCommand persists ZSWARM_SERVE_TOKEN in the logon command", () =>
       ),
     /quotes/,
   );
+});
+
+test("redactServeSecret strips the token from install output", () => {
+  const command = serveLogonCommand(
+    String.raw`C:\node.exe`,
+    String.raw`C:\zswarm\cli.js`,
+    "127.0.0.1:9419",
+    "s3cret",
+  );
+  assert.ok(command.includes("s3cret"));
+  const redacted = redactServeSecret(command, "s3cret");
+  assert.equal(redacted.includes("s3cret"), false);
+  assert.ok(redacted.includes("ZSWARM_SERVE_TOKEN=***"));
 });
 
 test("serveChildEnv drops ZSWARM_SERVE and ZSWARM_SSH so the worker stays local", () => {
