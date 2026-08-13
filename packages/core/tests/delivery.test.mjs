@@ -4,10 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStateStore, createZellijClient } from "../dist/index.js";
 import {
+  attachKnownSender,
   classifySubmit,
   composerHolds,
   deliverTo,
+  resolveSender,
   resolveSubmitMode,
+  sanitizeSenderLabel,
 } from "../dist/ops/delivery.js";
 
 let stateSeq = 0;
@@ -212,6 +215,47 @@ test("explicit submit= overrides the harness profile", () => {
   assert.equal(
     resolveSubmitMode({ submit: "double-enter" }, PANE),
     "double-enter",
+  );
+});
+
+test("senderLabel: arg, ZSWARM_FROM, pane title, then swarm", () => {
+  assert.deepEqual(resolveSender({ from: "lead" }, { selfTitle: "builder" }), {
+    label: "lead",
+    source: "arg",
+  });
+  assert.deepEqual(
+    resolveSender({}, { env: { ZSWARM_FROM: "orch" }, selfTitle: "builder" }),
+    { label: "orch", source: "env" },
+  );
+  assert.deepEqual(resolveSender({}, { selfTitle: "builder" }), {
+    label: "builder",
+    source: "title",
+  });
+  assert.deepEqual(resolveSender({ from: "  " }, {}), {
+    label: "swarm",
+    source: "default",
+  });
+  assert.equal(sanitizeSenderLabel("orch\n[x]"), "orch x");
+  assert.equal(sanitizeSenderLabel("x".repeat(60)).length, 48);
+});
+
+test("attachKnownSender forwards chosen labels and leaves the default unset", () => {
+  assert.equal(
+    attachKnownSender({ op: "list" }, { ZSWARM_FROM: "orch" }).from,
+    undefined,
+  );
+  assert.equal(
+    attachKnownSender({ op: "send", body: "hi" }, {}).from,
+    undefined,
+  );
+  assert.equal(
+    attachKnownSender({ op: "send", from: "lead", body: "hi" }, {}).from,
+    "lead",
+  );
+  assert.equal(
+    attachKnownSender({ op: "broadcast", body: "hi" }, { ZSWARM_FROM: "orch" })
+      .from,
+    "orch",
   );
 });
 

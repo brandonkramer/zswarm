@@ -47,6 +47,11 @@ Unless `raw: true`:
 <body>
 ```
 
+`<sender>` is `from` if you pass it, else `ZSWARM_FROM`, else the sending
+pane's title when `ZELLIJ_PANE_ID` / `ZSWARM_SELF_PANE` is visible, else
+`swarm`. MCP hosts that drop Zellij env need those vars listed (or set
+`from` / `ZSWARM_FROM`).
+
 ## Rules
 
 1. Target **pane ids or names** from `list` — do not invent transports.

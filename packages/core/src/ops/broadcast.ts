@@ -4,7 +4,7 @@ import { assertPaneAllowed } from "../policy.js";
 import type { StateStore } from "../state.js";
 import type { ZellijClient } from "../zellij/client.js";
 import type { ZellijPane } from "../zellij/panes.js";
-import { deliverTo, type DeliveryResult } from "./delivery.js";
+import { deliverTo, selfPaneTitle, withSenderLabel, type DeliveryResult } from "./delivery.js";
 import type { Clock, OpsResult } from "./types.js";
 import { isTrue, optionalString } from "./util.js";
 
@@ -85,6 +85,7 @@ export async function broadcast(
   args: Record<string, unknown>,
   clock: Clock,
   policy?: Policy,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<OpsResult> {
   const body = String(args.body ?? args.text ?? "");
   if (!body.trim()) throw new ZellijError("missing_body", "body required");
@@ -93,7 +94,11 @@ export async function broadcast(
     typeof args.session === "string" ? args.session : undefined,
   );
   const panes = await client.listPanes(session);
-  const { targets: selected, skipped } = selectTargets(client, panes, args);
+  const labeled = withSenderLabel(args, {
+    env,
+    selfTitle: selfPaneTitle(client, panes),
+  });
+  const { targets: selected, skipped } = selectTargets(client, panes, labeled);
   // Policy narrows the selection rather than failing the whole broadcast.
   const targets = selected.filter((pane) => {
     if (!policy) return true;
@@ -115,7 +120,7 @@ export async function broadcast(
   const results: DeliveryResult[] = [];
   for (const pane of targets) {
     results.push(
-      await deliverTo(client, state, args, {
+      await deliverTo(client, state, labeled, {
         session,
         pane,
         body,
@@ -131,7 +136,7 @@ export async function broadcast(
     ok: true,
     data: {
       session,
-      from: (typeof args.from === "string" && args.from.trim()) || "swarm",
+      from: labeled.from,
       delivered: delivered.map((r) => r.to),
       failed: results.filter((r) => !r.ok),
       skipped,

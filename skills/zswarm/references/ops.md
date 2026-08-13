@@ -5,7 +5,7 @@ MCP: `zswarm({ op, ... })`. CLI: `zswarm <op>`. Same surface.
 | op | Purpose |
 |----|---------|
 | `list` | Terminal panes (id, title, command, tab); `verbose` adds cwd/flags |
-| `send` | Paste body + Enter (`to` = id / title / command). `submit`: `auto` (default) / `double-enter` / `none`. Result `submitted: true\|false\|"unverified"`. `expect` refuses unless the screen already shows that substring |
+| `send` | Paste body + Enter (`to` = id / title / command). `from` labels `[zswarm from=…]` (default: `ZSWARM_FROM`, else the sending pane's title, else `swarm`). `submit`: `auto` (default) / `double-enter` / `none`. Result `submitted: true\|false\|"unverified"`. `expect` refuses unless the screen already shows that substring |
 | `dump` | Full-screen read; capped at 8000 chars (tail) — expensive vs `tail` |
 | `tail` | Incremental read since last cursor; `reset: true` returns the whole screen |
 | `wait` | Block until quiet or `match`; returns `reason` + a 2000-char tail. Bus holds one pipe for the wait |

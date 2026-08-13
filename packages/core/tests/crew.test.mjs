@@ -159,6 +159,40 @@ test("broadcast delivers to every target and logs each one", async () => {
   state.reset();
 });
 
+test("send defaults from to the sending pane's title", async () => {
+  const { client, pastes } = harness({ env: { ZELLIJ_PANE_ID: "1" } });
+  const res = await dispatchZswarm(
+    { op: "send", to: "reviewer", body: "please review" },
+    client,
+    { state: tempState() },
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.data.from, "builder");
+  assert.ok(pastes()[0].some((a) => String(a).includes("[zswarm from=builder]")));
+});
+
+test("send prefers from, then ZSWARM_FROM, over the pane title", async () => {
+  const { client, pastes } = harness({ env: { ZELLIJ_PANE_ID: "1" } });
+  const explicit = await dispatchZswarm(
+    { op: "send", to: "reviewer", body: "go", from: "lead" },
+    client,
+    { state: tempState() },
+  );
+  assert.equal(explicit.data.from, "lead");
+  assert.ok(pastes()[0].some((a) => String(a).includes("[zswarm from=lead]")));
+
+  const { client: envClient, pastes: envPastes } = harness({
+    env: { ZELLIJ_PANE_ID: "1" },
+  });
+  const pinned = await dispatchZswarm(
+    { op: "send", to: "reviewer", body: "go" },
+    envClient,
+    { state: tempState(), env: { ZSWARM_FROM: "orch" } },
+  );
+  assert.equal(pinned.data.from, "orch");
+  assert.ok(envPastes()[0].some((a) => String(a).includes("[zswarm from=orch]")));
+});
+
 test("broadcast skips the caller's own pane and refuses an empty selection", async () => {
   const { client, pastes } = harness({ env: { ZELLIJ_PANE_ID: "1" } });
   const state = tempState();
@@ -168,8 +202,10 @@ test("broadcast skips the caller's own pane and refuses an empty selection", asy
     { state },
   );
   assert.deepEqual(res.data.delivered, ["terminal_2"]);
+  assert.equal(res.data.from, "builder");
   assert.ok(res.data.skipped.some((s) => s.reason === "self_target"));
   assert.equal(pastes().length, 1);
+  assert.ok(pastes()[0].some((a) => String(a).includes("[zswarm from=builder]")));
 
   const empty = await dispatchZswarm(
     { op: "broadcast", tab: "nowhere", body: "ping" },

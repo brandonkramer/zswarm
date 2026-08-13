@@ -149,6 +149,8 @@ zswarm await --channel tests --count 3          # Wait for 3 worker signals
 | `ZSWARM_BIN` / `ZSWARM_PATH` | Path to `zellij` executable |
 | `ZSWARM_SESSION` | Default Zellij session name |
 | `ZELLIJ_SESSION_NAME` | Active Zellij session (set automatically inside Zellij panes) |
+| `ZELLIJ_PANE_ID` / `ZSWARM_SELF_PANE` | Sending pane id (Zellij sets the first inside a pane). Used to refuse self-target and to default `from` to that pane's title |
+| `ZSWARM_FROM` | Sender label when `from` is omitted (overrides the pane title) |
 | `ZSWARM_WORKTREE_ROOT` | Directory for linked worktrees (default: `<repo>-worktrees`) |
 | `ZSWARM_STATE_DIR` | State storage directory for logs, signals, and cursors (default: `~/.zswarm`) |
 | `ZSWARM_SSH` | `user@host` — Route Zellij commands across SSH |

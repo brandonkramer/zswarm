@@ -20,8 +20,81 @@ export type SubmitMode = "auto" | "double-enter" | "none";
 /** Cursor / Claude leave this in scrollback after a successful submit. */
 const PASTE_MARKER = "[Pasted text";
 
-export function senderLabel(args: Record<string, unknown>): string {
-  return (typeof args.from === "string" && args.from.trim()) || "swarm";
+const SENDER_LABEL_MAX = 48;
+
+export type SenderSource = "arg" | "env" | "title" | "default";
+
+export type SenderLabel = { label: string; source: SenderSource };
+
+/** Drop characters that would break `[zswarm from=…]` or wrap the prefix. */
+export function sanitizeSenderLabel(raw: string): string {
+  const cleaned = raw.replace(/[\r\n[\]]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+  return cleaned.length <= SENDER_LABEL_MAX
+    ? cleaned
+    : cleaned.slice(0, SENDER_LABEL_MAX).trimEnd();
+}
+
+export function selfPaneTitle(
+  client: Pick<ZellijClient, "selfPaneId">,
+  panes: ZellijPane[],
+): string | null {
+  const id = client.selfPaneId;
+  if (!id) return null;
+  const title = panes.find((p) => p.id === id)?.title;
+  return title?.trim() ? title : null;
+}
+
+/**
+ * Label for `[zswarm from=…]`. Explicit `from` wins, then `ZSWARM_FROM`,
+ * then the sending pane's title when we know that pane, else `swarm`.
+ */
+export function resolveSender(
+  args: Record<string, unknown>,
+  opts: { env?: NodeJS.ProcessEnv; selfTitle?: string | null } = {},
+): SenderLabel {
+  if (typeof args.from === "string") {
+    const explicit = sanitizeSenderLabel(args.from);
+    if (explicit) return { label: explicit, source: "arg" };
+  }
+  const envFrom = sanitizeSenderLabel(opts.env?.ZSWARM_FROM ?? "");
+  if (envFrom) return { label: envFrom, source: "env" };
+  const title = sanitizeSenderLabel(opts.selfTitle ?? "");
+  if (title) return { label: title, source: "title" };
+  return { label: "swarm", source: "default" };
+}
+
+export function senderLabel(
+  args: Record<string, unknown>,
+  opts: { env?: NodeJS.ProcessEnv; selfTitle?: string | null } = {},
+): string {
+  return resolveSender(args, opts).label;
+}
+
+/** Stamp `from` so deliverTo and the op result use the same resolved label. */
+export function withSenderLabel(
+  args: Record<string, unknown>,
+  opts: { env?: NodeJS.ProcessEnv; selfTitle?: string | null } = {},
+): Record<string, unknown> {
+  return { ...args, from: senderLabel(args, opts) };
+}
+
+/**
+ * Before forwarding over `ZSWARM_SERVE`, keep a caller-chosen label and
+ * leave `from` unset when it would default, so the Zellij-side process can
+ * still fill in its own pane title.
+ */
+export function attachKnownSender(
+  args: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+): Record<string, unknown> {
+  const op = String(args.op ?? "");
+  if (op !== "send" && op !== "broadcast") return args;
+  const sender = resolveSender(args, { env });
+  if (sender.source === "arg" || sender.source === "env") {
+    return { ...args, from: sender.label };
+  }
+  return args;
 }
 
 export function bodyText(

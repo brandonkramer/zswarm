@@ -21,7 +21,7 @@ import {
   stackTargets,
 } from "./panes.js";
 import { peerCheckpoint, peerDiff } from "./review.js";
-import { deliverTo } from "./delivery.js";
+import { attachKnownSender, deliverTo, withSenderLabel, selfPaneTitle } from "./delivery.js";
 import {
   assertNotPlugin,
   assertNotSelf,
@@ -172,7 +172,7 @@ export async function dispatchZswarm(
     if (!injected && env.ZSWARM_SERVE?.trim()) {
       return await callServe(
         env.ZSWARM_SERVE.trim(),
-        args,
+        attachKnownSender(args, env),
         serveCallTimeout(args),
         env.ZSWARM_SERVE_TOKEN,
       );
@@ -208,7 +208,7 @@ export async function dispatchZswarm(
       case "send": {
         const body = String(args.body ?? args.text ?? "");
         if (!body.trim()) throw new ZellijError("missing_body", "body required");
-        const { session, pane } = await resolveTarget(
+        const { session, pane, panes } = await resolveTarget(
           client,
           args,
           state(),
@@ -226,7 +226,11 @@ export async function dispatchZswarm(
           const screen = await client.dumpPane({ session, paneId: pane.id });
           assertPaneExpects(screen.text, expect, pane.id);
         }
-        const result = await deliverTo(client, state(), args, {
+        const labeled = withSenderLabel(args, {
+          env,
+          selfTitle: selfPaneTitle(client, panes),
+        });
+        const result = await deliverTo(client, state(), labeled, {
           session,
           pane,
           body,
@@ -241,14 +245,14 @@ export async function dispatchZswarm(
           delivery: result.delivery,
           session,
           to: result.to,
-          from: (typeof args.from === "string" && args.from.trim()) || "swarm",
+          from: labeled.from,
           submitted: result.submitted,
         };
         if (verbose) data.pane = paneViewFull(pane);
         return { ok: true, data };
       }
       case "broadcast":
-        return await broadcast(client, state(), args, clock, policy);
+        return await broadcast(client, state(), args, clock, policy, env);
       case "keys":
       case "interrupt": {
         const { session, pane } = await resolveTarget(

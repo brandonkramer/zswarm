@@ -176,7 +176,8 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "from",
     type: "string",
     flags: ["--from", "-f"],
-    description: "send: sender label in the [zswarm from=…] prefix",
+    description:
+      "send: sender label in the [zswarm from=…] prefix (default: ZSWARM_FROM, else the sending pane's title, else swarm)",
   },
   {
     name: "raw",
@@ -501,7 +502,7 @@ export function cliUsage(): string {
     "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force). --expect requires the screen to contain a substring first.",
     "Bus: `zswarm bus --install` once, then list and status use it now.",
     "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE (+ ZSWARM_SERVE_TOKEN off loopback).",
-    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN",
+    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZSWARM_FROM, ZELLIJ_PANE_ID, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN",
     "",
   );
   return lines.join("\n");
