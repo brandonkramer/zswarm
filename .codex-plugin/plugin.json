@@ -1,6 +1,6 @@
 {
   "name": "zswarm",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "zSwarm — coordinate CLI crews in Zellij panes (list, send, dump).",
   "author": {
     "name": "zSwarm"

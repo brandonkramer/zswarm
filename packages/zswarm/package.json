@@ -1,6 +1,6 @@
 {
   "name": "zswarm",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "description": "Coordinate CLI agent crews in Zellij panes",
   "scripts": {
