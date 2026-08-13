@@ -300,6 +300,31 @@ test("unworktree does not delete when pane inspection fails", async () => {
   assert.equal(calls.some((c) => c.args.includes("remove")), false);
 });
 
+test("unworktree treats no live Zellij session as no occupants", async () => {
+  const { git, argvFor } = gitHarness();
+  const client = createZellijClient({
+    env: {},
+    exec: async (args) => {
+      if (args.includes("list-sessions")) {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "No active zellij sessions found.\n",
+        };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const res = await dispatchZswarm(
+    { op: "unworktree", branch: "reviewer", cwd: REPO },
+    client,
+    { git },
+  );
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.data.evicted, []);
+  assert.ok(argvFor("remove"));
+});
+
 test("unworktree needs a target and reports unknown ones", async () => {
   const { git } = gitHarness();
   const { client } = zellijHarness();

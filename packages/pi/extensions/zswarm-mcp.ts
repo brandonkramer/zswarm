@@ -73,8 +73,8 @@ function defaultServers(): Record<string, ServerSpec> {
 
 /** How long to wait for a server to answer initialize/tools-list before giving up. */
 const HANDSHAKE_MS = 20_000;
-/** Tool calls can legitimately block — `wait` holds until a pane goes idle. */
-const CALL_MS = 15 * 60_000;
+/** Core wait max is 15 minutes; slack covers framing so the client does not give up first. */
+const CALL_MS = 16 * 60_000;
 
 function readServers(): Record<string, ServerSpec> {
   const raw = process.env.ZSWARM_MCP_SERVERS?.trim();
@@ -189,20 +189,34 @@ class McpClient {
     method: string,
     params: unknown,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     const id = this.nextId++;
     return new Promise<unknown>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new Error("Cancelled"));
+        return;
+      }
+      const onAbort = () => {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(new Error("Cancelled"));
+      };
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        signal?.removeEventListener("abort", onAbort);
         reject(new Error(`${this.name} ${method} timed out`));
       }, timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.pending.set(id, {
         resolve: (value) => {
           clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
           resolve(value);
         },
         reject: (error) => {
           clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
           reject(error);
         },
       });
@@ -210,11 +224,16 @@ class McpClient {
     });
   }
 
-  async call(tool: string, args: Record<string, unknown>): Promise<string> {
+  async call(
+    tool: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const result = (await this.request(
       "tools/call",
       { name: tool, arguments: args },
       CALL_MS,
+      signal,
     )) as { content?: Array<{ type?: string; text?: string }> };
     const text = (result.content ?? [])
       .filter((part) => part.type === "text" && typeof part.text === "string")
@@ -280,16 +299,21 @@ export default function (pi: ExtensionAPI) {
             properties: {},
           }) as never,
           async execute(_toolCallId, params, signal) {
-            if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Cancelled" }], details: {} };
-            }
+            const cancelled = () => ({
+              content: [{ type: "text" as const, text: "Cancelled" }],
+              details: {},
+            });
+            if (signal?.aborted) return cancelled();
             try {
               const text = await client.call(
                 tool.name,
                 (params ?? {}) as Record<string, unknown>,
+                signal,
               );
+              if (signal?.aborted) return cancelled();
               return { content: [{ type: "text", text }], details: {} };
             } catch (err) {
+              if (signal?.aborted) return cancelled();
               const message = err instanceof Error ? err.message : String(err);
               return {
                 content: [{ type: "text", text: `MCP ${name} error: ${message}` }],

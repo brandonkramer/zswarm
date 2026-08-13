@@ -1,7 +1,18 @@
 name: Release
 
+# Publish only after CI has succeeded for a push to master. PR CI must not
+# publish. workflow_run runs on the default branch, so checkout the SHA that
+# actually passed — not whatever master is by the time this job starts.
+#
+# GITHUB_TOKEN version commits still do not retrigger CI, so they cannot
+# loop this workflow either. That is fine: those commits only touch
+# manifests, changelogs, and plugin.json.
 on:
-  push:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
     branches:
       - master
 
@@ -9,19 +20,24 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
   release:
     name: Version and publish
     runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_branch == 'master'
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
@@ -49,9 +65,6 @@ jobs:
         run: |
           # One scripted cycle, no Version PR: consume pending changesets,
           # publish, then push the version commit and tags back to master.
-          # Pushes made with GITHUB_TOKEN do not trigger workflows, so this
-          # cannot loop — it also means the version commit gets no CI run,
-          # which is fine: it only touches manifests, changelogs, and plugin.json.
           if find .changeset -name '*.md' ! -name 'README.md' | grep -q .; then
             pnpm version-packages
           fi
@@ -68,4 +81,5 @@ jobs:
           # Publishes anything whose version is not on npm yet; a re-run after
           # a failed push therefore recovers instead of double-publishing.
           pnpm release
-          git push --follow-tags
+          # workflow_run checkout is detached at head_sha.
+          git push --follow-tags origin HEAD:master

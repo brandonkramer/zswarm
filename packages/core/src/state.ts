@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -40,6 +40,7 @@ const LOG_FILE = "log.jsonl";
 const SIGNALS_FILE = "signals.json";
 const SIGNALS_LOCK = "signals.lock";
 const CURSORS_FILE = "cursors.json";
+const CURSORS_LOCK = "cursors.lock";
 const BUS_FILE = "bus.json";
 /** Keeps the log bounded without needing a rotation daemon. */
 const LOG_TAIL_BYTES = 512 * 1024;
@@ -119,14 +120,54 @@ export function createStateStore(options: StateStoreOptions = {}) {
     return out;
   }
 
-  function withSignalsLock<T>(fn: () => T): T {
+  function pidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      // ESRCH: gone. EPERM: exists, just unsignalable — still a live holder.
+      return (err as NodeJS.ErrnoException).code === "EPERM";
+    }
+  }
+
+  /** Owner recorded in the lock file so a crash can be distinguished from a live holder. */
+  function readLockOwner(lockPath: string): { pid: number; at: number } | null {
+    try {
+      const rec = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown; at?: unknown };
+      if (typeof rec.pid !== "number" || !Number.isInteger(rec.pid) || rec.pid <= 0) return null;
+      const at = typeof rec.at === "number" ? rec.at : 0;
+      return { pid: rec.pid, at };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Dead pid → steal now. Empty leftover from older writers (wx with no owner
+   * bytes) → steal once mtime is older than the wait, so an in-flight create is
+   * not yanked out from under the holder.
+   * Owner is read once: a second read can see a pid that appeared after an
+   * empty snapshot and would steal a live lock.
+   */
+  function lockIsStale(lockPath: string): boolean {
+    const owner = readLockOwner(lockPath);
+    if (owner) return !pidAlive(owner.pid);
+    try {
+      return Date.now() - statSync(lockPath).mtimeMs >= LOCK_WAIT_MS;
+    } catch {
+      return false;
+    }
+  }
+
+  function withFileLock<T>(lockName: string, fn: () => T): T {
     ensureDir();
-    const lockPath = join(dir, SIGNALS_LOCK);
+    const lockPath = join(dir, lockName);
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
         const fd = openSync(lockPath, "wx");
         try {
+          writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
           return fn();
         } finally {
           closeSync(fd);
@@ -135,12 +176,24 @@ export function createStateStore(options: StateStoreOptions = {}) {
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (code !== "EEXIST") throw err;
+        if (lockIsStale(lockPath)) {
+          try {
+            rmSync(lockPath, { force: true });
+          } catch {
+            // Another waiter already took it.
+          }
+          continue;
+        }
         if (Date.now() >= deadline) {
-          throw new Error(`timed out waiting for ${SIGNALS_LOCK}`);
+          throw new Error(`timed out waiting for ${lockName}`);
         }
         sleepSync(10);
       }
     }
+  }
+
+  function withSignalsLock<T>(fn: () => T): T {
+    return withFileLock(SIGNALS_LOCK, fn);
   }
 
   function readSignals(): Record<string, SignalChannel> {
@@ -184,15 +237,19 @@ export function createStateStore(options: StateStoreOptions = {}) {
   }
 
   function writeCursor(key: string, text: string): void {
-    const all = readJson<Record<string, string>>(CURSORS_FILE, {});
-    all[key] = text;
-    writeJson(CURSORS_FILE, all);
+    withFileLock(CURSORS_LOCK, () => {
+      const all = readJson<Record<string, string>>(CURSORS_FILE, {});
+      all[key] = text;
+      writeJson(CURSORS_FILE, all);
+    });
   }
 
   function clearCursor(key: string): void {
-    const all = readJson<Record<string, string>>(CURSORS_FILE, {});
-    delete all[key];
-    writeJson(CURSORS_FILE, all);
+    withFileLock(CURSORS_LOCK, () => {
+      const all = readJson<Record<string, string>>(CURSORS_FILE, {});
+      delete all[key];
+      writeJson(CURSORS_FILE, all);
+    });
   }
 
   function readBus(): BusMarkerRecord | null {

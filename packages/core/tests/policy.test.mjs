@@ -1,12 +1,71 @@
+process.env.ZSWARM_LOG = "0";
+process.env.ZSWARM_BUS = "0";
+
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   loadPolicy,
   isWriteOp,
   assertOpAllowed,
   assertPaneAllowed,
+  createStateStore,
+  createZellijClient,
+  dispatchZswarm,
   ZellijError,
 } from "../dist/index.js";
+
+const PANES = [
+  {
+    id: 1,
+    is_plugin: false,
+    is_focused: true,
+    title: "builder",
+    exited: false,
+    is_floating: false,
+    tab_id: 0,
+    tab_name: "crew",
+    pane_command: "claude.exe",
+  },
+  {
+    id: 2,
+    is_plugin: false,
+    is_focused: false,
+    title: "reviewer",
+    exited: false,
+    is_floating: false,
+    tab_id: 0,
+    tab_name: "crew",
+    pane_command: "codex.exe",
+  },
+];
+
+function paneClient() {
+  const calls = [];
+  const client = createZellijClient({
+    env: {},
+    exec: async (args) => {
+      calls.push(args);
+      if (args.includes("list-sessions")) {
+        return { code: 0, stdout: "demo\n", stderr: "" };
+      }
+      if (args.includes("list-panes")) {
+        return { code: 0, stdout: JSON.stringify(PANES), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  return { client, calls };
+}
+
+let stateSeq = 0;
+function tempState() {
+  const dir = join(tmpdir(), `zswarm-policy-${process.pid}-${stateSeq++}`);
+  const store = createStateStore({ dir, env: {} });
+  store.reset();
+  return store;
+}
 
 const emptyEnv = {};
 
@@ -148,4 +207,74 @@ test("empty allow/deny lists stay permissive; only 0/false/no disable switches",
   assert.equal(p.allowSpawn, true);
   assert.equal(p.allowClose, true);
   assert.equal(p.allowWorktreeRemove, true);
+});
+
+test("rename, focus, and stack honor ZSWARM_DENY_PANES / ZSWARM_ALLOW_PANES", async () => {
+  const { client, calls } = paneClient();
+  const deny = { env: { ZSWARM_DENY_PANES: "reviewer" } };
+  const renamed = await dispatchZswarm(
+    { op: "rename", to: "reviewer", name: "auth-review" },
+    client,
+    deny,
+  );
+  assert.equal(renamed.ok, false);
+  assert.equal(renamed.error.code, "policy_denied");
+  assert.match(renamed.error.message, /ZSWARM_DENY_PANES/);
+  assert.equal(calls.some((a) => a.includes("rename-pane")), false);
+
+  const focused = await dispatchZswarm({ op: "focus", to: "reviewer" }, client, deny);
+  assert.equal(focused.ok, false);
+  assert.equal(focused.error.code, "policy_denied");
+  assert.equal(calls.some((a) => a.includes("focus-pane-id")), false);
+
+  const stacked = await dispatchZswarm(
+    { op: "stack", to: "builder,reviewer" },
+    client,
+    deny,
+  );
+  assert.equal(stacked.ok, false);
+  assert.equal(stacked.error.code, "policy_denied");
+  assert.equal(calls.some((a) => a.includes("stack-panes")), false);
+
+  const allowed = await dispatchZswarm(
+    { op: "rename", to: "builder", name: "ok" },
+    client,
+    deny,
+  );
+  assert.equal(allowed.ok, true);
+  assert.equal(allowed.data.to, "terminal_1");
+
+  const allowlist = await dispatchZswarm(
+    { op: "focus", to: "reviewer" },
+    client,
+    { env: { ZSWARM_ALLOW_PANES: "builder" } },
+  );
+  assert.equal(allowlist.ok, false);
+  assert.equal(allowlist.error.code, "policy_denied");
+  assert.match(allowlist.error.message, /ZSWARM_ALLOW_PANES/);
+});
+
+test("ZSWARM_SSH refuses client-local signal/signals/await", async () => {
+  const ssh = { env: { ZSWARM_SSH: "user@host" } };
+  for (const op of ["signal", "signals", "await"]) {
+    const args =
+      op === "signals"
+        ? { op }
+        : { op, channel: "build" };
+    const res = await dispatchZswarm(args, undefined, ssh);
+    assert.equal(res.ok, false, op);
+    assert.equal(res.error.code, "ssh_git_unsupported", op);
+    assert.match(res.error.message, /client-local barrier/);
+  }
+
+  const viaServe = await dispatchZswarm(
+    { op: "signal", channel: "build" },
+    paneClient().client,
+    {
+      env: { ZSWARM_SSH: "user@host", ZSWARM_SERVE: "127.0.0.1:9419" },
+      state: tempState(),
+    },
+  );
+  assert.equal(viaServe.ok, true);
+  assert.equal(viaServe.data.channel, "build");
 });

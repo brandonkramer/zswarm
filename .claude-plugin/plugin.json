@@ -34,7 +34,13 @@
         "ZSWARM_SSH_MODE",
         "ZSWARM_REMOTE_BIN",
         "ZSWARM_SERVE",
-        "ZSWARM_SERVE_TOKEN"
+        "ZSWARM_SERVE_TOKEN",
+        "ZSWARM_READONLY",
+        "ZSWARM_ALLOW_PANES",
+        "ZSWARM_DENY_PANES",
+        "ZSWARM_ALLOW_SPAWN",
+        "ZSWARM_ALLOW_CLOSE",
+        "ZSWARM_ALLOW_WORKTREE_REMOVE"
       ]
     }
   }
