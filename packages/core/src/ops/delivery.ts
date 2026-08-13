@@ -80,9 +80,9 @@ export function withSenderLabel(
 }
 
 /**
- * Before forwarding over `ZSWARM_SERVE`, keep a caller-chosen label and
- * leave `from` unset when it would default, so the Zellij-side process can
- * still fill in its own pane title.
+ * Before forwarding over `ZSWARM_SERVE`, stamp a caller-chosen label. Leaving
+ * `from` unset used to let the Zellij-side process fill in its pane title —
+ * which is the serve daemon when it runs in a pane, not the remote sender.
  */
 export function attachKnownSender(
   args: Record<string, unknown>,
@@ -91,10 +91,7 @@ export function attachKnownSender(
   const op = String(args.op ?? "");
   if (op !== "send" && op !== "broadcast") return args;
   const sender = resolveSender(args, { env });
-  if (sender.source === "arg" || sender.source === "env") {
-    return { ...args, from: sender.label };
-  }
-  return args;
+  return { ...args, from: sender.label };
 }
 
 export function bodyText(

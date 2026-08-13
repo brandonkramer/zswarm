@@ -239,14 +239,14 @@ test("senderLabel: arg, ZSWARM_FROM, pane title, then swarm", () => {
   assert.equal(sanitizeSenderLabel("x".repeat(60)).length, 48);
 });
 
-test("attachKnownSender forwards chosen labels and leaves the default unset", () => {
+test("attachKnownSender stamps swarm when nothing chose a label", () => {
   assert.equal(
     attachKnownSender({ op: "list" }, { ZSWARM_FROM: "orch" }).from,
     undefined,
   );
   assert.equal(
     attachKnownSender({ op: "send", body: "hi" }, {}).from,
-    undefined,
+    "swarm",
   );
   assert.equal(
     attachKnownSender({ op: "send", from: "lead", body: "hi" }, {}).from,
