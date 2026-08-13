@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { ZellijError } from "../errors.js";
-import type { Policy } from "../policy.js";
+import { loadPolicy, type Policy } from "../policy.js";
 import type { StateStore } from "../state.js";
 import {
   DEFAULT_BUS_KEY,
@@ -123,7 +123,9 @@ async function askOnce(
 async function nudgeManifest(
   client: ZellijClient,
   session: string,
+  env: NodeJS.ProcessEnv,
 ): Promise<void> {
+  if (loadPolicy(env).readOnly) return;
   const panes = await client.listPanes(session);
   const pane = panes.find((p) => !p.isPlugin && !p.exited && p.title.trim());
   if (!pane) return;
@@ -164,7 +166,7 @@ export async function busSnapshot(
     if (snapshot && !snapshot.ready && !nudged) {
       nudged = true;
       try {
-        await nudgeManifest(client, session);
+        await nudgeManifest(client, session, env);
         snapshot =
           (await askOnce(client, session, plan.url, configKey, payload)) ??
           snapshot;

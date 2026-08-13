@@ -321,6 +321,26 @@ test("a quiet session nudges the bus once; a ready one never does", async () => 
   assert.equal(warm.pipes().length, 1);
 });
 
+test("a cold bus does not rename panes when ZSWARM_READONLY=1", async () => {
+  const panesJson = JSON.stringify([
+    {
+      id: 2,
+      is_plugin: false,
+      is_focused: true,
+      title: "builder",
+      exited: false,
+      is_floating: false,
+      tab_name: "work",
+    },
+  ]);
+  resetBusCache();
+  const cold = busClient({ stayColdUntilRename: true, panesJson });
+  await busSnapshot(cold.client, installed(tempState()), "demo", clock, {
+    ZSWARM_READONLY: "1",
+  });
+  assert.equal(cold.calls.filter((a) => a.includes("rename-pane")).length, 0);
+});
+
 test("a bus that never answers costs one round, then falls back", async () => {
   resetBusCache();
   const store = installed(tempState());
