@@ -13,6 +13,7 @@
 //! Pipe names: `status` (pane snapshot), `events` (counters since load).
 
 use std::collections::BTreeMap;
+use std::time::Instant;
 use zellij_tile::prelude::*;
 
 register_plugin!(State);
@@ -46,8 +47,10 @@ struct PendingWait {
     idle_ms: f64,
     poll_ms: f64,
     timeout_ms: f64,
-    elapsed_ms: f64,
-    unchanged_ms: f64,
+    /// Wall clock at begin_wait — not summed Timer elapsed. Extra Timer
+    /// events from overlapping set_timeout calls must not speed this up.
+    started_at: Instant,
+    last_change_at: Instant,
     last_screen: Option<String>,
 }
 
@@ -289,6 +292,7 @@ impl State {
         }
 
         let poll_ms = number("pollMs", 50.0).max(20.0);
+        let now = Instant::now();
         self.waiting.push(PendingWait {
             pipe_id: pipe_id.to_string(),
             pane,
@@ -302,29 +306,30 @@ impl State {
             idle_ms: number("idleMs", 2000.0),
             poll_ms,
             timeout_ms: number("timeoutMs", 60000.0),
-            elapsed_ms: 0.0,
-            unchanged_ms: 0.0,
+            started_at: now,
+            last_change_at: now,
             last_screen: None,
         });
         block_cli_pipe_input(pipe_id);
-        // One timer drives every pending wait. A second set_timeout here would
-        // fire extra Timer events, and tick_waits would add that elapsed to
-        // every waiter — concurrent waits then finish twice as fast.
-        if self.waiting.len() == 1 {
-            set_timeout(poll_ms / 1000.0);
-        }
+        // Always arm this wait's own interval. A later wait must not sit on
+        // an older wait's remaining timer. Extra Timer events are safe because
+        // elapsed is wall-clock per waiter, not summed from every event.
+        set_timeout(poll_ms / 1000.0);
         None
     }
 
     /// One poll tick for every held wait. Anything that resolves answers its
     /// own pipe and releases the caller; the rest re-arm the timer.
-    fn tick_waits(&mut self, elapsed_secs: f64) {
-        let elapsed_ms = elapsed_secs * 1000.0;
+    fn tick_waits(&mut self) {
+        let now = Instant::now();
         let mut still_waiting = Vec::new();
         let mut shortest_poll = f64::MAX;
 
         for mut wait in std::mem::take(&mut self.waiting) {
-            wait.elapsed_ms += elapsed_ms;
+            let elapsed_ms = now
+                .saturating_duration_since(wait.started_at)
+                .as_secs_f64()
+                * 1000.0;
             let screen = match get_pane_scrollback(wait.pane, false) {
                 Ok(contents) => normalize(&contents.viewport),
                 // The pane went away mid-wait; say so rather than hanging.
@@ -344,16 +349,20 @@ impl State {
             }
 
             match &wait.last_screen {
-                Some(previous) if previous == &screen => wait.unchanged_ms += elapsed_ms,
-                _ => wait.unchanged_ms = 0.0,
+                Some(previous) if previous == &screen => {}
+                _ => wait.last_change_at = now,
             }
             wait.last_screen = Some(screen.clone());
+            let unchanged_ms = now
+                .saturating_duration_since(wait.last_change_at)
+                .as_secs_f64()
+                * 1000.0;
 
-            if wait.mode != "match" && wait.unchanged_ms >= wait.idle_ms {
+            if wait.mode != "match" && unchanged_ms >= wait.idle_ms {
                 self.finish_wait(&wait, "idle", &screen);
                 continue;
             }
-            if wait.elapsed_ms >= wait.timeout_ms {
+            if elapsed_ms >= wait.timeout_ms {
                 self.finish_wait(&wait, "timeout", &screen);
                 continue;
             }
@@ -441,8 +450,8 @@ impl ZellijPlugin for State {
                 self.tabs = tabs.iter().map(|t| t.name.clone()).collect();
                 true
             }
-            Event::Timer(elapsed) => {
-                self.tick_waits(elapsed);
+            Event::Timer(_elapsed) => {
+                self.tick_waits();
                 false
             },
             _ => false,
