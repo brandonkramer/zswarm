@@ -118,12 +118,16 @@ test("dispatch serve --clear on Unix fails without touching Zellij", {
 });
 
 test("startServe + callServe round-trip JSONL", async () => {
-  const { label, close } = await startServe("127.0.0.1:0", async (args) => ({
-    ok: true,
-    data: args,
-  }));
+  const { label, close } = await startServe(
+    "127.0.0.1:0",
+    async (args) => ({
+      ok: true,
+      data: args,
+    }),
+    { token: "secret" },
+  );
   try {
-    const result = await callServe(label, { op: "ping", to: "reviewer" }, 2_000);
+    const result = await callServe(label, { op: "ping", to: "reviewer" }, 2_000, "secret");
     assert.deepEqual(result, { ok: true, data: { op: "ping", to: "reviewer" } });
   } finally {
     await close();
@@ -131,15 +135,19 @@ test("startServe + callServe round-trip JSONL", async () => {
 });
 
 test("ZSWARM_SERVE forwards dispatch when no client is injected", async () => {
-  const { label, close } = await startServe("127.0.0.1:0", async (args) => ({
-    ok: true,
-    data: { forwarded: args.op },
-  }));
+  const { label, close } = await startServe(
+    "127.0.0.1:0",
+    async (args) => ({
+      ok: true,
+      data: { forwarded: args.op },
+    }),
+    { token: "secret" },
+  );
   try {
     const result = await dispatchZswarm(
       { op: "list" },
       undefined,
-      { env: { ZSWARM_SERVE: label } },
+      { env: { ZSWARM_SERVE: label, ZSWARM_SERVE_TOKEN: "secret" } },
     );
     assert.deepEqual(result, { ok: true, data: { forwarded: "list" } });
   } finally {
@@ -163,6 +171,13 @@ test("an injected client is not skipped for ZSWARM_SERVE", async () => {
   );
   assert.equal(result.ok, true);
   assert.equal(result.data.sessions[0], "demo");
+});
+
+test("startServe requires ZSWARM_SERVE_TOKEN on loopback", async () => {
+  await assert.rejects(
+    () => startServe("127.0.0.1:0", async () => ({ ok: true, data: {} })),
+    /ZSWARM_SERVE_TOKEN/,
+  );
 });
 
 test("startServe refuses a non-loopback bind without a token", async () => {
@@ -193,10 +208,10 @@ test("startServe drops an oversized request", async () => {
   const { label, close } = await startServe(
     "127.0.0.1:0",
     async () => ({ ok: true, data: {} }),
-    { maxRequestBytes: 32 },
+    { token: "secret", maxRequestBytes: 32 },
   );
   try {
-    const result = await callServe(label, { op: "x".repeat(64) }, 2_000);
+    const result = await callServe(label, { op: "x".repeat(64) }, 2_000, "secret");
     assert.equal(result.ok, false);
     assert.match(result.error.message, /exceeded/);
   } finally {

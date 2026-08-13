@@ -113,11 +113,11 @@ export function startServe(
 ): Promise<{ label: string; close: () => Promise<void> }> {
   const { host, port } = parseListenAddress(listen);
   const token = options.token?.trim() || undefined;
-  if (!token && !isLoopbackHost(host)) {
+  if (!token) {
     return Promise.reject(
       new ZellijError(
         "serve_auth",
-        `listening on ${host} requires ZSWARM_SERVE_TOKEN; loopback can run without one`,
+        "zswarm serve requires ZSWARM_SERVE_TOKEN; another local OS user can connect to 127.0.0.1",
       ),
     );
   }
@@ -153,7 +153,7 @@ export function startServe(
             try {
               const parsed = JSON.parse(line) as Record<string, unknown>;
               const taken = takeServeToken(parsed);
-              if (token && taken.token !== token) {
+              if (taken.token !== token) {
                 result = unauthorized();
               } else {
                 result = await dispatch(taken.request);

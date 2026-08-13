@@ -44,13 +44,13 @@ op.
 
 ```bash
 # On the host, in the session that owns Zellij:
-zswarm serve --listen 127.0.0.1:9419
-# Off loopback, set the same ZSWARM_SERVE_TOKEN on host and client.
+ZSWARM_SERVE_TOKEN=secret zswarm serve --listen 127.0.0.1:9419
+# Token is required on loopback too: another local OS user can connect to 127.0.0.1.
 # Windows logon task, once: zswarm serve --install
 
 # On the client:
 ssh -fN -L 9419:127.0.0.1:9419 user@host
-ZSWARM_SERVE=127.0.0.1:9419 zswarm list
+ZSWARM_SERVE=127.0.0.1:9419 ZSWARM_SERVE_TOKEN=secret zswarm list
 ```
 
 `ZSWARM_SSH` only forwards Zellij. Git worktrees, `diff`, and `checkpoint` stay

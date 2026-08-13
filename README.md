@@ -159,7 +159,7 @@ zswarm await --channel tests --count 3          # Wait for 3 worker signals
 | `ZSWARM_SSH_MODE` | `interactive` — Windows only: run each CLI call in the desktop session (scheduled task, same idea as `schtasks /IT`) |
 | `ZSWARM_REMOTE_SHELL` | `cmd` or `sh` — override remote quoting (inferred from `.exe` / Windows tmp / interactive) |
 | `ZSWARM_SERVE` | `127.0.0.1:9419` — Forward ops to `zswarm serve` (usually over an SSH tunnel) |
-| `ZSWARM_SERVE_TOKEN` | Shared secret for `zswarm serve`. Required to listen off loopback; send the same value on the client |
+| `ZSWARM_SERVE_TOKEN` | Shared secret for `zswarm serve`. Required even on loopback (another local OS user can connect to 127.0.0.1); send the same value on the client |
 
 ### Remote crews
 
@@ -177,11 +177,11 @@ ZSWARM_SSH=user@host ZSWARM_SSH_MODE=interactive zswarm list
 
 # Any OS: run zswarm next to Zellij; another machine talks over a tunnel
 # On the host, in the session that owns Zellij:
-zswarm serve --listen 127.0.0.1:9419
+ZSWARM_SERVE_TOKEN=secret zswarm serve --listen 127.0.0.1:9419
 # Windows, once: zswarm serve --install
 # On the client:
 ssh -fN -L 9419:127.0.0.1:9419 user@host
-ZSWARM_SERVE=127.0.0.1:9419 zswarm list
+ZSWARM_SERVE=127.0.0.1:9419 ZSWARM_SERVE_TOKEN=secret zswarm list
 ```
 
 `file:` plugin URLs stay on the machine that owns Zellij. A client with `ZSWARM_SERVE` never sends a local wasm path across the tunnel.
@@ -193,6 +193,7 @@ ZSWARM_SERVE=127.0.0.1:9419 zswarm list
       "command": "/absolute/path/to/zswarm-mcp",
       "env": {
         "ZSWARM_SERVE": "127.0.0.1:9419",
+        "ZSWARM_SERVE_TOKEN": "secret",
         "ZSWARM_SESSION": "crew"
       }
     }
