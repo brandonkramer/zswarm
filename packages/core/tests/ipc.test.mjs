@@ -64,6 +64,15 @@ test("parseZellijServerPaths reads --server off process listings", () => {
   ]);
 });
 
+test("parseZellijServerPaths keeps quoted Windows paths with spaces", () => {
+  const spaced = String.raw`C:\Users\Jane Doe\AppData\Local\Temp\zellij\contract_version_1\crew`;
+  assert.deepEqual(
+    parseZellijServerPaths(`zellij.exe --server "${spaced}"`),
+    [spaced],
+  );
+  assert.equal(tmpFromServerPath(spaced), String.raw`C:\Users\Jane Doe\AppData\Local\Temp`);
+});
+
 test("pickIpcTmp majority-votes so a stray SSH server loses", () => {
   assert.equal(
     pickIpcTmp([
@@ -90,10 +99,11 @@ test("wrapWithTmpEnv sets TEMP/TMP and ZELLIJ_SOCKET_DIR for cmd", () => {
   );
 });
 
-test("cmdQuote doubles inner quotes", () => {
+test("cmdQuote doubles inner quotes and percents", () => {
   assert.equal(cmdQuote("plain"), "plain");
   assert.equal(cmdQuote("has space"), '"has space"');
   assert.equal(cmdQuote('say "hi"'), '"say ""hi"""');
+  assert.equal(cmdQuote("%PATH%"), "%%PATH%%");
 });
 
 test("inferRemoteShell prefers explicit, then .exe / Windows tmp / interactive", () => {
@@ -168,6 +178,8 @@ test("windowsInteractiveRemote is a scheduled task in the desktop session", () =
   assert.match(script, /schtasks\.exe \/Create/);
   assert.match(script, /\/IT/);
   assert.match(script, /Start-ScheduledTask/);
+  assert.match(script, /UTF8Encoding/);
+  assert.doesNotMatch(script, /Encoding ASCII/);
   assert.doesNotMatch(script, /schtasks\.exe \/Run/);
   assert.ok(script.includes(Buffer.from(inner, "utf8").toString("base64")));
 });

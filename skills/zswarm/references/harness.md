@@ -1,6 +1,6 @@
 # Harness notes
 
-Verified live against **codex**, **cursor**, **pi**, **opencode**, and **gemini**.
+Verified live against **codex**, **cursor**, **pi**, **opencode**, and **gemini** (`agy`).
 
 - **Read** (`dump`, `tail`, `status`, `wait --for idle`, `expect`) works on all five.
 - **Send** lands on all five (`codex` auto-detects `submit=double-enter`, others `auto`).

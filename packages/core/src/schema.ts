@@ -500,8 +500,8 @@ export function cliUsage(): string {
     "",
     "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force). --expect requires the screen to contain a substring first.",
     "Bus: `zswarm bus --install` once, then list and status use it now.",
-    "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE.",
-    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE",
+    "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE (+ ZSWARM_SERVE_TOKEN off loopback).",
+    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN",
     "",
   );
   return lines.join("\n");
@@ -522,9 +522,21 @@ function extractOp(argv: string[]): { op: string; rest: string[] } {
     return { op: first, rest: argv.slice(1) };
   }
   const names = OP_NAMES as readonly string[];
-  const at = argv.findIndex((token) => names.includes(token));
-  if (at === -1) return { op: first ?? "", rest: argv.slice(1) };
-  return { op: argv[at]!, rest: [...argv.slice(0, at), ...argv.slice(at + 1)] };
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token.startsWith("-")) {
+      const param = FLAG_INDEX.get(token);
+      if (param && param.type !== "boolean") i += 1;
+      continue;
+    }
+    if (names.includes(token)) {
+      return {
+        op: token,
+        rest: [...argv.slice(0, i), ...argv.slice(i + 1)],
+      };
+    }
+  }
+  return { op: first ?? "", rest: argv.slice(1) };
 }
 
 export function parseCliArgv(argv: string[]): Record<string, unknown> {

@@ -103,6 +103,11 @@ test("parseCliArgv finds the op when flags come first", () => {
     to: "reviewer",
     body: "list",
   });
+  // Flag values that happen to be op names are not stolen.
+  assert.deepEqual(parseCliArgv(["--session", "list", "sessions"]), {
+    op: "sessions",
+    session: "list",
+  });
   // Nothing op-shaped anywhere still fails, and names the offending token.
   assert.throws(() => parseCliArgv(["--session", "crew"]), /usage|unexpected/i);
 });

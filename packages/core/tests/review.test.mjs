@@ -36,9 +36,12 @@ function gitHarness({
   const git = createGitClient({
     env: {},
     exec: async (args, opts) => {
-      calls.push({ args: [...args], cwd: opts.cwd });
+      calls.push({ args: [...args], cwd: opts.cwd, env: opts.env });
       if (args[0] === "rev-parse" && args.includes("--show-toplevel")) {
         return { code: 0, stdout: `${REPO}\n`, stderr: "" };
+      }
+      if (args[0] === "rev-parse" && args.includes("--git-path")) {
+        return { code: 0, stdout: ".git/index\n", stderr: "" };
       }
       if (args[0] === "rev-parse" && args.includes("--short")) {
         return { code: 0, stdout: `${sha}\n`, stderr: "" };
@@ -72,7 +75,7 @@ function gitHarness({
   };
 }
 
-test("peerDiff by path runs intent-to-add then diff against HEAD", async () => {
+test("peerDiff by path diffs against HEAD via a scratch intent-to-add index", async () => {
   const { git, calls } = gitHarness();
   const res = await peerDiff(git, { path: REVIEWER });
   assert.equal(res.ok, true);
@@ -91,6 +94,7 @@ test("peerDiff by path runs intent-to-add then diff against HEAD", async () => {
   );
   assert.ok(intent);
   assert.equal(intent.cwd, REVIEWER);
+  assert.match(String(intent.env?.GIT_INDEX_FILE ?? ""), /\.zswarm-/);
   assert.ok(
     calls.some(
       (c) =>

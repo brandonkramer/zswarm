@@ -157,6 +157,7 @@ zswarm await --channel tests --count 3          # Wait for 3 worker signals
 | `ZSWARM_SSH_MODE` | `interactive` — Windows only: run each CLI call in the desktop session (scheduled task, same idea as `schtasks /IT`) |
 | `ZSWARM_REMOTE_SHELL` | `cmd` or `sh` — override remote quoting (inferred from `.exe` / Windows tmp / interactive) |
 | `ZSWARM_SERVE` | `127.0.0.1:9419` — Forward ops to `zswarm serve` (usually over an SSH tunnel) |
+| `ZSWARM_SERVE_TOKEN` | Shared secret for `zswarm serve`. Required to listen off loopback; send the same value on the client |
 
 ### Remote crews
 

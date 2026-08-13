@@ -29,6 +29,7 @@ if (args.op === "serve" && args.install !== true && args.clear !== true) {
   try {
     const { label } = await startServe(listen, (request) =>
       dispatchZswarm(request, undefined, { env: serveChildEnv(process.env) }),
+      { token: process.env.ZSWARM_SERVE_TOKEN },
     );
     process.stdout.write(
       `${JSON.stringify({ ok: true, data: { listening: label } }, null, 2)}\n`,

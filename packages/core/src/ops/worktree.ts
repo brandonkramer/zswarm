@@ -179,8 +179,14 @@ export async function removePeerWorktree(
       typeof args.session === "string" ? args.session : undefined,
     );
     occupants = panesIn(await client.listPanes(session), target.path);
-  } catch {
-    // No live session means nobody is working in it.
+  } catch (err) {
+    // No live session means nobody is working in it. Any other failure must
+    // not look like "empty" — that is how a clean busy worktree gets deleted.
+    if (err instanceof ZellijError && err.code === "zellij_no_session") {
+      occupants = [];
+    } else {
+      throw err;
+    }
   }
   if (occupants.length > 0 && !force) {
     throw new ZellijError(

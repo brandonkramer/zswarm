@@ -276,6 +276,30 @@ test("unworktree refuses uncommitted changes unless forced", async () => {
   assert.ok(argvFor("remove").args.includes("--force"));
 });
 
+test("unworktree does not delete when pane inspection fails", async () => {
+  const { git, calls } = gitHarness();
+  const client = createZellijClient({
+    env: {},
+    exec: async (args) => {
+      if (args.includes("list-sessions")) {
+        return { code: 0, stdout: "demo\n", stderr: "" };
+      }
+      if (args.includes("list-panes")) {
+        return { code: 1, stdout: "", stderr: "zellij crashed" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const res = await dispatchZswarm(
+    { op: "unworktree", branch: "reviewer", cwd: REPO },
+    client,
+    { git },
+  );
+  assert.equal(res.ok, false);
+  assert.equal(res.error.code, "zellij_failed");
+  assert.equal(calls.some((c) => c.args.includes("remove")), false);
+});
+
 test("unworktree needs a target and reports unknown ones", async () => {
   const { git } = gitHarness();
   const { client } = zellijHarness();
@@ -303,4 +327,36 @@ test("worktree ops report a directory outside any repo", async () => {
   });
   assert.equal(res.ok, false);
   assert.equal(res.error.code, "not_a_repo");
+});
+
+test("ZSWARM_SSH refuses local git worktree ops", async () => {
+  const { git } = gitHarness();
+  const { client } = zellijHarness();
+  const env = { ZSWARM_SSH: "user@host", ZSWARM_LOG: "0", ZSWARM_BUS: "0" };
+  const unworktree = await dispatchZswarm(
+    { op: "unworktree", branch: "reviewer", cwd: REPO },
+    client,
+    { git, env },
+  );
+  assert.equal(unworktree.ok, false);
+  assert.equal(unworktree.error.code, "ssh_git_unsupported");
+  const spawned = await dispatchZswarm(
+    { op: "spawn", command: "claude", worktree: "reviewer", cwd: REPO },
+    client,
+    { git, env },
+  );
+  assert.equal(spawned.ok, false);
+  assert.equal(spawned.error.code, "ssh_git_unsupported");
+  const diff = await dispatchZswarm(
+    { op: "diff", path: REPO },
+    client,
+    { git, env },
+  );
+  assert.equal(diff.error.code, "ssh_git_unsupported");
+  const checkpoint = await dispatchZswarm(
+    { op: "checkpoint", path: REPO },
+    client,
+    { git, env },
+  );
+  assert.equal(checkpoint.error.code, "ssh_git_unsupported");
 });

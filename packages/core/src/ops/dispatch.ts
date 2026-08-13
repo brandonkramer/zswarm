@@ -40,6 +40,7 @@ import {
   fail,
   isTrue,
   isVerbose,
+  optionalString,
   paneViewBus,
   paneViewFull,
   paneViewSlim,
@@ -61,6 +62,31 @@ function waitMode(args: Record<string, unknown>): "idle" | "match" | "either" {
     return requested;
   }
   return typeof args.match === "string" && args.match ? "match" : "idle";
+}
+
+const SSH_GIT_OPS = new Set([
+  "worktrees",
+  "unworktree",
+  "diff",
+  "checkpoint",
+]);
+
+/**
+ * SSH only forwards Zellij. Git worktrees, diffs, and checkpoints stay on this
+ * machine, so mixing them with a remote pane cwd is how you delete the wrong tree.
+ */
+function assertSshGitAllowed(
+  env: NodeJS.ProcessEnv,
+  op: string,
+  args: Record<string, unknown>,
+): void {
+  if (!env.ZSWARM_SSH?.trim() || env.ZSWARM_SERVE?.trim()) return;
+  const worktreeSpawn = op === "spawn" && optionalString(args.worktree);
+  if (!worktreeSpawn && !SSH_GIT_OPS.has(op)) return;
+  throw new ZellijError(
+    "ssh_git_unsupported",
+    `${op} uses local git; ZSWARM_SSH only forwards Zellij. Run zswarm serve on the host that owns the session`,
+  );
 }
 
 async function resolveTarget(
@@ -122,6 +148,7 @@ export async function dispatchZswarm(
   try {
     // Policy gates the op before anything touches the session.
     assertOpAllowed(policy, op);
+    assertSshGitAllowed(env, op, args);
     if (op === "serve") {
       if (isTrue(args.clear)) {
         const cleared = await uninstallServeLogon({
@@ -147,6 +174,7 @@ export async function dispatchZswarm(
         env.ZSWARM_SERVE.trim(),
         args,
         serveCallTimeout(args),
+        env.ZSWARM_SERVE_TOKEN,
       );
     }
     const client = injected ?? createZellijClient({ env: deps.env });

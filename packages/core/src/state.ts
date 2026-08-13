@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -38,10 +38,16 @@ export type BusMarkerRecord = {
 
 const LOG_FILE = "log.jsonl";
 const SIGNALS_FILE = "signals.json";
+const SIGNALS_LOCK = "signals.lock";
 const CURSORS_FILE = "cursors.json";
 const BUS_FILE = "bus.json";
 /** Keeps the log bounded without needing a rotation daemon. */
 const LOG_TAIL_BYTES = 512 * 1024;
+const LOCK_WAIT_MS = 5_000;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 export function defaultStateDir(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env.ZSWARM_STATE_DIR?.trim();
@@ -113,6 +119,30 @@ export function createStateStore(options: StateStoreOptions = {}) {
     return out;
   }
 
+  function withSignalsLock<T>(fn: () => T): T {
+    ensureDir();
+    const lockPath = join(dir, SIGNALS_LOCK);
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    while (true) {
+      try {
+        const fd = openSync(lockPath, "wx");
+        try {
+          return fn();
+        } finally {
+          closeSync(fd);
+          rmSync(lockPath, { force: true });
+        }
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST") throw err;
+        if (Date.now() >= deadline) {
+          throw new Error(`timed out waiting for ${SIGNALS_LOCK}`);
+        }
+        sleepSync(10);
+      }
+    }
+  }
+
   function readSignals(): Record<string, SignalChannel> {
     return readJson<Record<string, SignalChannel>>(SIGNALS_FILE, {});
   }
@@ -122,26 +152,30 @@ export function createStateStore(options: StateStoreOptions = {}) {
     payload: string | null,
     at: number,
   ): SignalChannel {
-    const all = readSignals();
-    const prev = all[channel];
-    const next: SignalChannel = {
-      count: (prev?.count ?? 0) + 1,
-      at,
-      last: payload,
-    };
-    all[channel] = next;
-    writeJson(SIGNALS_FILE, all);
-    return next;
+    return withSignalsLock(() => {
+      const all = readSignals();
+      const prev = all[channel];
+      const next: SignalChannel = {
+        count: (prev?.count ?? 0) + 1,
+        at,
+        last: payload,
+      };
+      all[channel] = next;
+      writeJson(SIGNALS_FILE, all);
+      return next;
+    });
   }
 
   function clearSignal(channel: string | null): void {
-    if (channel === null) {
-      writeJson(SIGNALS_FILE, {});
-      return;
-    }
-    const all = readSignals();
-    delete all[channel];
-    writeJson(SIGNALS_FILE, all);
+    withSignalsLock(() => {
+      if (channel === null) {
+        writeJson(SIGNALS_FILE, {});
+        return;
+      }
+      const all = readSignals();
+      delete all[channel];
+      writeJson(SIGNALS_FILE, all);
+    });
   }
 
   function readCursor(key: string): string | null {

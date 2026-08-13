@@ -9,7 +9,8 @@
 /** `…/zellij/contract_version_N/…` or Unix `…/zellij-<uid>/contract_version_N/…`. */
 const ZELLIJ_DIR =
   /[\\/](zellij(?:-\d+)?)[\\/]contract_version_[^\\/]+[\\/]/i;
-const SERVER_FLAG = /(?:^|\s)--server(?:\s+|=)(\S+)/;
+const SERVER_FLAG =
+  /(?:^|\s)--server(?:\s+|=)(?:"([^"]+)"|'([^']+)'|(\S+))/;
 
 /** Drive letter plus rest, or a UNC / posix path. */
 export function looksLikeWindowsPath(path: string): boolean {
@@ -54,7 +55,8 @@ export function parseZellijServerPaths(commandLines: string): string[] {
   const found: string[] = [];
   for (const line of commandLines.split(/\r?\n/)) {
     const match = SERVER_FLAG.exec(line);
-    if (match?.[1]) found.push(stripQuotes(match[1]));
+    const captured = match?.[1] || match?.[2] || match?.[3];
+    if (captured) found.push(stripQuotes(captured));
   }
   return found;
 }
@@ -110,8 +112,12 @@ export function inferRemoteShell(input: {
 /** cmd.exe quoting: double quotes, doubled inner quotes. */
 export function cmdQuote(arg: string): string {
   if (arg === "") return '""';
-  if (/^[A-Za-z0-9_@%+=:,.\\/-]+$/.test(arg)) return arg;
-  return `"${arg.replace(/"/g, '""')}"`;
+  // cmd.exe expands %VAR% even inside quotes; double percents to keep literals.
+  const escaped = arg.replace(/%/g, "%%");
+  if (/^[A-Za-z0-9_@+=:,.\\/-]+$/.test(escaped.replace(/%%/g, ""))) {
+    return escaped;
+  }
+  return `"${escaped.replace(/"/g, '""')}"`;
 }
 
 function defaultSocketDir(tmp: string, shell: RemoteShell): string | undefined {
@@ -180,11 +186,13 @@ export function windowsInteractiveRemote(
     "$out = Join-Path $dir \"zswarm-$id.out\"",
     "$err = Join-Path $dir \"zswarm-$id.err\"",
     "$code = Join-Path $dir \"zswarm-$id.code\"",
-    "@(",
+    "$lines = @(",
     "  '@echo off'",
+    "  'chcp 65001 >nul'",
     "  \"$inner > `\"$out`\" 2> `\"$err`\"\"",
     "  \"echo %ERRORLEVEL% > `\"$code`\"\"",
-    ") | Set-Content -Path $bat -Encoding ASCII",
+    ")",
+    "[IO.File]::WriteAllLines($bat, $lines, [Text.UTF8Encoding]::new($false))",
     "try {",
     "  $create = & schtasks.exe /Create /TN $task /TR $bat /SC ONCE /ST 00:00 /IT /F /RL LIMITED 2>&1",
     "  if ($LASTEXITCODE -ne 0) {",

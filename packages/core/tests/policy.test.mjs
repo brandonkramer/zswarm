@@ -29,10 +29,16 @@ test("isWriteOp covers the write set; list/dump/status are reads", () => {
     "spawn",
     "close",
     "unworktree",
+    "checkpoint",
+    "signal",
+    "rename",
+    "focus",
+    "stack",
+    "serve",
   ]) {
     assert.equal(isWriteOp(op), true, op);
   }
-  for (const op of ["list", "dump", "status", "wait", "tail", "log"]) {
+  for (const op of ["list", "dump", "status", "wait", "tail", "log", "signals"]) {
     assert.equal(isWriteOp(op), false, op);
   }
 });
@@ -49,6 +55,9 @@ test("ZSWARM_READONLY blocks writes but allows list/dump/status", () => {
   );
   assert.throws(() => assertOpAllowed(p, "keys"), /ZSWARM_READONLY/);
   assert.throws(() => assertOpAllowed(p, "spawn"), /ZSWARM_READONLY/);
+  assert.throws(() => assertOpAllowed(p, "checkpoint"), /ZSWARM_READONLY/);
+  assert.throws(() => assertOpAllowed(p, "signal"), /ZSWARM_READONLY/);
+  assert.throws(() => assertOpAllowed(p, "serve"), /ZSWARM_READONLY/);
   assert.doesNotThrow(() => assertOpAllowed(p, "list"));
   assert.doesNotThrow(() => assertOpAllowed(p, "dump"));
   assert.doesNotThrow(() => assertOpAllowed(p, "status"));

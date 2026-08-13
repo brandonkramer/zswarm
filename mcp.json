@@ -3,7 +3,7 @@
     "zswarm": {
       "command": "node",
       "args": ["./bin/launch-mcp.mjs"],
-      "env_vars": ["ZSWARM_BIN", "ZSWARM_PATH", "ZSWARM_SESSION"]
+      "env_vars": ["ZSWARM_BIN", "ZSWARM_PATH", "ZSWARM_SESSION", "ZSWARM_SSH", "ZSWARM_TMP", "ZSWARM_SSH_MODE", "ZSWARM_REMOTE_BIN", "ZSWARM_SERVE", "ZSWARM_SERVE_TOKEN"]
     }
   }
 }

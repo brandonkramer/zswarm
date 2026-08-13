@@ -4,8 +4,9 @@ description: >-
   Coordinate CLI crews in Zellij panes via zSwarm MCP (list, send, dump, tail,
   wait, status, keys, interrupt, spawn, close, broadcast, signal, signals,
   await, log, worktrees, unworktree, rename, focus, tabs, layout, stack, diff,
-  checkpoint, bus, serve). Use when messaging another Codex/Claude/Cursor CLI in a Zellij
-  pane, waiting for one to finish, broadcasting to a crew, signalling barriers,
+  checkpoint, bus, serve). Use when messaging another Codex, Claude Code, Cursor
+  CLI, pi, OpenCode, or agy session in a Zellij pane, waiting for one to finish,
+  broadcasting to a crew, signalling barriers,
   interrupting, opening a new crew pane, isolating peers in git worktrees,
   reviewing peer diffs/checkpoints, renaming/focusing panes, or dumping short
   scrollback. Same host as Zellij, or ZSWARM_SSH / ZSWARM_SERVE for a remote
@@ -14,7 +15,7 @@ description: >-
 
 # zSwarm
 
-Talk to **CLI** sessions in Zellij panes (Codex, Claude Code, Cursor CLI, shells).
+Talk to **CLI** sessions in Zellij panes (Codex, Claude Code, Cursor CLI, pi, OpenCode, agy, shells).
 Delivery is `zellij action paste` + Enter. Not IDE side-panel chat.
 
 ## Happy path

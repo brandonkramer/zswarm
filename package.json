@@ -6,11 +6,11 @@
   "scripts": {
     "build": "pnpm -r run build",
     "build:plugin": "cargo build --package zswarm-events --release --target wasm32-wasip1 && node -e \"require('node:fs').copyFileSync('target/wasm32-wasip1/release/zswarm-events.wasm','packages/wasm/zswarm-bus-v3.wasm')\"",
-    "test": "pnpm --dir packages/core test",
+    "test": "pnpm --dir packages/core test && node --test scripts/sync-plugin-versions.test.mjs",
     "cli": "pnpm --dir packages/cli exec node dist/cli.js",
     "mcp": "pnpm --dir packages/mcp exec node dist/mcp-server.js",
     "changeset": "changeset",
-    "version-packages": "changeset version",
+    "version-packages": "changeset version && node scripts/sync-plugin-versions.mjs",
     "release": "pnpm -r build && changeset publish"
   },
   "engines": {

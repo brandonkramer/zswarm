@@ -48,3 +48,22 @@ jobs:
         # Node discovers **/*.test.mjs itself when given no paths.
         working-directory: packages/core
         run: node --test
+
+      - name: Run script tests
+        # Explicit path: same PowerShell glob trap as above.
+        run: node --test scripts/sync-plugin-versions.test.mjs
+
+  wasm:
+    name: Wasm plugin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Check the event-bus crate
+        run: cargo check --package zswarm-events --target wasm32-wasip1

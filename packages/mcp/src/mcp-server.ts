@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createRequire } from "node:module";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -11,8 +12,12 @@ import {
   MCP_TOOL_DESCRIPTION,
 } from "@zswarm/core";
 
+const { version } = createRequire(import.meta.url)("../package.json") as {
+  version: string;
+};
+
 const server = new Server(
-  { name: "zswarm", version: "0.1.0" },
+  { name: "zswarm", version },
   { capabilities: { tools: {} } },
 );
 

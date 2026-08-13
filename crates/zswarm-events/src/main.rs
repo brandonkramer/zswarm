@@ -307,7 +307,12 @@ impl State {
             last_screen: None,
         });
         block_cli_pipe_input(pipe_id);
-        set_timeout(poll_ms / 1000.0);
+        // One timer drives every pending wait. A second set_timeout here would
+        // fire extra Timer events, and tick_waits would add that elapsed to
+        // every waiter — concurrent waits then finish twice as fast.
+        if self.waiting.len() == 1 {
+            set_timeout(poll_ms / 1000.0);
+        }
         None
     }
 

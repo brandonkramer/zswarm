@@ -1,4 +1,6 @@
-import { basename, dirname, join } from "node:path";
+import { copyFileSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { ZellijError } from "./errors.js";
 import { createExec, NOT_FOUND_EXIT, type ExecFn } from "./exec.js";
 
@@ -94,8 +96,13 @@ export function createGitClient(options: GitClientOptions = {}) {
   const exec = options.exec ?? createExec(gitPath, env);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  async function run(args: string[], cwd: string, label: string) {
-    const result = await exec(args, { timeoutMs, cwd });
+  async function run(
+    args: string[],
+    cwd: string,
+    label: string,
+    extraEnv?: NodeJS.ProcessEnv,
+  ) {
+    const result = await exec(args, { timeoutMs, cwd, env: extraEnv });
     if (result.code === NOT_FOUND_EXIT) {
       throw new ZellijError(
         "git_missing",
@@ -189,30 +196,61 @@ export function createGitClient(options: GitClientOptions = {}) {
   }
 
   /**
-   * Stage untracked paths as intent-to-add so they appear in `git diff`
-   * (without copying blob contents into the object database).
+   * Stage untracked paths as intent-to-add in a scratch index so they appear
+   * in `git diff` without mutating the real `.git/index`.
    */
-  async function intentAddUntracked(path: string): Promise<void> {
+  async function withScratchIndex<T>(
+    path: string,
+    fn: (indexEnv: NodeJS.ProcessEnv) => Promise<T>,
+  ): Promise<T> {
+    const located = await run(
+      ["rev-parse", "--git-path", "index"],
+      path,
+      "git rev-parse --git-path index",
+    );
+    const indexRel = located.stdout.trim();
+    const indexAbs = isAbsolute(indexRel) ? indexRel : join(path, indexRel);
+    const scratch = `${indexAbs}.zswarm-${process.pid}-${randomBytes(4).toString("hex")}`;
+    try {
+      copyFileSync(indexAbs, scratch);
+    } catch {
+      // No index yet (empty repo / new worktree).
+    }
+    try {
+      return await fn({ GIT_INDEX_FILE: scratch });
+    } finally {
+      rmSync(scratch, { force: true });
+    }
+  }
+
+  async function intentAddUntracked(
+    path: string,
+    indexEnv: NodeJS.ProcessEnv,
+  ): Promise<void> {
     await run(
       ["add", "-A", "--intent-to-add"],
       path,
       "git add --intent-to-add",
+      indexEnv,
     );
   }
 
-  /** `git diff --stat HEAD`, including untracked via `--intent-to-add`. */
+  /** `git diff --stat HEAD`, including untracked via a scratch intent-to-add. */
   async function diffStat(path: string): Promise<string> {
-    await intentAddUntracked(path);
-    const result = await run(
-      ["diff", "--stat", "HEAD"],
-      path,
-      "git diff --stat",
-    );
-    return result.stdout;
+    return withScratchIndex(path, async (indexEnv) => {
+      await intentAddUntracked(path, indexEnv);
+      const result = await run(
+        ["diff", "--stat", "HEAD"],
+        path,
+        "git diff --stat",
+        indexEnv,
+      );
+      return result.stdout;
+    });
   }
 
   /**
-   * `git diff HEAD`, including untracked via `--intent-to-add`.
+   * `git diff HEAD`, including untracked via a scratch intent-to-add.
    * When `maxChars > 0` and the patch is longer, keep the head and set
    * `truncated`. `chars` is always the full patch length before truncating.
    */
@@ -220,14 +258,16 @@ export function createGitClient(options: GitClientOptions = {}) {
     path: string,
     maxChars: number,
   ): Promise<{ patch: string; truncated: boolean; chars: number }> {
-    await intentAddUntracked(path);
-    const result = await run(["diff", "HEAD"], path, "git diff");
-    const full = result.stdout;
-    const chars = full.length;
-    if (maxChars <= 0 || chars <= maxChars) {
-      return { patch: full, truncated: false, chars };
-    }
-    return { patch: full.slice(0, maxChars), truncated: true, chars };
+    return withScratchIndex(path, async (indexEnv) => {
+      await intentAddUntracked(path, indexEnv);
+      const result = await run(["diff", "HEAD"], path, "git diff", indexEnv);
+      const full = result.stdout;
+      const chars = full.length;
+      if (maxChars <= 0 || chars <= maxChars) {
+        return { patch: full, truncated: false, chars };
+      }
+      return { patch: full.slice(0, maxChars), truncated: true, chars };
+    });
   }
 
   /** `git add -A` then `git commit -m`; returns the new short HEAD sha. */

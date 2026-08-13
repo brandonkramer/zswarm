@@ -21,6 +21,8 @@ export type ExecResult = {
 export type ExecOptions = {
   timeoutMs: number;
   cwd?: string;
+  /** Overlay on the runner's env (e.g. GIT_INDEX_FILE for a scratch index). */
+  env?: NodeJS.ProcessEnv;
   /**
    * Stop as soon as the accumulated stdout satisfies this, instead of waiting
    * for the process to exit. `zellij pipe` answers in milliseconds but stays
@@ -125,7 +127,7 @@ export function createSshExec(
   env: NodeJS.ProcessEnv,
 ): ExecFn {
   const runner = createExec(target.ssh, env);
-  let cached: IpcDirs | null | undefined;
+  let cached: IpcDirs | undefined;
 
   async function resolveIpc(timeoutMs: number): Promise<IpcDirs | undefined> {
     const requested = target.tmp?.trim();
@@ -133,9 +135,10 @@ export function createSshExec(
     if (requested.toLowerCase() !== "auto") {
       return { tmp: requested, socketDir: "" };
     }
-    if (cached !== undefined) return cached ?? undefined;
-    cached = (await discoverRemoteIpc(runner, target, timeoutMs)) ?? null;
-    return cached ?? undefined;
+    if (cached) return cached;
+    const dirs = await discoverRemoteIpc(runner, target, timeoutMs);
+    if (dirs) cached = dirs;
+    return dirs;
   }
 
   return async (args, options) => {
@@ -160,7 +163,7 @@ function runUntil(
 ): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve) => {
     const child = spawn(binPath, args, {
-      env,
+      env: options.env ? { ...env, ...options.env } : env,
       cwd: options.cwd,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -222,7 +225,7 @@ function runToExit(
         cwd: options.cwd,
         maxBuffer: 8 * 1024 * 1024,
         windowsHide: true,
-        env,
+        env: options.env ? { ...env, ...options.env } : env,
       },
       (error, stdout, stderr) => {
         const failure = error as

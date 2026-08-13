@@ -51,9 +51,15 @@ jobs:
           # publish, then push the version commit and tags back to master.
           # Pushes made with GITHUB_TOKEN do not trigger workflows, so this
           # cannot loop — it also means the version commit gets no CI run,
-          # which is fine: it only touches manifests and changelogs.
+          # which is fine: it only touches manifests, changelogs, and plugin.json.
           if find .changeset -name '*.md' ! -name 'README.md' | grep -q .; then
             pnpm version-packages
+          fi
+          # version-packages already syncs plugin.json when changesets exist.
+          # Run it again so a re-run still catches manifests that lagged a
+          # previous npm-only release.
+          node scripts/sync-plugin-versions.mjs
+          if ! git diff --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add -A

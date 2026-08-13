@@ -6,6 +6,25 @@ import type { OpsResult } from "./types.js";
 
 export const DEFAULT_SERVE_LISTEN = "127.0.0.1:9419";
 export const SERVE_TASK_NAME = "zswarm-serve";
+/** One JSONL request; a client that never sends newline cannot grow forever. */
+export const SERVE_MAX_REQUEST_BYTES = 1024 * 1024;
+/** Wait/await allow 15 minutes; this is that plus slack. */
+export const SERVE_CALL_TIMEOUT_CAP_MS = 16 * 60_000;
+const SERVE_TOKEN_FIELD = "serveToken";
+
+export function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return (
+    h === "127.0.0.1" ||
+    h === "localhost" ||
+    h === "::1" ||
+    h === "0:0:0:0:0:0:0:1"
+  );
+}
+
+export function formatListenLabel(host: string, port: number): string {
+  return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+}
 
 export function parseListenAddress(raw: string | undefined): {
   host: string;
@@ -14,25 +33,38 @@ export function parseListenAddress(raw: string | undefined): {
 } {
   const text = (raw ?? DEFAULT_SERVE_LISTEN).trim() || DEFAULT_SERVE_LISTEN;
   const stripped = text.replace(/^tcp:\/\//i, "");
-  const hostPort = stripped.includes("]")
-    ? stripped
-    : stripped.includes(":")
+  let host: string;
+  let port: number;
+  if (stripped.startsWith("[")) {
+    const end = stripped.indexOf("]");
+    if (end === -1) {
+      throw new ZellijError("bad_arg", `listen address is not host:port (${text})`);
+    }
+    host = stripped.slice(1, end);
+    const rest = stripped.slice(end + 1);
+    if (!rest.startsWith(":")) {
+      throw new ZellijError("bad_arg", `listen address is not host:port (${text})`);
+    }
+    port = Number(rest.slice(1));
+  } else {
+    const hostPort = stripped.includes(":")
       ? stripped
       : `127.0.0.1:${stripped}`;
-  const colon = hostPort.lastIndexOf(":");
-  const host = colon === -1 ? "127.0.0.1" : hostPort.slice(0, colon) || "127.0.0.1";
-  const port = Number(colon === -1 ? hostPort : hostPort.slice(colon + 1));
-  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    const colon = hostPort.lastIndexOf(":");
+    host = colon === -1 ? "127.0.0.1" : hostPort.slice(0, colon) || "127.0.0.1";
+    port = Number(colon === -1 ? hostPort : hostPort.slice(colon + 1));
+  }
+  if (!host || !Number.isInteger(port) || port < 0 || port > 65535) {
     throw new ZellijError("bad_arg", `listen address is not host:port (${text})`);
   }
-  return { host, port, label: `${host}:${port}` };
+  return { host, port, label: formatListenLabel(host, port) };
 }
 
-/** Client-side wait: the op's own timeout plus slack, capped at ten minutes. */
+/** Client-side wait: the op's own timeout plus slack. */
 export function serveCallTimeout(args: Record<string, unknown>): number {
   const requested = Number(args.timeoutMs);
   const base = Number.isFinite(requested) && requested > 0 ? requested : 60_000;
-  return Math.min(Math.max(base + 5_000, 15_000), 10 * 60_000);
+  return Math.min(Math.max(base + 5_000, 15_000), SERVE_CALL_TIMEOUT_CAP_MS);
 }
 
 /** Env for a serve worker: talk to the local Zellij, never loop back into serve/ssh. */
@@ -47,17 +79,68 @@ export type ServeDispatch = (
   args: Record<string, unknown>,
 ) => Promise<OpsResult>;
 
+export type StartServeOptions = {
+  token?: string;
+  maxRequestBytes?: number;
+};
+
+function unauthorized(): OpsResult {
+  return {
+    ok: false,
+    error: {
+      code: "serve_unauthorized",
+      message: "zswarm serve rejected the request (missing or wrong ZSWARM_SERVE_TOKEN)",
+    },
+  };
+}
+
+function takeServeToken(
+  args: Record<string, unknown>,
+): { token: string | undefined; request: Record<string, unknown> } {
+  const token =
+    typeof args[SERVE_TOKEN_FIELD] === "string"
+      ? args[SERVE_TOKEN_FIELD]
+      : undefined;
+  const request = { ...args };
+  delete request[SERVE_TOKEN_FIELD];
+  return { token, request };
+}
+
 export function startServe(
   listen: string | undefined,
   dispatch: ServeDispatch,
+  options: StartServeOptions = {},
 ): Promise<{ label: string; close: () => Promise<void> }> {
   const { host, port } = parseListenAddress(listen);
+  const token = options.token?.trim() || undefined;
+  if (!token && !isLoopbackHost(host)) {
+    return Promise.reject(
+      new ZellijError(
+        "serve_auth",
+        `listening on ${host} requires ZSWARM_SERVE_TOKEN; loopback can run without one`,
+      ),
+    );
+  }
+  const maxRequestBytes = options.maxRequestBytes ?? SERVE_MAX_REQUEST_BYTES;
   return new Promise((resolve, reject) => {
     const server = createServer((socket) => {
       let buf = "";
       socket.setEncoding("utf8");
       socket.on("data", (chunk: string) => {
         buf += chunk;
+        if (buf.length > maxRequestBytes) {
+          socket.write(
+            `${JSON.stringify({
+              ok: false,
+              error: {
+                code: "bad_arg",
+                message: `serve request exceeded ${maxRequestBytes} bytes`,
+              },
+            })}\n`,
+          );
+          socket.destroy();
+          return;
+        }
         void drain();
       });
       async function drain() {
@@ -68,8 +151,13 @@ export function startServe(
           if (line) {
             let result: OpsResult;
             try {
-              const args = JSON.parse(line) as Record<string, unknown>;
-              result = await dispatch(args);
+              const parsed = JSON.parse(line) as Record<string, unknown>;
+              const taken = takeServeToken(parsed);
+              if (token && taken.token !== token) {
+                result = unauthorized();
+              } else {
+                result = await dispatch(taken.request);
+              }
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err);
               result = { ok: false, error: { code: "bad_arg", message } };
@@ -86,7 +174,7 @@ export function startServe(
       const actualPort =
         typeof addr === "object" && addr ? addr.port : port;
       resolve({
-        label: `${host}:${actualPort}`,
+        label: formatListenLabel(host, actualPort),
         close: () =>
           new Promise((done, fail) => {
             server.close((err) => (err ? fail(err) : done()));
@@ -104,8 +192,13 @@ export function callServe(
   target: string,
   args: Record<string, unknown>,
   timeoutMs = 15_000,
+  token?: string,
 ): Promise<OpsResult> {
   const { host, port } = parseServeTarget(target);
+  const payload =
+    token && token.trim()
+      ? { ...args, [SERVE_TOKEN_FIELD]: token.trim() }
+      : args;
   return new Promise((resolve) => {
     const socket = connect({ host, port });
     let buf = "";
@@ -151,7 +244,7 @@ export function callServe(
       }
     });
     socket.on("connect", () => {
-      socket.write(`${JSON.stringify(args)}\n`);
+      socket.write(`${JSON.stringify(payload)}\n`);
     });
   });
 }
@@ -239,7 +332,22 @@ export async function uninstallServeLogon(input: {
   if ((input.platform ?? process.platform) !== "win32") {
     throw new ZellijError("usage", "serve --clear is Windows-only");
   }
-  const script = `Unregister-ScheduledTask -TaskName '${SERVE_TASK_NAME}' -Confirm:$false -ErrorAction SilentlyContinue`;
-  await runPowerShell(script);
+  const script = [
+    "$ProgressPreference = 'SilentlyContinue'",
+    "try {",
+    `  Unregister-ScheduledTask -TaskName '${SERVE_TASK_NAME}' -Confirm:$false`,
+    "} catch {",
+    "  if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { exit 0 }",
+    "  [Console]::Error.Write(($_ | Out-String).Trim())",
+    "  exit 1",
+    "}",
+  ].join("\n");
+  const result = await runPowerShell(script);
+  if (result.code !== 0) {
+    throw new ZellijError(
+      "zellij_failed",
+      `serve --clear failed: ${(result.stderr || result.stdout).trim() || "no output"}`,
+    );
+  }
   return { task: SERVE_TASK_NAME, cleared: true };
 }

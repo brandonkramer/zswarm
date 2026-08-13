@@ -45,12 +45,16 @@ op.
 ```bash
 # On the host, in the session that owns Zellij:
 zswarm serve --listen 127.0.0.1:9419
+# Off loopback, set the same ZSWARM_SERVE_TOKEN on host and client.
 # Windows logon task, once: zswarm serve --install
 
 # On the client:
 ssh -fN -L 9419:127.0.0.1:9419 user@host
 ZSWARM_SERVE=127.0.0.1:9419 zswarm list
 ```
+
+`ZSWARM_SSH` only forwards Zellij. Git worktrees, `diff`, and `checkpoint` stay
+local — use `serve` on the host that owns the repo if those ops should run there.
 
 MCP: set `ZSWARM_SERVE` (and usually `ZSWARM_SESSION`) in the server env. Do
 **not** call `op: "serve"` to listen — that is CLI-only. Other ops forward.

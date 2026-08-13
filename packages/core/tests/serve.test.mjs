@@ -11,6 +11,7 @@ import {
   installServeLogon,
   parseCliArgv,
   parseListenAddress,
+  SERVE_CALL_TIMEOUT_CAP_MS,
   serveCallTimeout,
   serveChildEnv,
   serveLogonCommand,
@@ -35,6 +36,11 @@ test("parseListenAddress accepts host:port, port-only, and tcp URLs", () => {
     port: 9419,
     label: "127.0.0.1:9419",
   });
+  assert.deepEqual(parseListenAddress("[::1]:9419"), {
+    host: "::1",
+    port: 9419,
+    label: "[::1]:9419",
+  });
   assert.equal(parseListenAddress("127.0.0.1:0").port, 0);
   assert.throws(() => parseListenAddress("nope"), /host:port/);
 });
@@ -55,10 +61,12 @@ test("serveChildEnv drops ZSWARM_SERVE and ZSWARM_SSH so the worker stays local"
   const child = serveChildEnv({
     ZSWARM_SERVE: "127.0.0.1:9419",
     ZSWARM_SSH: "user@host",
+    ZSWARM_SERVE_TOKEN: "secret",
     PATH: "/bin",
   });
   assert.equal(child.ZSWARM_SERVE, undefined);
   assert.equal(child.ZSWARM_SSH, undefined);
+  assert.equal(child.ZSWARM_SERVE_TOKEN, "secret");
   assert.equal(child.PATH, "/bin");
 });
 
@@ -66,6 +74,11 @@ test("serveCallTimeout follows the op timeout plus slack", () => {
   assert.equal(serveCallTimeout({}), 65_000);
   assert.equal(serveCallTimeout({ timeoutMs: 1_000 }), 15_000);
   assert.equal(serveCallTimeout({ timeoutMs: 120_000 }), 125_000);
+  assert.equal(serveCallTimeout({ timeoutMs: 900_000 }), 905_000);
+  assert.equal(
+    serveCallTimeout({ timeoutMs: 20 * 60_000 }),
+    SERVE_CALL_TIMEOUT_CAP_MS,
+  );
 });
 
 test("installServeLogon / --clear are Windows-only", async () => {
@@ -150,4 +163,43 @@ test("an injected client is not skipped for ZSWARM_SERVE", async () => {
   );
   assert.equal(result.ok, true);
   assert.equal(result.data.sessions[0], "demo");
+});
+
+test("startServe refuses a non-loopback bind without a token", async () => {
+  await assert.rejects(
+    () => startServe("0.0.0.0:0", async () => ({ ok: true, data: {} })),
+    /ZSWARM_SERVE_TOKEN/,
+  );
+});
+
+test("startServe requires a matching token when one is configured", async () => {
+  const { label, close } = await startServe(
+    "127.0.0.1:0",
+    async (args) => ({ ok: true, data: args }),
+    { token: "secret" },
+  );
+  try {
+    const denied = await callServe(label, { op: "ping" }, 2_000);
+    assert.equal(denied.ok, false);
+    assert.equal(denied.error.code, "serve_unauthorized");
+    const allowed = await callServe(label, { op: "ping" }, 2_000, "secret");
+    assert.deepEqual(allowed, { ok: true, data: { op: "ping" } });
+  } finally {
+    await close();
+  }
+});
+
+test("startServe drops an oversized request", async () => {
+  const { label, close } = await startServe(
+    "127.0.0.1:0",
+    async () => ({ ok: true, data: {} }),
+    { maxRequestBytes: 32 },
+  );
+  try {
+    const result = await callServe(label, { op: "x".repeat(64) }, 2_000);
+    assert.equal(result.ok, false);
+    assert.match(result.error.message, /exceeded/);
+  } finally {
+    await close();
+  }
 });

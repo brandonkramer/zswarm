@@ -5,7 +5,7 @@ patch/minor/major for each, and a line for the changelog.
 
 ```bash
 pnpm changeset          # describe a change (writes a file here)
-pnpm version-packages   # consume them: bump versions, write CHANGELOGs
+pnpm version-packages   # consume them: bump versions, write CHANGELOGs, sync plugin.json
 pnpm release            # build, then publish what changed
 ```
 
@@ -14,3 +14,8 @@ Six packages depend on each other, so a bump to `@zswarm/core` cascades to
 meta-package that pins exact versions of the first two. That cascade is the
 reason this exists — doing it by hand across six manifests is where releases
 quietly go wrong.
+
+`version-packages` also copies the `zswarm` meta-package version into
+`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, and
+`.cursor-plugin/plugin.json`. Those are what the harness marketplaces use
+to notice an update; changesets never see them.

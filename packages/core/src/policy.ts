@@ -17,6 +17,12 @@ const WRITE_OPS = new Set([
   "spawn",
   "close",
   "unworktree",
+  "checkpoint",
+  "signal",
+  "rename",
+  "focus",
+  "stack",
+  "serve",
 ]);
 
 /** Explicit disable tokens for ZSWARM_ALLOW_* switches. */
