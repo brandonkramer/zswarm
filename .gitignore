@@ -6,6 +6,5 @@ dist/
 .env.*
 target/
 
-# pi installs packages beside its project settings; keep the settings, not the payload
-.pi/npm/
-.pi/git/
+# pi project install (settings + packages); never commit
+.pi/
