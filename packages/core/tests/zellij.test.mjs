@@ -287,3 +287,38 @@ test("resolveZellijBinary finds LocalAppData on Windows when present", () => {
     local,
   );
 });
+
+test("listSessions treats Zellij's no-sessions exit as empty", async () => {
+  const client = createZellijClient({
+    env: {},
+    exec: async (args) => {
+      if (args.includes("list-sessions")) {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "No active zellij sessions found.\n",
+        };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  assert.deepEqual(await client.listSessions(), []);
+  const listed = await dispatchZswarm({ op: "sessions" }, client);
+  assert.equal(listed.ok, true);
+  assert.deepEqual(listed.data.sessions, []);
+});
+
+test("listSessions still fails on a real zellij error", async () => {
+  const client = createZellijClient({
+    env: {},
+    exec: async () => ({
+      code: 1,
+      stdout: "",
+      stderr: "Error occurred: io",
+    }),
+  });
+  await assert.rejects(
+    () => client.listSessions(),
+    /zellij list-sessions failed/,
+  );
+});

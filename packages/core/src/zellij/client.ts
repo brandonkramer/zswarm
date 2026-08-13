@@ -51,6 +51,7 @@ import {
   type ZellijPane,
 } from "./panes.js";
 import {
+  isZellijNoSessionsOutput,
   parseSessionList,
   resolveSelfPaneId,
   sessionFromEnv,
@@ -99,10 +100,25 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   }
 
   async function listSessions(): Promise<string[]> {
-    const result = await run(
-      ["list-sessions", "--short", "--no-formatting"],
-      "zellij list-sessions",
-    );
+    const result = await exec(["list-sessions", "--short", "--no-formatting"], {
+      timeoutMs,
+    });
+    if (result.code === NOT_FOUND_EXIT) {
+      throw new ZellijError(
+        "zellij_missing",
+        `zellij binary not found (${zellijPath}); install Zellij ≥ 0.42, add it to PATH, or set ZSWARM_BIN / ZSWARM_PATH`,
+      );
+    }
+    if (result.code !== 0) {
+      // Nonzero here is Zellij's normal "none running", not a crash. Empty
+      // lets resolveSession throw zellij_no_session so unworktree can treat
+      // it as no occupants instead of zellij_failed.
+      if (isZellijNoSessionsOutput(result.stdout, result.stderr)) return [];
+      throw new ZellijError(
+        "zellij_failed",
+        `zellij list-sessions failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim() || "no output"}`,
+      );
+    }
     return parseSessionList(result.stdout);
   }
 

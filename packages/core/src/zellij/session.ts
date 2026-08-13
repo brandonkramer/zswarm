@@ -26,6 +26,11 @@ export function parseSessionList(stdout: string): string[] {
     .filter(Boolean);
 }
 
+/** Zellij exits 1 and prints this when the machine simply has no sessions. */
+export function isZellijNoSessionsOutput(stdout: string, stderr: string): boolean {
+  return /no active zellij sessions found/i.test(`${stderr}\n${stdout}`);
+}
+
 /** Session from an explicit argument or the environment, before asking Zellij. */
 export function sessionFromEnv(
   env: NodeJS.ProcessEnv,
