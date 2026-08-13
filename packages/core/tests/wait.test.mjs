@@ -79,13 +79,14 @@ function busReply(reason, screen = "BUILD DONE") {
   return { reason, pane: "terminal_1", screen };
 }
 
-async function wait(client, args, clock, waitViaBus) {
+async function wait(client, args, clock, waitViaBus, signal) {
   return waitForPane(
     client,
     { session: "demo", pane: PANE },
     args,
     clock,
     waitViaBus,
+    signal,
   );
 }
 
@@ -195,4 +196,43 @@ test("wait fallback still caps its tail", async () => {
   assert.equal(res.data.text.length, DEFAULT_WAIT_MAX_CHARS);
   assert.equal(res.data.truncated, true);
   assert.equal(res.data.chars, big.length);
+});
+
+test("wait via bus forwards clamped timing and full", async () => {
+  const { client, dumpCount } = dumpClient(["should not dump"]);
+  let seen;
+  const res = await wait(
+    client,
+    { idleMs: -5, timeoutMs: -1, pollMs: 1, full: true },
+    fakeClock(),
+    async (timing) => {
+      seen = timing;
+      return busReply("timeout", "");
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.deepEqual(seen, {
+    idleMs: 200,
+    timeoutMs: 1000,
+    pollMs: 50,
+    full: true,
+  });
+  assert.equal(dumpCount(), 0);
+});
+
+test("wait stops when the abort signal has already fired", async () => {
+  const { client } = dumpClient(["still going"]);
+  const ac = new AbortController();
+  ac.abort();
+  await assert.rejects(
+    () =>
+      wait(
+        client,
+        { idleMs: 2000, timeoutMs: 30_000 },
+        fakeClock(),
+        undefined,
+        ac.signal,
+      ),
+    (err) => err.code === "cancelled",
+  );
 });

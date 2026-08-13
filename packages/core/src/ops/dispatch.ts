@@ -44,9 +44,10 @@ import {
   paneViewBus,
   paneViewFull,
   paneViewSlim,
+  throwIfAborted,
   truncateDumpText,
 } from "./util.js";
-import { waitForPane } from "./wait.js";
+import { waitForPane, type WaitBusTiming } from "./wait.js";
 import { listPeerWorktrees, removePeerWorktree } from "./worktree.js";
 import {
   callServe,
@@ -140,11 +141,25 @@ export async function dispatchZswarm(
 ): Promise<OpsResult> {
   const op = String(args.op ?? "");
   const verbose = isVerbose(args);
+  const signal = deps.signal;
+  throwIfAborted(signal);
   const clock: Clock = {
     now: deps.now ?? (() => Date.now()),
     sleep:
       deps.sleep ??
-      ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))),
+      ((ms: number) =>
+        new Promise<void>((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new ZellijError("cancelled", "operation cancelled"));
+            return;
+          }
+          const timer = setTimeout(resolve, ms);
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(new ZellijError("cancelled", "operation cancelled"));
+          };
+          signal?.addEventListener("abort", onAbort, { once: true });
+        })),
   };
   // Only the worktree ops need git, so the client is built on demand.
   let gitClient: GitClient | null = deps.git ?? null;
@@ -185,7 +200,7 @@ export async function dispatchZswarm(
         env.ZSWARM_SERVE_TOKEN,
       );
     }
-    const client = injected ?? createZellijClient({ env: deps.env });
+    const client = injected ?? createZellijClient({ env: deps.env, signal });
     switch (op) {
       case "sessions": {
         const sessions = await client.listSessions();
@@ -376,7 +391,7 @@ export async function dispatchZswarm(
         // no engine — and then this is the loop that runs.
         const viaBus = isTrue(args.regex)
           ? undefined
-          : () =>
+          : (timing: WaitBusTiming) =>
               busWait(
                 client,
                 state(),
@@ -386,12 +401,18 @@ export async function dispatchZswarm(
                   for: waitMode(args),
                   match: typeof args.match === "string" ? args.match : null,
                   ignoreCase: isTrue(args.ignoreCase),
-                  idleMs: Number(args.idleMs ?? 2000),
-                  timeoutMs: Number(args.timeoutMs ?? 60_000),
+                  ...timing,
                 },
                 deps.env,
               );
-        return await waitForPane(client, target, args, clock, viaBus);
+        return await waitForPane(
+          client,
+          target,
+          args,
+          clock,
+          viaBus,
+          deps.signal,
+        );
       }
       case "status": {
         const { session } = await client.resolveSession(

@@ -14,6 +14,8 @@ export type DispatchDeps = {
   state?: StateStore;
   policy?: Policy;
   env?: NodeJS.ProcessEnv;
+  /** MCP cancellation; aborted waits stop instead of running to timeout. */
+  signal?: AbortSignal;
 };
 
 export type Clock = {

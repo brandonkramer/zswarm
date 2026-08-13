@@ -31,7 +31,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const name = request.params.name;
   const args = (request.params.arguments ?? {}) as Record<string, unknown>;
   if (name !== "zswarm") {
@@ -49,7 +49,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
-  const result = await dispatchZswarm(args);
+  const result = await dispatchZswarm(args, undefined, { signal: extra.signal });
   return {
     content: [
       { type: "text" as const, text: JSON.stringify(result, null, 2) },

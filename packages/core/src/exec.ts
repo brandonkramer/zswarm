@@ -30,6 +30,8 @@ export type ExecOptions = {
    * timeout.
    */
   until?: (stdout: string) => boolean;
+  /** Kill the child when aborted (MCP cancellation). */
+  signal?: AbortSignal;
 };
 
 export type ExecFn = (
@@ -175,9 +177,16 @@ function runUntil(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
       child.kill();
       resolve(result);
     };
+    const onAbort = (): void =>
+      finish({
+        code: -1,
+        stdout,
+        stderr: `${binPath} cancelled`,
+      });
     const timer = setTimeout(
       () =>
         finish({
@@ -187,6 +196,11 @@ function runUntil(
         }),
       options.timeoutMs,
     );
+    if (options.signal?.aborted) {
+      onAbort();
+      return;
+    }
+    options.signal?.addEventListener("abort", onAbort, { once: true });
     child.on("error", (err: Error & { code?: string }) => {
       const missing = err.code === "ENOENT" || err.code === "ENOTDIR";
       finish({
@@ -225,6 +239,7 @@ function runToExit(
         cwd: options.cwd,
         maxBuffer: 8 * 1024 * 1024,
         windowsHide: true,
+        signal: options.signal,
         env: options.env ? { ...env, ...options.env } : env,
       },
       (error, stdout, stderr) => {
@@ -243,12 +258,17 @@ function runToExit(
         }
         if (
           failure &&
-          (failure.killed === true || typeof failure.signal === "string")
+          (failure.killed === true ||
+            typeof failure.signal === "string" ||
+            failure.name === "AbortError")
         ) {
           resolve({
             code: -1,
             stdout: String(stdout ?? ""),
-            stderr: `${binPath} timed out after ${options.timeoutMs}ms`,
+            stderr:
+              failure.name === "AbortError"
+                ? `${binPath} cancelled`
+                : `${binPath} timed out after ${options.timeoutMs}ms`,
           });
           return;
         }

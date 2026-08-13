@@ -47,12 +47,14 @@ export {
   buildSendKeysArgs,
   buildWriteCharsArgs,
   scrollbackPayload,
+  waitPayload,
   type LaunchPluginInput,
   type NewPaneInput,
   type NewTabInput,
   type PaneDirection,
   type PipeInput,
   type ScrollbackRequest,
+  type WaitRequest,
 } from "./zellij/args.js";
 export {
   busPluginUrl,
@@ -128,6 +130,7 @@ export {
   installServeLogon,
   isLoopbackHost,
   parseListenAddress,
+  redactServeSecret,
   SERVE_CALL_TIMEOUT_CAP_MS,
   SERVE_MAX_REQUEST_BYTES,
   SERVE_TASK_NAME,

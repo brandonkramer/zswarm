@@ -63,6 +63,8 @@ export type WaitRequest = {
   idleMs?: number;
   timeoutMs?: number;
   pollMs?: number;
+  /** Read scrollback above the viewport, matching dump --full. */
+  full?: boolean;
 };
 
 /**
@@ -85,6 +87,7 @@ export function waitPayload(req: WaitRequest): string {
     idleMs: req.idleMs ?? 2000,
     timeoutMs: req.timeoutMs ?? 60000,
     pollMs: req.pollMs ?? 50,
+    full: req.full === true,
   });
 }
 

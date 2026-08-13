@@ -30,6 +30,9 @@ struct State {
     seen: BTreeMap<String, String>,
     /// Waits currently holding a CLI pipe open. Keyed by pipe id.
     waiting: Vec<PendingWait>,
+    /// Outstanding set_timeout calls. tick_waits only re-arms when this hits
+    /// zero, so overlapping waits do not grow a timer chain each.
+    timer_pending: u32,
 }
 
 /// A `wait` that has not resolved yet. The caller's `zellij pipe` stays blocked
@@ -52,6 +55,8 @@ struct PendingWait {
     started_at: Instant,
     last_change_at: Instant,
     last_screen: Option<String>,
+    /// Match dump --full: include lines above the viewport.
+    full: bool,
 }
 
 #[derive(Clone)]
@@ -96,6 +101,17 @@ fn normalize(lines: &[String]) -> String {
         joined.pop();
     }
     joined
+}
+
+fn wait_screen(contents: &PaneContents, full: bool) -> String {
+    if full {
+        let mut lines = contents.lines_above_viewport.clone();
+        lines.extend(contents.viewport.iter().cloned());
+        lines.extend(contents.lines_below_viewport.iter().cloned());
+        normalize(&lines)
+    } else {
+        normalize(&contents.viewport)
+    }
 }
 
 fn contains(haystack: &str, needle: &str, ignore_case: bool) -> bool {
@@ -291,7 +307,7 @@ impl State {
             return Some(error_json("match waits need a needle"));
         }
 
-        let poll_ms = number("pollMs", 50.0).max(20.0);
+        let poll_ms = number("pollMs", 50.0).clamp(20.0, 30_000.0);
         let now = Instant::now();
         self.waiting.push(PendingWait {
             pipe_id: pipe_id.to_string(),
@@ -303,17 +319,21 @@ impl State {
                 .get("ignoreCase")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
-            idle_ms: number("idleMs", 2000.0),
+            idle_ms: number("idleMs", 2000.0).clamp(200.0, 600_000.0),
             poll_ms,
-            timeout_ms: number("timeoutMs", 60000.0),
+            timeout_ms: number("timeoutMs", 60000.0).clamp(1_000.0, 900_000.0),
             started_at: now,
             last_change_at: now,
             last_screen: None,
+            full: request
+                .get("full")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         });
         block_cli_pipe_input(pipe_id);
-        // Always arm this wait's own interval. A later wait must not sit on
-        // an older wait's remaining timer. Extra Timer events are safe because
-        // elapsed is wall-clock per waiter, not summed from every event.
+        // Arm this wait. tick_waits only re-arms when timer_pending hits zero,
+        // so these extra one-shots do not become permanent chains.
+        self.timer_pending = self.timer_pending.saturating_add(1);
         set_timeout(poll_ms / 1000.0);
         None
     }
@@ -321,6 +341,7 @@ impl State {
     /// One poll tick for every held wait. Anything that resolves answers its
     /// own pipe and releases the caller; the rest re-arm the timer.
     fn tick_waits(&mut self) {
+        self.timer_pending = self.timer_pending.saturating_sub(1);
         let now = Instant::now();
         let mut still_waiting = Vec::new();
         let mut shortest_poll = f64::MAX;
@@ -330,8 +351,8 @@ impl State {
                 .saturating_duration_since(wait.started_at)
                 .as_secs_f64()
                 * 1000.0;
-            let screen = match get_pane_scrollback(wait.pane, false) {
-                Ok(contents) => normalize(&contents.viewport),
+            let screen = match get_pane_scrollback(wait.pane, wait.full) {
+                Ok(contents) => wait_screen(&contents, wait.full),
                 // The pane went away mid-wait; say so rather than hanging.
                 Err(_) => {
                     self.finish_wait(&wait, "gone", "");
@@ -371,7 +392,8 @@ impl State {
         }
 
         self.waiting = still_waiting;
-        if !self.waiting.is_empty() {
+        if !self.waiting.is_empty() && self.timer_pending == 0 {
+            self.timer_pending = 1;
             set_timeout(shortest_poll / 1000.0);
         }
     }

@@ -64,6 +64,7 @@ export type ZellijClientOptions = {
   zellijPath?: string;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 };
 
 /** Thin, stateless wrapper over the `zellij` binary. */
@@ -74,11 +75,13 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   const zellijPath =
     options.zellijPath ??
     (ssh ? `ssh://${ssh.host}/${ssh.remoteBin}` : resolveZellijBinary(env));
-  const exec =
+  const rawExec =
     options.exec ??
     (ssh
       ? createSshExec(ssh, sanitizeZellijEnv(env))
       : defaultExec(zellijPath, env));
+  const exec: ZellijExecFn = (args, opts) =>
+    rawExec(args, { ...opts, signal: opts.signal ?? options.signal });
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const selfPaneId = resolveSelfPaneId(env);
 

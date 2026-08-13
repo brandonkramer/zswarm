@@ -10,6 +10,7 @@ import {
   parseScrollbackReply,
   scrollbackPayload,
   scrollbackToScreen,
+  waitPayload,
   ZellijError,
 } from "../dist/index.js";
 
@@ -113,6 +114,36 @@ test("scrollbackPayload emits the contract JSON and rejects an empty pane list",
     () => scrollbackPayload({ panes: [] }),
     (err) => err instanceof ZellijError && err.code === "bad_arg",
   );
+});
+
+test("waitPayload includes full and the frozen wait keys", () => {
+  assert.equal(
+    waitPayload({ pane: "terminal_1", for: "idle" }),
+    JSON.stringify({
+      op: "wait",
+      pane: "terminal_1",
+      for: "idle",
+      match: null,
+      ignoreCase: false,
+      idleMs: 2000,
+      timeoutMs: 60000,
+      pollMs: 50,
+      full: false,
+    }),
+  );
+  const parsed = JSON.parse(
+    waitPayload({
+      pane: "terminal_2",
+      for: "match",
+      match: "DONE",
+      full: true,
+      idleMs: 400,
+      timeoutMs: 9000,
+    }),
+  );
+  assert.equal(parsed.full, true);
+  assert.equal(parsed.idleMs, 400);
+  assert.equal(parsed.match, "DONE");
 });
 
 test("parseScrollbackReply skips zellij chatter and finds the answer", () => {

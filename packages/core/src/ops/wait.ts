@@ -10,6 +10,7 @@ import {
   normalizeScreen,
   numberArg,
   optionalString,
+  throwIfAborted,
   truncateDumpText,
 } from "./util.js";
 
@@ -85,6 +86,14 @@ function waitResult(
 /** Held-pipe wait answer, shaped by `parseWaitReply` in `zellij/bus.ts`. */
 export type { BusWait };
 
+/** Clamped timing the bus path must use — never the raw request numbers. */
+export type WaitBusTiming = {
+  idleMs: number;
+  timeoutMs: number;
+  pollMs: number;
+  full: boolean;
+};
+
 /**
  * Poll a pane's screen until it goes quiet, prints a match, or the deadline
  * passes — so callers stop re-dumping in a loop of their own.
@@ -98,7 +107,8 @@ export async function waitForPane(
   target: { session: string; pane: ZellijPane },
   args: Record<string, unknown>,
   clock: Clock,
-  waitViaBus?: () => Promise<BusWait | null>,
+  waitViaBus?: (timing: WaitBusTiming) => Promise<BusWait | null>,
+  signal?: AbortSignal,
 ): Promise<OpsResult> {
   const { session, pane } = target;
   const matcher = buildMatcher(args);
@@ -122,9 +132,12 @@ export async function waitForPane(
   );
 
   const started = clock.now();
+  const full = isTrue(args.full);
 
   if (waitViaBus) {
-    const reply = await waitViaBus();
+    throwIfAborted(signal);
+    const reply = await waitViaBus({ idleMs, timeoutMs, pollMs, full });
+    throwIfAborted(signal);
     // `gone` is filtered upstream: a pane that vanished mid-wait is reported by
     // the polling path, which has the error message for it.
     if (reply && reply.reason !== "gone") {
@@ -149,6 +162,7 @@ export async function waitForPane(
   let changes = 0;
 
   for (;;) {
+    throwIfAborted(signal);
     const dumped = await client.dumpPane({
       session,
       paneId: pane.id,

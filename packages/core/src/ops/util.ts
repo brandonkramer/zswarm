@@ -95,6 +95,12 @@ export function numberArg(
   return Math.min(limits.max, Math.max(limits.min, Math.floor(n)));
 }
 
+export function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new ZellijError("cancelled", "operation cancelled");
+  }
+}
+
 export function dumpMaxChars(
   args: Record<string, unknown>,
   fallback = DEFAULT_DUMP_MAX_CHARS,
