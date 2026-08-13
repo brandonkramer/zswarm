@@ -68,5 +68,7 @@ jobs:
         with:
           targets: wasm32-wasip1
 
-      - name: Check the event-bus crate
-        run: cargo check --package zswarm-events --target wasm32-wasip1
+      - name: Rebuild wasm and fail if the committed artifact is stale
+        run: |
+          cargo build --package zswarm-events --release --target wasm32-wasip1
+          cmp target/wasm32-wasip1/release/zswarm-events.wasm packages/wasm/zswarm-bus-v3.wasm
