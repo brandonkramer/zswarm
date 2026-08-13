@@ -78,8 +78,21 @@ jobs:
             git add -A
             git commit -m "chore(release): version packages"
           fi
+          # Push the version commit before npm mutate. Publishing first left
+          # packages on the registry when a later master push made this SHA
+          # non-fast-forward, and a failing follow-up CI never repaired git.
+          git fetch origin master
+          master=$(git rev-parse origin/master)
+          head=$(git rev-parse HEAD)
+          if [ "$master" != "$head" ]; then
+            parent=$(git rev-parse HEAD^)
+            if [ "$master" != "$parent" ]; then
+              echo "origin/master moved past this SHA; skipping publish"
+              echo "master=$master head=$head"
+              exit 0
+            fi
+            git push --follow-tags origin HEAD:master
+          fi
           # Publishes anything whose version is not on npm yet; a re-run after
-          # a failed push therefore recovers instead of double-publishing.
+          # a successful push therefore recovers a failed publish.
           pnpm release
-          # workflow_run checkout is detached at head_sha.
-          git push --follow-tags origin HEAD:master
