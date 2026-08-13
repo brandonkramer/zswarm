@@ -198,6 +198,10 @@ class McpClient {
         return;
       }
       const onAbort = () => {
+        this.notify("notifications/cancelled", {
+          requestId: id,
+          reason: "Cancelled",
+        });
         this.pending.delete(id);
         clearTimeout(timer);
         reject(new Error("Cancelled"));
