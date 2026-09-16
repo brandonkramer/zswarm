@@ -445,6 +445,11 @@ impl ZellijPlugin for State {
         match event {
             // Zellij hands us the whole manifest whenever anything changes.
             Event::PaneUpdate(manifest) => {
+                // Returning true re-renders this pane, which is itself a pane
+                // change — N copies then storm Zellij (and each other) with
+                // PaneUpdate. Keep state for pipes; draw once when we become
+                // ready so the pane is not blank.
+                let was_ready = self.pane_updates > 0;
                 self.pane_updates += 1;
                 let mut rows = Vec::new();
                 for (tab, panes) in manifest.panes.iter() {
@@ -465,12 +470,12 @@ impl ZellijPlugin for State {
                 }
                 rows.sort_by_key(|r| (r.is_plugin, r.id));
                 self.panes = rows;
-                true
+                !was_ready
             }
             Event::TabUpdate(tabs) => {
                 self.tab_updates += 1;
                 self.tabs = tabs.iter().map(|t| t.name.clone()).collect();
-                true
+                false
             }
             Event::Timer(_elapsed) => {
                 self.tick_waits();

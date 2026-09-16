@@ -86,8 +86,12 @@ function busClient(options = {}) {
   };
 }
 
-function installed(store, configKey = "zswarm-bus") {
-  store.writeBus({ plugin: "/tmp/zswarm-bus.wasm", configKey, installedAt: 1 });
+function installed(store, configKey = "zswarm-bus", session = "demo") {
+  store.writeBus(session, {
+    plugin: "/tmp/zswarm-bus.wasm",
+    configKey,
+    installedAt: 1,
+  });
   return store;
 }
 

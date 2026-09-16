@@ -205,6 +205,26 @@ export function nextConfigKey(key: string): string {
   return `${match[1]}-${Number(match[2]) + 1}`;
 }
 
+/**
+ * Plugin panes belonging to this bus — never tab-bar / status-bar / room.
+ * Titles are the `file:` URL (or the wasm basename) Zellij shows for the pane.
+ */
+export function isBusPluginPane(
+  pane: { isPlugin?: boolean; title?: string; command?: string | null },
+  pluginPath?: string | null,
+): boolean {
+  if (!pane.isPlugin) return false;
+  const hay = `${pane.title ?? ""}\n${pane.command ?? ""}`
+    .replace(/\\/g, "/")
+    .toLowerCase();
+  if (hay.includes("zswarm-bus") || hay.includes("zswarm-events")) return true;
+  if (!pluginPath) return false;
+  const normalized = pluginPath.replace(/\\/g, "/").toLowerCase();
+  if (normalized && hay.includes(normalized)) return true;
+  const base = normalized.split("/").pop();
+  return Boolean(base && hay.includes(base));
+}
+
 function toSnapshot(value: Record<string, unknown>): BusSnapshot | null {
   if (value.ok !== true || !Array.isArray(value.panes)) return null;
   const panes: BusPane[] = [];

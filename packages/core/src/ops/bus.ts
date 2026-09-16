@@ -5,7 +5,7 @@ import type { StateStore } from "../state.js";
 import {
   DEFAULT_BUS_KEY,
   busPluginUrl,
-  nextConfigKey,
+  isBusPluginPane,
   parseBusReply,
   parseChangedReply,
   parseScrollbackReply,
@@ -29,10 +29,14 @@ import { isTrue } from "./util.js";
  * and a timeout on every call and then falls back anyway.
  */
 
-/** Config keys to try before giving up; each one is a fresh pipe destination. */
-const MAX_KEY_ATTEMPTS = 3;
 /** A just-launched instance answers before Zellij has pushed it anything. */
 const COLD_RETRY_MS = 200;
+/**
+ * A marker written this recently with no live pane is an in-flight install,
+ * not a closed pane. Relaunching it is how concurrent agents used to stack
+ * copies.
+ */
+const INSTALL_IN_FLIGHT_MS = 10_000;
 
 export type BusPlan = {
   enabled: boolean;
@@ -69,8 +73,9 @@ export function planBus(
   client: ZellijClient,
   state: StateStore,
   env: NodeJS.ProcessEnv = process.env,
+  session = "",
 ): BusPlan {
-  const marker = state.readBus();
+  const marker = session ? state.readBus(session) : null;
   // A marker can outlive the wasm it names — an upgrade renames the artifact,
   // so a remembered path that no longer exists must not shadow the current one.
   const remembered = marker && existsSync(marker.plugin) ? marker : null;
@@ -135,11 +140,12 @@ async function nudgeManifest(
 /**
  * One pipe, one answer — or null, and the caller polls instead.
  *
- * Two things go wrong in practice. A stale instance under the same key eats the
- * message and replies with nothing, so each attempt rotates to a new key. And a
- * freshly launched instance replies before Zellij has pushed it a manifest, so
- * a not-ready answer is retried once rather than reported as an empty session.
- * If it is still cold after that, one same-title rename nudges Zellij to push.
+ * A freshly launched instance replies before Zellij has pushed it a manifest,
+ * so a not-ready answer is retried once rather than reported as an empty
+ * session. If it is still cold after that, one same-title rename nudges Zellij
+ * to push. A silent pipe used to rotate `instance=` keys, and `zellij pipe
+ * --plugin` loads a new copy for each key — that is how a dead bus became
+ * dozens of WASM panes. One remembered key, then polling.
  */
 export async function busSnapshot(
   client: ZellijClient,
@@ -149,44 +155,31 @@ export async function busSnapshot(
   env: NodeJS.ProcessEnv = process.env,
   payload = "status",
 ): Promise<{ snapshot: BusSnapshot; configKey: string } | null> {
-  const plan = planBus(client, state, env);
+  const plan = planBus(client, state, env, session);
   const pluginPath = plan.plugin;
   if (!plan.enabled || !plan.url || !pluginPath) return null;
 
-  let configKey = answeredWith.get(session) ?? plan.configKey;
-  let nudged = false;
-  for (let attempt = 0; attempt < MAX_KEY_ATTEMPTS; attempt++) {
-    let snapshot = await askOnce(client, session, plan.url, configKey, payload);
-    if (snapshot && !snapshot.ready) {
-      await clock.sleep(COLD_RETRY_MS);
+  const configKey = answeredWith.get(session) ?? plan.configKey;
+  let snapshot = await askOnce(client, session, plan.url, configKey, payload);
+  if (snapshot && !snapshot.ready) {
+    await clock.sleep(COLD_RETRY_MS);
+    snapshot =
+      (await askOnce(client, session, plan.url, configKey, payload)) ??
+      snapshot;
+  }
+  if (snapshot && !snapshot.ready) {
+    try {
+      await nudgeManifest(client, session, env);
       snapshot =
         (await askOnce(client, session, plan.url, configKey, payload)) ??
         snapshot;
+    } catch {
+      // A failed nudge must not fail the op — the caller polls instead.
     }
-    if (snapshot && !snapshot.ready && !nudged) {
-      nudged = true;
-      try {
-        await nudgeManifest(client, session, env);
-        snapshot =
-          (await askOnce(client, session, plan.url, configKey, payload)) ??
-          snapshot;
-      } catch {
-        // A failed nudge must not fail the op — the caller polls instead.
-      }
-    }
-    if (snapshot) {
-      answeredWith.set(session, configKey);
-      if (plan.installed && configKey !== plan.configKey) {
-        // Remember the rotation, so the next process starts on a live key.
-        state.writeBus({
-          plugin: pluginPath,
-          configKey,
-          installedAt: clock.now(),
-        });
-      }
-      return { snapshot, configKey };
-    }
-    configKey = nextConfigKey(configKey);
+  }
+  if (snapshot) {
+    answeredWith.set(session, configKey);
+    return { snapshot, configKey };
   }
 
   processDisabled = "plugin did not answer; using zellij polling for this run";
@@ -213,7 +206,7 @@ export async function busScreens(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Map<string, string> | null> {
   if (paneIds.length < 2) return null;
-  const plan = planBus(client, state, env);
+  const plan = planBus(client, state, env, session);
   if (!plan.enabled || !plan.url) return null;
   const configKey = answeredWith.get(session) ?? plan.configKey;
   const reply = await client.scrollbackPlugin({
@@ -248,7 +241,7 @@ export async function busWait(
   request: WaitRequest,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<BusWait | null> {
-  const plan = planBus(client, state, env);
+  const plan = planBus(client, state, env, session);
   if (!plan.enabled || !plan.url) return null;
   const configKey = answeredWith.get(session) ?? plan.configKey;
   const reply = await client.waitPlugin({
@@ -276,7 +269,7 @@ export async function busChanged(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<BusChanged | null> {
   if (paneIds.length === 0) return null;
-  const plan = planBus(client, state, env);
+  const plan = planBus(client, state, env, session);
   if (!plan.enabled || !plan.url) return null;
   const configKey = answeredWith.get(session) ?? plan.configKey;
   const reply = await client.changedPlugin({
@@ -290,6 +283,57 @@ export async function busChanged(
   return parsed.panes.length === paneIds.length ? parsed : null;
 }
 
+function installedReply(
+  session: string,
+  plugin: string,
+  configKey: string,
+  ready: boolean,
+  panes: number | null,
+  extra: Record<string, unknown> = {},
+): OpsResult {
+  return {
+    ok: true,
+    data: {
+      session,
+      installed: true,
+      plugin,
+      url: busPluginUrl(plugin),
+      configKey,
+      ready,
+      panes,
+      ...extra,
+    },
+  };
+}
+
+async function listBusPluginPanes(
+  client: ZellijClient,
+  session: string,
+  pluginPath: string | null,
+) {
+  const panes = await client.listPanes(session);
+  return panes.filter((pane) => isBusPluginPane(pane, pluginPath));
+}
+
+/** Close every zswarm-bus plugin pane in this session. Best-effort per pane. */
+export async function closeBusPluginPanes(
+  client: ZellijClient,
+  session: string,
+  pluginPath: string | null,
+): Promise<string[]> {
+  const closed: string[] = [];
+  const panes = await listBusPluginPanes(client, session, pluginPath);
+  for (const pane of panes) {
+    try {
+      await client.closePane({ session, paneId: pane.id });
+      closed.push(pane.id);
+    } catch {
+      // A pane that vanished between list and close is the desired end state.
+    }
+  }
+  return closed;
+}
+
 /** Report on the bus, install it, or forget it. */
 export async function busOp(
   client: ZellijClient,
@@ -299,15 +343,32 @@ export async function busOp(
   env: NodeJS.ProcessEnv = process.env,
   policy?: Policy,
 ): Promise<OpsResult> {
+  const sessionArg =
+    typeof args.session === "string" ? args.session : undefined;
+
   if (isTrue(args.clear)) {
-    state.clearBus();
+    let session: string | null = null;
+    let closed: string[] = [];
+    try {
+      session = (await client.resolveSession(sessionArg)).session;
+    } catch {
+      session = sessionArg?.trim() || null;
+    }
+    if (session) {
+      closed = await closeBusPluginPanes(
+        client,
+        session,
+        resolveBusPlugin(env) ?? state.readBus(session)?.plugin ?? null,
+      );
+      state.clearBus(session);
+    } else {
+      state.clearBus();
+    }
     resetBusCache();
-    return { ok: true, data: { installed: false, cleared: true } };
+    return { ok: true, data: { installed: false, cleared: true, closed } };
   }
 
-  const { session } = await client.resolveSession(
-    typeof args.session === "string" ? args.session : undefined,
-  );
+  const { session } = await client.resolveSession(sessionArg);
 
   if (isTrue(args.install)) {
     // Installing opens a pane, which a read-only crew is not allowed to do.
@@ -324,33 +385,52 @@ export async function busOp(
         "no plugin wasm found; run pnpm build:plugin or set ZSWARM_BUS_PLUGIN",
       );
     }
-    const previous = state.readBus();
+    const previous = state.readBus(session);
     const force = isTrue(args.force);
-    // Launching again would add a second instance, so an install that is
-    // already answering is a no-op unless the caller asked for a fresh one.
     if (previous && !force) {
       const live = await busSnapshot(client, state, session, clock, env);
       if (live?.snapshot.ready) {
-        return {
-          ok: true,
-          data: {
-            session,
-            installed: true,
-            plugin: previous.plugin,
-            url: busPluginUrl(previous.plugin),
-            configKey: live.configKey,
-            ready: true,
-            panes: live.snapshot.panes.length,
-            note: "already installed; --force reloads under a fresh key",
+        return installedReply(
+          session,
+          previous.plugin,
+          live.configKey,
+          true,
+          live.snapshot.panes.length,
+          { note: "already installed" },
+        );
+      }
+      const existing = await listBusPluginPanes(client, session, plugin);
+      if (existing.length > 0) {
+        return installedReply(
+          session,
+          previous.plugin,
+          previous.configKey,
+          false,
+          null,
+          {
+            pane: existing[0]?.id ?? null,
+            note: "already installed but not answering; approve the permission prompt in the existing pane — do not --force unless you intend to replace it",
           },
-        };
+        );
+      }
+      if (clock.now() - previous.installedAt < INSTALL_IN_FLIGHT_MS) {
+        return installedReply(
+          session,
+          previous.plugin,
+          previous.configKey,
+          false,
+          null,
+          {
+            note: "install already in flight; wait for the permission prompt rather than launching another pane",
+          },
+        );
       }
     }
-    // A reload needs a key Zellij has not already bound an instance to.
-    const configKey =
-      force && previous
-        ? nextConfigKey(previous.configKey)
-        : (previous?.configKey ?? DEFAULT_BUS_KEY);
+    // Marker first so a concurrent install sees an in-flight write and
+    // stops. Then reap orphans so a reload cannot stack on the old copies.
+    const configKey = previous?.configKey ?? DEFAULT_BUS_KEY;
+    state.writeBus(session, { plugin, configKey, installedAt: clock.now() });
+    const closed = await closeBusPluginPanes(client, session, plugin);
     const url = busPluginUrl(plugin);
     const launched = await client.launchPlugin({
       session,
@@ -359,28 +439,25 @@ export async function busOp(
       floating: true,
       skipCache: force,
     });
-    state.writeBus({ plugin, configKey, installedAt: clock.now() });
     resetBusCache();
     const probe = await busSnapshot(client, state, session, clock, env);
-    return {
-      ok: true,
-      data: {
-        session,
-        installed: true,
-        plugin,
-        url,
-        configKey,
+    return installedReply(
+      session,
+      plugin,
+      configKey,
+      probe?.snapshot.ready ?? false,
+      probe?.snapshot.panes.length ?? null,
+      {
         pane: launched.paneId,
-        ready: probe?.snapshot.ready ?? false,
-        panes: probe?.snapshot.panes.length ?? null,
+        closed,
         note: probe
-          ? "bus answering; list and status use it now, and this pane can be closed"
-          : "approve the plugin's permission prompt in the new pane, then re-run",
+          ? "bus answering; keep this floating pane open — closing it unloads the bus"
+          : "approve the plugin's permission prompt in the new pane, then re-run without --install",
       },
-    };
+    );
   }
 
-  const plan = planBus(client, state, env);
+  const plan = planBus(client, state, env, session);
   const probe = plan.enabled
     ? await busSnapshot(client, state, session, clock, env)
     : null;

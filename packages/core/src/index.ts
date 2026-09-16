@@ -59,6 +59,7 @@ export {
 export {
   busPluginUrl,
   busToPanes,
+  isBusPluginPane,
   nextConfigKey,
   parseBusReply,
   parseScrollbackReply,
@@ -75,6 +76,7 @@ export {
 } from "./zellij/bus.js";
 export {
   busSnapshot,
+  closeBusPluginPanes,
   planBus,
   resetBusCache,
   type BusPlan,

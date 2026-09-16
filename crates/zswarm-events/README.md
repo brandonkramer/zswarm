@@ -92,8 +92,9 @@ Answering a pipe:
   `PipeSource::Cli(id)`, not the `--name` value.
 - Instances of the same plugin under the same configuration collide, and a dead
   one silently swallows the message. Every pipe passes
-  `--plugin-configuration instance=<key>`, and zswarm rotates the key when a
-  reply comes back empty.
+  `--plugin-configuration instance=<key>`. A silent pipe must **not** rotate
+  that key: `zellij pipe --plugin` loads a new copy per key, which is how a
+  dead bus became dozens of WASM panes. Fall back to polling instead.
 - When the caller's stdin is not a terminal, the CLI reads it and sends a
   **second, empty message at EOF**. Answering it duplicates the JSON; ignoring
   it leaves the caller blocked forever. Unblock it and emit nothing.

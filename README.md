@@ -44,10 +44,11 @@ npm i -g zswarm
 zswarm list
 ```
 
-Enable the optional Zellij event-bus plugin once per machine for zero-polling state updates:
+Enable the optional Zellij event-bus plugin once per Zellij session for zero-polling state updates:
 ```bash
 zswarm bus --install
 ```
+Keep the floating pane open. `--force` closes orphan bus panes and reloads; do not use it as a retry.
 
 ### MCP Server Setup
 Configure `zswarm-mcp` (stdio MCP server bundled with the package) in your MCP host:

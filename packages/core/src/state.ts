@@ -26,14 +26,22 @@ export type SignalChannel = {
 };
 
 /**
- * Written once by `bus --install`, after the plugin's permission prompt has
- * been answered. Its presence is what lets later runs try the fast path without
- * every cold `zswarm status` paying for a pipe that was never going to answer.
+ * Written by `bus --install` per Zellij session, after the plugin's permission
+ * prompt has been answered. Its presence is what lets later runs try the fast
+ * path without every cold `zswarm status` paying for a pipe that was never
+ * going to answer.
  */
 export type BusMarkerRecord = {
   plugin: string;
   configKey: string;
   installedAt: number;
+};
+
+type BusFile = {
+  sessions?: Record<string, BusMarkerRecord>;
+  plugin?: string;
+  configKey?: string;
+  installedAt?: number;
 };
 
 const LOG_FILE = "log.jsonl";
@@ -283,22 +291,71 @@ export function createStateStore(options: StateStoreOptions = {}) {
     });
   }
 
-  function readBus(): BusMarkerRecord | null {
-    const value = readJson<BusMarkerRecord | null>(BUS_FILE, null);
-    if (!value || typeof value.plugin !== "string" || !value.plugin) return null;
-    return value;
+  function asMarker(value: unknown): BusMarkerRecord | null {
+    if (!value || typeof value !== "object") return null;
+    const rec = value as Record<string, unknown>;
+    if (typeof rec.plugin !== "string" || !rec.plugin) return null;
+    if (typeof rec.configKey !== "string" || !rec.configKey) return null;
+    return {
+      plugin: rec.plugin,
+      configKey: rec.configKey,
+      installedAt: typeof rec.installedAt === "number" ? rec.installedAt : 0,
+    };
   }
 
-  function writeBus(marker: BusMarkerRecord): void {
-    writeJson(BUS_FILE, marker);
-  }
-
-  function clearBus(): void {
-    try {
-      rmSync(join(dir, BUS_FILE), { force: true });
-    } catch {
-      // Nothing to forget.
+  /**
+   * Current `{ sessions: { <name>: marker } }` plus the pre-0.1.6 flat file
+   * `{ plugin, configKey, installedAt }`, which any session may inherit until
+   * the next write namespaces it.
+   */
+  function readBusFile(): {
+    sessions: Record<string, BusMarkerRecord>;
+    legacy: BusMarkerRecord | null;
+  } {
+    const raw = readJson<BusFile | null>(BUS_FILE, null);
+    if (!raw || typeof raw !== "object") return { sessions: {}, legacy: null };
+    const sessions: Record<string, BusMarkerRecord> = {};
+    if (raw.sessions && typeof raw.sessions === "object") {
+      for (const [name, marker] of Object.entries(raw.sessions)) {
+        const parsed = asMarker(marker);
+        if (parsed) sessions[name] = parsed;
+      }
     }
+    return { sessions, legacy: asMarker(raw) };
+  }
+
+  function readBus(session: string): BusMarkerRecord | null {
+    if (!session) return null;
+    const { sessions, legacy } = readBusFile();
+    return sessions[session] ?? legacy;
+  }
+
+  function writeBus(session: string, marker: BusMarkerRecord): void {
+    const { sessions } = readBusFile();
+    sessions[session] = marker;
+    writeJson(BUS_FILE, { sessions });
+  }
+
+  function clearBus(session?: string): void {
+    if (!session) {
+      try {
+        rmSync(join(dir, BUS_FILE), { force: true });
+      } catch {
+        // Nothing to forget.
+      }
+      return;
+    }
+    const { sessions } = readBusFile();
+    delete sessions[session];
+    if (Object.keys(sessions).length === 0) {
+      try {
+        rmSync(join(dir, BUS_FILE), { force: true });
+      } catch {
+        // Nothing to forget.
+      }
+      return;
+    }
+    writeJson(BUS_FILE, { sessions });
   }
 
   /** Test helper: drop everything this store wrote. */

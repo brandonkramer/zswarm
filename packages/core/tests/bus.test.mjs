@@ -14,6 +14,7 @@ import {
   dispatchZswarm,
   nextConfigKey,
   parseBusReply,
+  isBusPluginPane,
   planBus,
   resetBusCache,
   resolveBusPlugin,
@@ -136,8 +137,12 @@ function busClient(options = {}) {
   return { client, calls, pipes: () => calls.filter((a) => a.includes("pipe")) };
 }
 
-function installed(store, configKey = "zswarm-bus") {
-  store.writeBus({ plugin: "/tmp/zswarm-bus.wasm", configKey, installedAt: 1 });
+function installed(store, configKey = "zswarm-bus", session = "demo") {
+  store.writeBus(session, {
+    plugin: "/tmp/zswarm-bus.wasm",
+    configKey,
+    installedAt: 1,
+  });
   return store;
 }
 
@@ -234,15 +239,15 @@ test("the bus stays off until it is installed", () => {
   resetBusCache();
   const { client } = busClient();
   const store = tempState();
-  const off = planBus(client, store, { ZSWARM_BUS_PLUGIN: "/nope.wasm" });
+  const off = planBus(client, store, { ZSWARM_BUS_PLUGIN: "/nope.wasm" }, "demo");
   assert.equal(off.enabled, false);
   assert.match(off.reason, /no plugin wasm/);
 
-  const on = planBus(client, installed(store), {});
+  const on = planBus(client, installed(store), {}, "demo");
   assert.equal(on.enabled, true);
   assert.equal(on.reason, "installed");
 
-  const denied = planBus(client, store, { ZSWARM_BUS: "0" });
+  const denied = planBus(client, store, { ZSWARM_BUS: "0" }, "demo");
   assert.equal(denied.enabled, false);
   assert.equal(denied.reason, "ZSWARM_BUS=0");
 });
@@ -253,21 +258,19 @@ test("a remote session never asks a local plugin", () => {
   const remote = createZellijClient({
     env: { ZSWARM_SSH: "user@host" },
   });
-  const plan = planBus(remote, store, {});
+  const plan = planBus(remote, store, {}, "demo");
   assert.equal(plan.enabled, false);
   assert.match(plan.reason, /remote session/);
 });
 
-test("busSnapshot rotates past an instance that answers nothing", async () => {
+test("busSnapshot does not rotate instance keys when the remembered key is silent", async () => {
   resetBusCache();
   const store = installed(tempState());
   const { client, pipes } = busClient({ answering: ["zswarm-bus-3"] });
   const result = await busSnapshot(client, store, "demo", clock, {});
-  assert.equal(result.configKey, "zswarm-bus-3");
-  assert.equal(result.snapshot.panes.length, 3);
-  assert.equal(pipes().length, 3);
-  // The winning key is remembered, so the next process starts there.
-  assert.equal(store.readBus().configKey, "zswarm-bus-3");
+  assert.equal(result, null);
+  assert.equal(pipes().length, 1);
+  assert.equal(store.readBus("demo").configKey, "zswarm-bus");
 });
 
 test("busSnapshot asks a cold instance twice before believing it", async () => {
@@ -346,10 +349,10 @@ test("a bus that never answers costs one round, then falls back", async () => {
   const store = installed(tempState());
   const { client, pipes } = busClient({ answering: [] });
   assert.equal(await busSnapshot(client, store, "demo", clock, {}), null);
-  assert.equal(pipes().length, 3);
+  assert.equal(pipes().length, 1);
   // Disabled for the rest of the process: a second call costs nothing.
   assert.equal(await busSnapshot(client, store, "demo", clock, {}), null);
-  assert.equal(pipes().length, 3);
+  assert.equal(pipes().length, 1);
   resetBusCache();
 });
 
@@ -523,7 +526,8 @@ test("bus reports itself and can be forgotten", async () => {
     env: {},
   });
   assert.equal(cleared.data.installed, false);
-  assert.equal(store.readBus(), null);
+  assert.deepEqual(cleared.data.closed, []);
+  assert.equal(store.readBus("demo"), null);
 });
 
 test("installing the bus is refused by a read-only policy", async () => {
@@ -544,4 +548,179 @@ test("installing the bus is refused by a read-only policy", async () => {
   });
   assert.equal(denied.ok, false);
   assert.equal(denied.error.code, "policy_denied");
+});
+
+const PLUGIN_FILE = fileURLToPath(import.meta.url);
+const BUS_PLUGIN_PANE = {
+  id: 7,
+  is_plugin: true,
+  is_focused: false,
+  title: "file:/tmp/zswarm-bus.wasm",
+  exited: false,
+  is_floating: true,
+  tab_name: "work",
+};
+
+function launchCalls(calls) {
+  return calls.filter((a) => a.includes("launch-or-focus-plugin"));
+}
+
+function closeCalls(calls) {
+  return calls.filter((a) => a.includes("close-pane"));
+}
+
+test("isBusPluginPane matches the bus wasm and ignores chrome plugins", () => {
+  assert.equal(
+    isBusPluginPane({
+      isPlugin: true,
+      title: "file:/x/zswarm-bus-v3.wasm",
+      command: null,
+    }),
+    true,
+  );
+  assert.equal(
+    isBusPluginPane({ isPlugin: true, title: "tab-bar", command: null }),
+    false,
+  );
+  assert.equal(
+    isBusPluginPane({
+      isPlugin: false,
+      title: "zswarm-bus-v3.wasm",
+      command: null,
+    }),
+    false,
+  );
+  assert.equal(
+    isBusPluginPane(
+      { isPlugin: true, title: "file:/custom/bus.wasm", command: null },
+      "/custom/bus.wasm",
+    ),
+    true,
+  );
+});
+
+test("a second install does not launch another pane", async () => {
+  resetBusCache();
+  const store = installed(tempState());
+  const { client, calls } = busClient();
+  const result = await dispatchZswarm({ op: "bus", install: true }, client, {
+    state: store,
+    env: { ZSWARM_BUS_PLUGIN: PLUGIN_FILE },
+    now: () => 1,
+    sleep: async () => {},
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.ready, true);
+  assert.match(result.data.note, /already installed/);
+  assert.equal(launchCalls(calls).length, 0);
+});
+
+test("a silent bus with an existing plugin pane does not launch another", async () => {
+  resetBusCache();
+  const store = installed(tempState());
+  const { client, calls } = busClient({
+    answering: [],
+    panesJson: JSON.stringify([BUS_PLUGIN_PANE]),
+  });
+  const result = await dispatchZswarm({ op: "bus", install: true }, client, {
+    state: store,
+    env: { ZSWARM_BUS_PLUGIN: PLUGIN_FILE },
+    now: () => 1,
+    sleep: async () => {},
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.ready, false);
+  assert.match(result.data.note, /do not --force/);
+  assert.equal(launchCalls(calls).length, 0);
+});
+
+test("an in-flight install without a pane yet does not launch another", async () => {
+  resetBusCache();
+  const store = installed(tempState());
+  const { client, calls } = busClient({ answering: [] });
+  const result = await dispatchZswarm({ op: "bus", install: true }, client, {
+    state: store,
+    env: { ZSWARM_BUS_PLUGIN: PLUGIN_FILE },
+    now: () => 1,
+    sleep: async () => {},
+  });
+  assert.equal(result.ok, true);
+  assert.match(result.data.note, /in flight/);
+  assert.equal(launchCalls(calls).length, 0);
+});
+
+test("force closes orphan bus panes then launches one", async () => {
+  resetBusCache();
+  const store = installed(tempState());
+  const { client, calls } = busClient({
+    answering: ["zswarm-bus"],
+    panesJson: JSON.stringify([
+      BUS_PLUGIN_PANE,
+      {
+        id: 8,
+        is_plugin: true,
+        is_focused: false,
+        title: "tab-bar",
+        exited: false,
+        is_floating: false,
+        tab_name: "work",
+      },
+    ]),
+  });
+  const result = await dispatchZswarm(
+    { op: "bus", install: true, force: true },
+    client,
+    {
+      state: store,
+      env: { ZSWARM_BUS_PLUGIN: PLUGIN_FILE },
+      now: () => 1,
+      sleep: async () => {},
+    },
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data.closed, ["plugin_7"]);
+  assert.equal(launchCalls(calls).length, 1);
+  assert.equal(closeCalls(calls).length, 1);
+  assert.ok(closeCalls(calls)[0].includes("plugin_7"));
+  assert.equal(closeCalls(calls).some((a) => a.includes("plugin_8")), false);
+});
+
+test("clear closes bus plugin panes for that session only", async () => {
+  resetBusCache();
+  const store = installed(tempState());
+  store.writeBus("other", {
+    plugin: "/tmp/zswarm-bus.wasm",
+    configKey: "zswarm-bus",
+    installedAt: 1,
+  });
+  const { client, calls } = busClient({
+    panesJson: JSON.stringify([BUS_PLUGIN_PANE]),
+  });
+  const cleared = await dispatchZswarm({ op: "bus", clear: true }, client, {
+    state: store,
+    env: { ZSWARM_BUS_PLUGIN: PLUGIN_FILE },
+  });
+  assert.equal(cleared.data.cleared, true);
+  assert.deepEqual(cleared.data.closed, ["plugin_7"]);
+  assert.equal(store.readBus("demo"), null);
+  assert.equal(store.readBus("other").configKey, "zswarm-bus");
+  assert.equal(closeCalls(calls).length, 1);
+});
+
+test("first install launches a floating pane and remembers the session", async () => {
+  resetBusCache();
+  const store = tempState();
+  const { client, calls } = busClient();
+  const result = await dispatchZswarm({ op: "bus", install: true }, client, {
+    state: store,
+    env: { ZSWARM_BUS_PLUGIN: PLUGIN_FILE },
+    now: () => 1,
+    sleep: async () => {},
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.installed, true);
+  assert.equal(launchCalls(calls).length, 1);
+  assert.ok(launchCalls(calls)[0].includes("--floating"));
+  assert.equal(store.readBus("demo").configKey, "zswarm-bus");
+  assert.equal(store.readBus("other"), null);
 });

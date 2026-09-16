@@ -126,3 +126,35 @@ store.writeCursor(process.argv[3], process.argv[3]);
     assert.equal(store.readCursor(`k${i}`), `k${i}`);
   }
 });
+
+test("bus markers are per session and inherit a legacy flat file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "zswarm-bus-state-"));
+  writeFileSync(
+    join(dir, "bus.json"),
+    JSON.stringify({
+      plugin: "/tmp/zswarm-bus.wasm",
+      configKey: "zswarm-bus-28",
+      installedAt: 9,
+    }),
+  );
+  const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
+  assert.equal(store.readBus("dogster").configKey, "zswarm-bus-28");
+  assert.equal(store.readBus("trex").configKey, "zswarm-bus-28");
+
+  store.writeBus("dogster", {
+    plugin: "/tmp/zswarm-bus.wasm",
+    configKey: "zswarm-bus",
+    installedAt: 10,
+  });
+  assert.equal(store.readBus("dogster").configKey, "zswarm-bus");
+  assert.equal(store.readBus("trex"), null);
+
+  store.writeBus("trex", {
+    plugin: "/tmp/zswarm-bus.wasm",
+    configKey: "zswarm-bus",
+    installedAt: 11,
+  });
+  store.clearBus("dogster");
+  assert.equal(store.readBus("dogster"), null);
+  assert.equal(store.readBus("trex").installedAt, 11);
+});

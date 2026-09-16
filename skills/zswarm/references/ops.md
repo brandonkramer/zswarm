@@ -51,9 +51,13 @@ Failure is `expect_missing` and nothing is written.
 
 ## Event bus
 
-`zswarm({ op: "bus", install: true })` once per machine. After that `list` and
-`status` read a pushed manifest (`source: "plugin"` or `"zellij"`). Off until
-installed; any failure falls back silently — speed, not a dependency.
+`zswarm({ op: "bus", install: true })` once per Zellij session. After that
+`list` and `status` read a pushed manifest (`source: "plugin"` or `"zellij"`).
+Off until installed; any failure falls back silently — speed, not a dependency.
+Do not pass `force` to recover from a quiet bus: that used to stack WASM copies.
+Approve the existing pane's permission prompt, or `force` only when you mean to
+close every bus plugin pane and load one replacement. Keep the floating pane
+open; closing it unloads the bus.
 
 The manifest has no pane command or cwd, so a bus-served `list` omits `command`,
 and `list` with `verbose` / `status --to <command>` keep polling. `status`

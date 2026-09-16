@@ -9,11 +9,14 @@ from memory instead of spawning a process per question. Installed with
 ## Install
 
 Comes in as a dependency of `@zswarm/core` — you do not install it directly.
-Activate it once per machine:
+Activate it once per Zellij session:
 
 ```bash
 zswarm bus --install
 ```
+
+`--force` closes every bus plugin pane in that session and loads one replacement.
+Do not use it as a retry. Keep the floating pane open; closing it unloads the bus.
 
 Override the file with `ZSWARM_BUS_PLUGIN=/abs/path.wasm`.
 
