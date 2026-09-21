@@ -1,8 +1,15 @@
+import { ZellijError } from "../errors.js";
 import { resolveHarness, type HarnessProfile } from "../harness.js";
 import type { ZellijClient } from "../zellij/client.js";
 import type { ZellijPane } from "../zellij/panes.js";
 import type { Clock, OpsResult } from "./types.js";
-import { isTrue, normalizeScreen, numberArg, optionalString } from "./util.js";
+import {
+  isTrue,
+  normalizeScreen,
+  numberArg,
+  optionalString,
+  throwIfAborted,
+} from "./util.js";
 
 /** `running` only appears when sampling is off — busy and idle are indistinguishable then. */
 export type PeerState =
@@ -21,12 +28,20 @@ export type StatusSource = {
   /**
    * Batched screen reader. Returns null when it cannot serve the whole set, and
    * status falls back to one `dump-screen` per pane.
+   * `timeoutMs` is the remaining overall status budget.
    */
-  readScreens?: (paneIds: string[]) => Promise<Map<string, string> | null>;
+  readScreens?: (
+    paneIds: string[],
+    timeoutMs: number,
+  ) => Promise<Map<string, string> | null>;
   /** "Has this moved since you last asked?", answered without a sample gap. */
   readChanged?: (
     paneIds: string[],
-  ) => Promise<Map<string, { changed: boolean; first: boolean; screen: string }> | null>;
+    timeoutMs: number,
+  ) => Promise<Map<
+    string,
+    { changed: boolean; first: boolean; screen: string }
+  > | null>;
 };
 
 /**
@@ -70,13 +85,6 @@ function trailingLines(screen: string, n: number): string[] {
     .slice(-n);
 }
 
-/**
- * True when the trailing window holds a named approval prompt. The profile's
- * waiting patterns run across the window; the legacy last-line QUESTION check
- * stays as the conservative fallback for callers without a profile. Bias is
- * toward false negatives: a hit must be prompt UI we can name, never a bare
- * question mark or "confirm".
- */
 function promptHolds(screen: string, profile?: HarnessProfile | null): boolean {
   const lines = trailingLines(screen, PROMPT_WINDOW);
   const patterns = profile?.waiting;
@@ -94,7 +102,6 @@ export function classify(input: {
   exited: boolean;
   before: string;
   after: string;
-  /** The pane's harness; its waiting patterns name the prompts worth blocking on. */
   profile?: HarnessProfile | null;
 }): PeerState {
   if (input.exited) return "exited";
@@ -122,91 +129,117 @@ export async function mapPool<T, R>(
   return results;
 }
 
+function isCancelledError(err: unknown): boolean {
+  return (
+    (err instanceof ZellijError && err.code === "cancelled") ||
+    (err instanceof Error && /cancelled/i.test(err.message))
+  );
+}
+
+function peerEntry(
+  pane: ZellijPane,
+  state: PeerState,
+  screen: string,
+  verbose: boolean,
+  extra?: Record<string, unknown>,
+): Record<string, unknown> {
+  const entry: Record<string, unknown> = {
+    id: pane.id,
+    title: pane.title,
+    state,
+    lastLine: lastLine(screen).slice(0, 160),
+    ...extra,
+  };
+  if (verbose) {
+    entry.command = pane.command ?? null;
+    entry.cwd = pane.cwd ?? null;
+    entry.tab = pane.tabName ?? null;
+  }
+  return entry;
+}
+
 /**
  * Sample every pane twice and say who is working, who is stuck on a prompt,
  * and who is free — the routing question `list` cannot answer.
+ *
+ * `deadlineAt` is the absolute clock deadline for the whole status op (setup
+ * included). When omitted, one is derived from `timeoutMs` at entry.
  */
 export async function peerStatus(
   client: ZellijClient,
   args: Record<string, unknown>,
   clock: Clock,
   supplied?: StatusSource | null,
+  opts: { deadlineAt?: number; signal?: AbortSignal } = {},
 ): Promise<OpsResult> {
-  const deadline =
-    clock.now() +
-    numberArg(args, "timeoutMs", DEFAULT_STATUS_TIMEOUT_MS, {
-      min: 1_000,
-      max: 900_000,
-    });
+  const signal = opts.signal;
+  throwIfAborted(signal);
+
+  const budget = numberArg(args, "timeoutMs", DEFAULT_STATUS_TIMEOUT_MS, {
+    min: 1_000,
+    max: 900_000,
+  });
+  const deadline = opts.deadlineAt ?? clock.now() + budget;
   const remaining = (): number => Math.max(0, deadline - clock.now());
 
+  // Prefer the caller's already-resolved session/panes so dispatch's setup
+  // budget is not spent twice.
   const session =
     supplied?.session ??
     (
       await client.resolveSession(
         typeof args.session === "string" ? args.session : undefined,
+        remaining() || 1,
       )
     ).session;
-  const panes = supplied?.panes ?? (await client.listPanes(session));
+  throwIfAborted(signal);
+  const panes =
+    supplied?.panes ?? (await client.listPanes(session, remaining() || 1));
+  throwIfAborted(signal);
   const source = supplied?.source ?? "zellij";
   const only = optionalString(args.to);
+  const verbose = isTrue(args.verbose);
   const targets: ZellijPane[] = only
     ? [client.resolvePane(panes, only)]
     : panes.filter((p) => !p.isPlugin);
 
-  // sampleMs=0 asks for the cheap answer: who is alive, from state the plugin
-  // already holds. Below that, two samples too close together read as idle.
   const requested = numberArg(args, "sampleMs", 400, { min: 0, max: 10_000 });
   if (requested === 0) {
     const peers = targets
-      .map((pane) => {
-        const entry: Record<string, unknown> = {
-          id: pane.id,
-          title: pane.title,
-          state: pane.exited ? "exited" : "running",
-        };
-        if (isTrue(args.verbose)) {
-          entry.command = pane.command ?? null;
-          entry.cwd = pane.cwd ?? null;
-          entry.tab = pane.tabName ?? null;
-        }
-        return entry;
-      })
+      .map((pane) =>
+        peerEntry(pane, pane.exited ? "exited" : "running", "", verbose),
+      )
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    // No `free`: without sampling there is no way to tell busy from idle.
     return {
       ok: true,
       data: { session, source, sampled: false, sampleMs: 0, peers },
     };
   }
   const sampleMs = Math.max(50, requested);
-  const live = targets.filter((pane) => !pane.exited).map((pane) => pane.id);
+  const live = targets.filter((pane) => !pane.exited);
 
-  // sinceLast trades the fixed 400ms window for "moved since your last call".
-  // The plugin remembers the previous screen, so there is no gap to wait out —
-  // but ask twice in quick succession and everything reads idle.
   if (isTrue(args.sinceLast) && supplied?.readChanged) {
-    const changed = await supplied.readChanged(live);
+    const left = remaining();
+    const changed = left > 0 ? await supplied.readChanged(
+      live.map((p) => p.id),
+      left,
+    ) : null;
+    throwIfAborted(signal);
     if (changed) {
       const peers = targets
         .map((pane) => {
+          if (pane.exited) {
+            return peerEntry(pane, "exited", "", verbose);
+          }
           const row = changed.get(pane.id);
-          const state: PeerState = pane.exited
-            ? "exited"
-            : row?.changed
-              ? "busy"
-              : promptHolds(row?.screen ?? "", resolveHarness(pane))
-                ? "waiting"
-                : "idle";
-          const entry: Record<string, unknown> = {
-            id: pane.id,
-            title: pane.title,
-            state,
-            lastLine: lastLine(row?.screen ?? "").slice(0, 160),
-          };
-          // First sight has nothing to compare against, so idle is a guess.
-          if (row?.first) entry.first = true;
-          return entry;
+          const state: PeerState = row?.changed
+            ? "busy"
+            : promptHolds(row?.screen ?? "", resolveHarness(pane))
+              ? "waiting"
+              : "idle";
+          return peerEntry(pane, state, row?.screen ?? "", verbose, {
+            ...(row?.first ? { first: true } : {}),
+          });
         })
         .sort((a, b) => String(a.id).localeCompare(String(b.id)));
       return {
@@ -223,78 +256,116 @@ export async function peerStatus(
     }
   }
 
+  type SamplePair = { before: string | null; after: string | null };
+
   /**
-   * One batched read when the bus can serve it, otherwise dumps with bounded
-   * concurrency. Missing/timed-out screens stay null — never empty-string idle.
+   * Bus path: one batched read per round, each bounded by the remaining budget.
+   * Direct path: each pane completes its own before→sleep→after pair under a
+   * shared concurrency limit so one stall does not block healthy peers.
    */
-  const sample = async (): Promise<Map<string, string | null>> => {
-    const batched = supplied?.readScreens
-      ? await supplied.readScreens(live)
-      : null;
-    if (batched) {
-      return new Map(
-        live.map((id) => {
-          const text = batched.get(id);
-          return [id, text === undefined ? null : normalizeScreen(text)] as const;
-        }),
-      );
-    }
-    const screens = new Map<string, string | null>();
-    await mapPool(live, STATUS_DUMP_CONCURRENCY, async (id) => {
+  const samples = new Map<string, SamplePair>();
+
+  if (supplied?.readScreens) {
+    const sampleRound = async (): Promise<Map<string, string | null>> => {
+      throwIfAborted(signal);
       const left = remaining();
       if (left <= 0) {
-        screens.set(id, null);
-        return;
+        return new Map(live.map((p) => [p.id, null]));
       }
       try {
-        const dumped = await client.dumpPane({
-          session,
-          paneId: id,
-          timeoutMs: left,
-        });
-        screens.set(id, normalizeScreen(dumped.text));
-      } catch {
-        screens.set(id, null);
+        const batched = await supplied.readScreens!(
+          live.map((p) => p.id),
+          left,
+        );
+        throwIfAborted(signal);
+        if (!batched) return new Map(); // signal fallback to dumps below
+        return new Map(
+          live.map((p) => {
+            const text = batched.get(p.id);
+            return [
+              p.id,
+              text === undefined ? null : normalizeScreen(text),
+            ] as const;
+          }),
+        );
+      } catch (err) {
+        if (isCancelledError(err) || signal?.aborted) {
+          throw new ZellijError("cancelled", "operation cancelled");
+        }
+        return new Map(live.map((p) => [p.id, null]));
       }
-    });
-    return screens;
-  };
+    };
 
-  const before = await sample();
-  const gap = Math.min(sampleMs, remaining());
-  if (gap > 0) await clock.sleep(gap);
-  const afterScreens =
-    remaining() > 0 ? await sample() : new Map<string, string | null>();
+    let before = await sampleRound();
+    if (before.size === 0) {
+      // Bus declined — fall through to per-pane dumps.
+      before = new Map();
+    } else {
+      const gap = Math.min(sampleMs, remaining());
+      if (gap > 0) await clock.sleep(gap);
+      throwIfAborted(signal);
+      const after =
+        remaining() > 0 ? await sampleRound() : new Map<string, string | null>();
+      for (const pane of live) {
+        samples.set(pane.id, {
+          before: before.get(pane.id) ?? null,
+          after: after.get(pane.id) ?? null,
+        });
+      }
+    }
+  }
+
+  if (samples.size === 0) {
+    // Per-pane sample pairs under bounded concurrency.
+    const roundStart = clock.now();
+    await mapPool(live, STATUS_DUMP_CONCURRENCY, async (pane) => {
+      throwIfAborted(signal);
+      const dumpOne = async (): Promise<string | null> => {
+        const left = remaining();
+        if (left <= 0) return null;
+        try {
+          const dumped = await client.dumpPane({
+            session,
+            paneId: pane.id,
+            timeoutMs: left,
+          });
+          throwIfAborted(signal);
+          return normalizeScreen(dumped.text);
+        } catch (err) {
+          if (isCancelledError(err) || signal?.aborted) {
+            throw new ZellijError("cancelled", "operation cancelled");
+          }
+          return null;
+        }
+      };
+      const before = await dumpOne();
+      throwIfAborted(signal);
+      const waited = clock.now() - roundStart;
+      const gap = Math.min(sampleMs - waited, remaining());
+      if (gap > 0) await clock.sleep(gap);
+      throwIfAborted(signal);
+      const after = await dumpOne();
+      samples.set(pane.id, { before, after });
+    });
+  }
+
+  throwIfAborted(signal);
 
   const peers = [];
   let partial = false;
   for (const pane of targets) {
     if (pane.exited) {
-      peers.push({
-        id: pane.id,
-        title: pane.title,
-        state: "exited" as PeerState,
-        lastLine: "",
-      });
+      peers.push(peerEntry(pane, "exited", "", verbose));
       continue;
     }
-    const first = before.get(pane.id);
-    const after = afterScreens.get(pane.id);
-    // A missing sample must not look like an idle empty screen.
+    const pair = samples.get(pane.id);
+    const first = pair?.before ?? null;
+    const after = pair?.after ?? null;
     if (first == null || after == null) {
       partial = true;
-      const entry: Record<string, unknown> = {
-        id: pane.id,
-        title: pane.title,
-        state: "unknown" as PeerState,
-        lastLine: lastLine(after ?? first ?? "").slice(0, 160),
-      };
-      if (isTrue(args.verbose)) {
-        entry.command = pane.command ?? null;
-        entry.cwd = pane.cwd ?? null;
-        entry.tab = pane.tabName ?? null;
-      }
-      peers.push(entry);
+      peers.push(
+        peerEntry(pane, "unknown", after ?? first ?? "", verbose),
+      );
       continue;
     }
     const state = classify({
@@ -303,18 +374,7 @@ export async function peerStatus(
       after,
       profile: resolveHarness(pane),
     });
-    const entry: Record<string, unknown> = {
-      id: pane.id,
-      title: pane.title,
-      state,
-      lastLine: lastLine(after).slice(0, 160),
-    };
-    if (isTrue(args.verbose)) {
-      entry.command = pane.command ?? null;
-      entry.cwd = pane.cwd ?? null;
-      entry.tab = pane.tabName ?? null;
-    }
-    peers.push(entry);
+    peers.push(peerEntry(pane, state, after, verbose));
   }
 
   peers.sort((a, b) => String(a.id).localeCompare(String(b.id)));

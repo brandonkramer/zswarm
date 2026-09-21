@@ -276,6 +276,18 @@ test("resolveSshTarget rejects command-shaped destinations and bad modes", () =>
     /metacharacters/,
   );
   assert.throws(
+    () => resolveSshTarget({ ZSWARM_SSH: "-V" }),
+    /SSH option/,
+  );
+  assert.throws(
+    () => resolveSshTarget({ ZSWARM_SSH: "-F/tmp/config" }),
+    /SSH option/,
+  );
+  assert.throws(
+    () => resolveSshTarget({ ZSWARM_SSH: "-oProxyCommand=id" }),
+    /SSH option/,
+  );
+  assert.throws(
     () =>
       resolveSshTarget({
         ZSWARM_SSH: "user@host",

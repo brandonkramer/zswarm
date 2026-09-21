@@ -31,7 +31,10 @@ import {
 import { readDeliveryLog } from "./log.js";
 import { awaitSignal, listSignals, postSignal } from "./signals.js";
 import { spawnPane } from "./spawn.js";
-import { peerStatus } from "./status.js";
+import {
+  DEFAULT_STATUS_TIMEOUT_MS,
+  peerStatus,
+} from "./status.js";
 import { tailPane } from "./tail.js";
 import { OP_NAMES } from "../schema.js";
 import type { Clock, DispatchDeps, OpsResult } from "./types.js";
@@ -40,6 +43,7 @@ import {
   fail,
   isTrue,
   isVerbose,
+  numberArg,
   optionalString,
   paneViewBus,
   paneViewFull,
@@ -56,6 +60,43 @@ import {
   uninstallServeLogon,
 } from "./serve.js";
 
+/**
+ * Per-invocation routing from `--local` / `--ssh`. `--local` clears both SSH
+ * and serve (and remote IPC). `--ssh` sets the destination for this call and
+ * clears serve so the flag wins over a sticky ZSWARM_SERVE.
+ */
+export function resolveInvocationEnv(
+  args: Record<string, unknown>,
+  base: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const local = isTrue(args.local);
+  const sshDest =
+    typeof args.ssh === "string" && args.ssh.trim() ? args.ssh.trim() : null;
+  if (local && sshDest) {
+    throw new ZellijError(
+      "usage",
+      "pass --local or --ssh, not both",
+    );
+  }
+  if (!local && !sshDest) return base;
+  const env = { ...base };
+  if (local) {
+    delete env.ZSWARM_SSH;
+    delete env.ZSWARM_SSH_OPTS;
+    delete env.ZSWARM_SSH_MODE;
+    delete env.ZSWARM_SSH_BIN;
+    delete env.ZSWARM_TMP;
+    delete env.ZSWARM_REMOTE_BIN;
+    delete env.ZSWARM_REMOTE_SHELL;
+    delete env.ZSWARM_SERVE;
+    delete env.ZSWARM_SERVE_TOKEN;
+    return env;
+  }
+  env.ZSWARM_SSH = sshDest!;
+  delete env.ZSWARM_SERVE;
+  delete env.ZSWARM_SERVE_TOKEN;
+  return env;
+}
 /** Same default `wait` applies: match when a needle is given, else idle. */
 function waitMode(args: Record<string, unknown>): "idle" | "match" | "either" {
   const requested = typeof args.for === "string" ? args.for.trim() : "";
@@ -166,8 +207,8 @@ export async function dispatchZswarm(
   const git = () => (gitClient ??= createGitClient());
   let stateStore: StateStore | null = deps.state ?? null;
   const state = () => (stateStore ??= createStateStore());
-  const policy = deps.policy ?? loadPolicy(deps.env);
-  const env = deps.env ?? process.env;
+  const env = resolveInvocationEnv(args, deps.env ?? process.env);
+  const policy = deps.policy ?? loadPolicy(env);
   try {
     // Policy gates the op before anything touches the session.
     assertOpAllowed(policy, op);
@@ -200,12 +241,28 @@ export async function dispatchZswarm(
         env.ZSWARM_SERVE_TOKEN,
       );
     }
-    const client = injected ?? createZellijClient({ env: deps.env, signal });
+    const client =
+      injected ??
+      createZellijClient({ env, signal });
     switch (op) {
       case "sessions": {
-        // Resolve SSH/IPC first (listSessions triggers tmp=auto discovery) so a
-        // Windows interactive crew is reachable before --live filters EXITED rows.
+        // Resolve SSH/IPC first so a Windows interactive crew is reachable
+        // before --live filters EXITED rows.
         const listed = await client.listSessions();
+        const transport = client.transport;
+        const ipc = transport.ipc;
+        if (
+          ipc &&
+          ipc.requested?.toLowerCase() === "auto" &&
+          (ipc.status === "failed" ||
+            ipc.status === "expired" ||
+            ipc.status === "cancelled")
+        ) {
+          throw new ZellijError(
+            "ipc_unreachable",
+            `ZSWARM_TMP=auto could not discover the remote Zellij IPC directory (status=${ipc.status}). Set ZSWARM_TMP to the desktop TEMP, confirm ZSWARM_SSH_MODE=interactive with a logged-on user, or use zswarm serve. Refusing to treat EXITED rows as "no live crew".`,
+          );
+        }
         const includeExited = isTrue(args.all);
         const sessions = includeExited
           ? listed
@@ -213,7 +270,7 @@ export async function dispatchZswarm(
         const data: Record<string, unknown> = {
           sessions,
           zellij: client.zellijPath,
-          transport: client.transport,
+          transport,
           filter: includeExited ? "all" : "live",
         };
         return { ok: true, data };
@@ -226,7 +283,7 @@ export async function dispatchZswarm(
         // verbose has to go the polling route.
         const bus = verbose
           ? null
-          : await busSnapshot(client, state(), session, clock, deps.env);
+          : await busSnapshot(client, state(), session, clock, env);
         const view = bus ? paneViewBus : verbose ? paneViewFull : paneViewSlim;
         const panes = (bus ? busToPanes(bus.snapshot) : await client.listPanes(session))
           .filter((p) => !p.isPlugin)
@@ -248,7 +305,7 @@ export async function dispatchZswarm(
           args,
           state(),
           clock,
-          deps.env,
+          env,
           policy,
           op,
         );
@@ -295,7 +352,7 @@ export async function dispatchZswarm(
           args,
           state(),
           clock,
-          deps.env,
+          env,
           policy,
           op,
         );
@@ -358,7 +415,7 @@ export async function dispatchZswarm(
           args,
           state(),
           clock,
-          deps.env,
+          env,
         );
         const dumped = await client.dumpPane({
           session,
@@ -386,7 +443,7 @@ export async function dispatchZswarm(
           args,
           state(),
           clock,
-          deps.env,
+          env,
         );
         return await tailPane(client, state(), args, target);
       }
@@ -396,7 +453,7 @@ export async function dispatchZswarm(
           args,
           state(),
           clock,
-          deps.env,
+          env,
         );
         // The plugin holds one pipe for the whole wait and polls far tighter
         // than spawning a process allows. It declines a regex needle — it has
@@ -415,7 +472,7 @@ export async function dispatchZswarm(
                   ignoreCase: isTrue(args.ignoreCase),
                   ...timing,
                 },
-                deps.env,
+                env,
               );
         return await waitForPane(
           client,
@@ -427,53 +484,104 @@ export async function dispatchZswarm(
         );
       }
       case "status": {
+        // One overall deadline covering session resolve, bus snapshot, IPC,
+        // and screen samples — not just the dump loop inside peerStatus.
+        const statusBudget = numberArg(
+          args,
+          "timeoutMs",
+          DEFAULT_STATUS_TIMEOUT_MS,
+          { min: 1_000, max: 900_000 },
+        );
+        const deadlineAt = clock.now() + statusBudget;
+        const remaining = (): number => Math.max(0, deadlineAt - clock.now());
+        throwIfAborted(signal);
+
         const { session } = await client.resolveSession(
           typeof args.session === "string" ? args.session : undefined,
+          remaining() || 1,
         );
+        throwIfAborted(signal);
         // Verbose reports cwd and command, which the plugin manifest lacks.
-        const bus = verbose
-          ? null
-          : await busSnapshot(client, state(), session, clock, deps.env);
-        let supplied = bus
-          ? {
-              session,
-              panes: busToPanes(bus.snapshot),
-              source: "plugin" as const,
-              // Sampling is 2N dumps; the plugin reads them all in one pipe.
-              readScreens: (paneIds: string[]) =>
-                busScreens(client, state(), session, paneIds, clock, deps.env),
-              readChanged: async (paneIds: string[]) => {
-                const reply = await busChanged(
-                  client,
-                  state(),
-                  session,
-                  paneIds,
-                  deps.env,
-                );
-                if (!reply) return null;
-                return new Map(
-                  reply.panes.map((p) => [
-                    p.id,
-                    { changed: p.changed, first: p.first, screen: p.screen },
-                  ]),
-                );
-              },
-            }
-          : null;
+        const bus =
+          verbose || remaining() <= 0
+            ? null
+            : await busSnapshot(client, state(), session, clock, env);
+        throwIfAborted(signal);
+        // Always hand peerStatus the resolved session (and panes) so it does
+        // not spend the overall budget resolving again.
+        const panes = bus
+          ? busToPanes(bus.snapshot)
+          : await client.listPanes(session, remaining() || 1);
+        throwIfAborted(signal);
+        let supplied: {
+          session: string;
+          panes: ReturnType<typeof busToPanes>;
+          source: "plugin" | "zellij";
+          readScreens?: (
+            paneIds: string[],
+            timeoutMs: number,
+          ) => Promise<Map<string, string> | null>;
+          readChanged?: (
+            paneIds: string[],
+            timeoutMs: number,
+          ) => Promise<Map<
+            string,
+            { changed: boolean; first: boolean; screen: string }
+          > | null>;
+        } = {
+          session,
+          panes,
+          source: bus ? "plugin" : "zellij",
+        };
+        if (bus) {
+          supplied = {
+            ...supplied,
+            readScreens: (paneIds: string[], timeoutMs: number) =>
+              busScreens(
+                client,
+                state(),
+                session,
+                paneIds,
+                clock,
+                env,
+                timeoutMs,
+              ),
+            readChanged: async (paneIds: string[], timeoutMs: number) => {
+              const reply = await busChanged(
+                client,
+                state(),
+                session,
+                paneIds,
+                env,
+                timeoutMs,
+              );
+              if (!reply) return null;
+              return new Map(
+                reply.panes.map((p) => [
+                  p.id,
+                  { changed: p.changed, first: p.first, screen: p.screen },
+                ]),
+              );
+            },
+          };
+        }
         const only = typeof args.to === "string" ? args.to.trim() : "";
-        if (supplied && only) {
+        if (bus && only) {
           try {
             client.resolvePane(supplied.panes, only);
           } catch {
-            // The manifest has no commands, so a command-shaped `to` only
-            // resolves against the polled list.
-            supplied = null;
+            // Command-shaped `to` needs the polled list; re-fetch without bus.
+            const polled = await client.listPanes(session, remaining() || 1);
+            supplied = { session, panes: polled, source: "zellij" };
           }
         }
-        return await peerStatus(client, args, clock, supplied);
+        return await peerStatus(client, args, clock, supplied, {
+          deadlineAt,
+          signal,
+        });
       }
       case "bus":
-        return await busOp(client, state(), args, clock, deps.env, policy);
+        return await busOp(client, state(), args, clock, env, policy);
       case "signal":
         return postSignal(state(), args, clock);
       case "signals":
@@ -508,7 +616,7 @@ export async function dispatchZswarm(
           args,
           state(),
           clock,
-          deps.env,
+          env,
           policy,
           op,
         );

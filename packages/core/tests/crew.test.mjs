@@ -392,8 +392,11 @@ test("classify separates busy, waiting, idle, and exited", () => {
 
 test("status reports who is free", async () => {
   // terminal_1 changes between samples, terminal_2 does not.
-  const screens = ["work 1", "still", "work 2", "still"];
-  let i = 0;
+  const screens = {
+    terminal_1: ["work 1", "work 2"],
+    terminal_2: ["still", "still"],
+  };
+  const seen = { terminal_1: 0, terminal_2: 0 };
   const client = createZellijClient({
     env: {},
     exec: async (args) => {
@@ -402,7 +405,10 @@ test("status reports who is free", async () => {
         return { code: 0, stdout: JSON.stringify(PANES), stderr: "" };
       }
       if (args.includes("dump-screen")) {
-        return { code: 0, stdout: screens[i++] ?? "still", stderr: "" };
+        const id = args.includes("terminal_2") ? "terminal_2" : "terminal_1";
+        const seq = screens[id];
+        const text = seq[Math.min(seen[id]++, seq.length - 1)] ?? "still";
+        return { code: 0, stdout: text, stderr: "" };
       }
       return { code: 0, stdout: "", stderr: "" };
     },

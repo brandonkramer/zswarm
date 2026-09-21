@@ -95,6 +95,20 @@ export const PARAMS: readonly ParamSpec[] = [
       "sessions: only live (non-EXITED) sessions — this is the default; use --all to include EXITED",
   },
   {
+    name: "local",
+    type: "boolean",
+    flags: ["--local"],
+    description:
+      "route this call to the local machine only — clears ZSWARM_SSH, ZSWARM_SERVE, and remote ZSWARM_TMP for the invocation",
+  },
+  {
+    name: "ssh",
+    type: "string",
+    flags: ["--ssh"],
+    description:
+      "route this call over SSH to user@host (or an alias) for the invocation; clears ZSWARM_SERVE; put flags in ZSWARM_SSH_OPTS",
+  },
+  {
     name: "group",
     type: "string",
     flags: ["--group", "-g"],

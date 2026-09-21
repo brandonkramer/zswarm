@@ -34,12 +34,14 @@ import {
   parseWaitReply,
 } from "./bus.js";
 import { parseTabList, resolveTab, type ZellijTab } from "./tabs.js";
-import { createSshExec } from "../exec.js";
+import { createSshExec, type IpcDiscoveryState, type SshExecFn } from "../exec.js";
 import {
   DEFAULT_TIMEOUT_MS,
   NOT_FOUND_EXIT,
   defaultExec,
+  ensureZellijCapabilities,
   ensureZellijIdentity,
+  identityCacheKey,
   resolveSshTarget,
   resolveZellijBinary,
   sanitizeZellijEnv,
@@ -76,7 +78,10 @@ export type ZellijTransport = {
   mode: "local" | "ssh" | "interactive";
   host?: string;
   remoteBin?: string;
+  /** Configured or resolved IPC temp (`auto` until discovery succeeds). */
   tmp?: string;
+  /** Outcome of `ZSWARM_TMP=auto` discovery when SSH routing is active. */
+  ipc?: IpcDiscoveryState;
 };
 
 /** Thin, stateless wrapper over the `zellij` binary. */
@@ -93,30 +98,50 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
       : ssh
         ? `ssh://${ssh.host}/${ssh.remoteBin}`
         : resolveZellijBinary(env));
-  const rawExec =
+  const sshExec: SshExecFn | null =
+    options.exec || !ssh
+      ? null
+      : createSshExec(ssh, sanitizeZellijEnv(env));
+  const rawExec: ZellijExecFn =
     options.exec ??
-    (ssh
-      ? createSshExec(ssh, sanitizeZellijEnv(env))
-      : defaultExec(zellijPath, env));
+    (sshExec ? sshExec : defaultExec(zellijPath, env));
   const exec: ZellijExecFn = (args, opts) =>
     rawExec(args, { ...opts, signal: opts.signal ?? options.signal });
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const selfPaneId = resolveSelfPaneId(env);
-  const transport: ZellijTransport = ssh
-    ? {
-        kind: "ssh",
-        mode: ssh.mode ?? "ssh",
-        host: ssh.host,
-        remoteBin: ssh.remoteBin,
-        tmp: ssh.tmp,
-      }
-    : { kind: "local", mode: "local" };
+  const probeKey = identityCacheKey(zellijPath, ssh);
+
+  function readTransport(): ZellijTransport {
+    if (!ssh) return { kind: "local", mode: "local" };
+    const ipc = sshExec?.ipcState;
+    return {
+      kind: "ssh",
+      mode: ssh.mode ?? "ssh",
+      host: ssh.host,
+      remoteBin: ssh.remoteBin,
+      tmp: ipc?.tmp ?? ssh.tmp,
+      ipc: ipc
+        ? {
+            requested: ipc.requested,
+            status: ipc.status,
+            tmp: ipc.tmp,
+            socketDir: ipc.socketDir,
+          }
+        : undefined,
+    };
+  }
 
   let identityReady: Promise<void> | null = null;
-  function ensureIdentity(): Promise<void> {
+  function ensureIdentity(budget = timeoutMs): Promise<void> {
     if (options.skipIdentityProbe || options.exec) return Promise.resolve();
     if (!identityReady) {
-      identityReady = ensureZellijIdentity(exec, zellijPath, timeoutMs);
+      identityReady = (async () => {
+        await ensureZellijIdentity(exec, zellijPath, budget, probeKey);
+        await ensureZellijCapabilities(exec, zellijPath, budget, probeKey);
+      })().catch((err) => {
+        identityReady = null;
+        throw err;
+      });
     }
     return identityReady;
   }
@@ -126,7 +151,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     label: string,
     callTimeoutMs = timeoutMs,
   ) {
-    await ensureIdentity();
+    await ensureIdentity(callTimeoutMs);
     const result = await exec(args, { timeoutMs: callTimeoutMs });
     if (result.code === NOT_FOUND_EXIT) {
       throw new ZellijError(
@@ -151,11 +176,13 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     return result;
   }
 
-  async function listSessions(): Promise<ZellijSession[]> {
-    await ensureIdentity();
+  async function listSessions(
+    callTimeoutMs = timeoutMs,
+  ): Promise<ZellijSession[]> {
+    await ensureIdentity(callTimeoutMs);
     // Keep annotations (EXITED / current); --short drops them.
     const result = await exec(["list-sessions", "--no-formatting"], {
-      timeoutMs,
+      timeoutMs: callTimeoutMs,
     });
     if (result.code === NOT_FOUND_EXIT) {
       throw new ZellijError(
@@ -172,9 +199,6 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
           `resolved binary looks like zswarm, not Zellij (${zellijPath}): ${detail}`,
         );
       }
-      // Nonzero here is Zellij's normal "none running", not a crash. Empty
-      // lets resolveSession throw zellij_no_session so unworktree can treat
-      // it as no occupants instead of zellij_failed.
       if (isZellijNoSessionsOutput(result.stdout, result.stderr)) return [];
       throw new ZellijError(
         "zellij_failed",
@@ -186,14 +210,22 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
 
   async function resolveSession(
     explicit?: string | null,
+    callTimeoutMs = timeoutMs,
   ): Promise<ZellijSessionResolve> {
-    return sessionFromEnv(env, explicit) ?? sessionFromList(await listSessions());
+    return (
+      sessionFromEnv(env, explicit) ??
+      sessionFromList(await listSessions(callTimeoutMs))
+    );
   }
 
-  async function listPanes(session: string): Promise<ZellijPane[]> {
+  async function listPanes(
+    session: string,
+    callTimeoutMs = timeoutMs,
+  ): Promise<ZellijPane[]> {
     const result = await run(
       buildListPanesArgs(session),
       "zellij action list-panes",
+      callTimeoutMs,
     );
     return parsePaneList(result.stdout);
   }
@@ -448,7 +480,13 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   }
 
   async function changedPlugin(
-    input: { session: string; url: string; configKey: string; panes: string[] },
+    input: {
+      session: string;
+      url: string;
+      configKey: string;
+      panes: string[];
+      timeoutMs?: number;
+    },
   ): Promise<{ code: number; stdout: string; stderr: string }> {
     return exec(
       buildPipeArgs({
@@ -458,7 +496,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
         payload: changedPayload(input.panes),
       }),
       {
-        timeoutMs: DEFAULT_BUS_TIMEOUT_MS,
+        timeoutMs: input.timeoutMs ?? DEFAULT_BUS_TIMEOUT_MS,
         until: (stdout) => parseChangedReply(stdout) !== null,
       },
     );
@@ -486,7 +524,9 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   return {
     zellijPath,
     selfPaneId,
-    transport,
+    get transport() {
+      return readTransport();
+    },
     /** A `file:` plugin url only names a path on the machine running Zellij. */
     remote: ssh !== null,
     listSessions,

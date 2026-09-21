@@ -19,7 +19,9 @@ export {
 export {
   expandHomePath,
   looksLikeZswarmBinary,
+  isZellijVersionOutput,
   resolveZellijBinary,
+  resetZellijIdentityCache,
   sanitizeZellijEnv,
   validateSshDestination,
   validateSshMode,
@@ -100,7 +102,7 @@ export {
   type StateStore,
   type StateStoreOptions,
 } from "./state.js";
-export { dispatchZswarm } from "./ops/dispatch.js";
+export { dispatchZswarm, resolveInvocationEnv } from "./ops/dispatch.js";
 export {
   assertOpAllowed,
   assertPaneAllowed,
@@ -113,6 +115,8 @@ export {
   createSshExec,
   quoteRemoteArg,
   shellQuote,
+  type IpcDiscoveryState,
+  type SshExecFn,
   type SshTarget,
 } from "./exec.js";
 export { resolveSshTarget } from "./zellij/binary.js";
@@ -155,6 +159,7 @@ export {
   classify,
   lastLine,
   mapPool,
+  peerStatus,
   DEFAULT_STATUS_TIMEOUT_MS,
   STATUS_DUMP_CONCURRENCY,
   type PeerState,

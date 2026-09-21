@@ -204,6 +204,7 @@ export async function busScreens(
   paneIds: string[],
   clock: Clock,
   env: NodeJS.ProcessEnv = process.env,
+  timeoutMs?: number,
 ): Promise<Map<string, string> | null> {
   if (paneIds.length < 2) return null;
   const plan = planBus(client, state, env, session);
@@ -214,6 +215,7 @@ export async function busScreens(
     url: plan.url,
     configKey,
     panes: paneIds,
+    timeoutMs,
   });
   const parsed = parseScrollbackReply(reply.stdout);
   if (!parsed || !parsed.ready) return null;
@@ -267,6 +269,7 @@ export async function busChanged(
   session: string,
   paneIds: string[],
   env: NodeJS.ProcessEnv = process.env,
+  timeoutMs?: number,
 ): Promise<BusChanged | null> {
   if (paneIds.length === 0) return null;
   const plan = planBus(client, state, env, session);
@@ -277,6 +280,7 @@ export async function busChanged(
     url: plan.url,
     configKey,
     panes: paneIds,
+    timeoutMs,
   });
   const parsed = parseChangedReply(reply.stdout);
   if (!parsed || !parsed.ready) return null;

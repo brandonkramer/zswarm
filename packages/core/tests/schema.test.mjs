@@ -79,6 +79,14 @@ test("parseCliArgv maps flags onto dispatch args", () => {
     op: "status",
     timeoutMs: 5000,
   });
+  assert.deepEqual(parseCliArgv(["list", "--local"]), {
+    op: "list",
+    local: true,
+  });
+  assert.deepEqual(parseCliArgv(["sessions", "--ssh", "user@host"]), {
+    op: "sessions",
+    ssh: "user@host",
+  });
 });
 
 test("parseCliArgv keeps the positional shorthands", () => {
