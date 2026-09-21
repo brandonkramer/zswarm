@@ -18,8 +18,11 @@ export {
 } from "./git.js";
 export {
   expandHomePath,
+  looksLikeZswarmBinary,
   resolveZellijBinary,
   sanitizeZellijEnv,
+  validateSshDestination,
+  validateSshMode,
   type ZellijExecFn,
   type ZellijExecResult,
 } from "./zellij/binary.js";
@@ -30,8 +33,10 @@ export {
   type ZellijPane,
 } from "./zellij/panes.js";
 export {
+  liveSessionNames,
   parseSessionList,
   resolveSelfPaneId,
+  type ZellijSession,
   type ZellijSessionResolve,
 } from "./zellij/session.js";
 export {
@@ -85,6 +90,7 @@ export {
   createZellijClient,
   type ZellijClient,
   type ZellijClientOptions,
+  type ZellijTransport,
 } from "./zellij/client.js";
 export {
   createStateStore,
@@ -145,7 +151,14 @@ export {
 export { parseTabList, resolveTab, type ZellijTab } from "./zellij/tabs.js";
 export { selectTargets } from "./ops/broadcast.js";
 export { diffScreens, cursorKey } from "./ops/tail.js";
-export { classify, lastLine, type PeerState } from "./ops/status.js";
+export {
+  classify,
+  lastLine,
+  mapPool,
+  DEFAULT_STATUS_TIMEOUT_MS,
+  STATUS_DUMP_CONCURRENCY,
+  type PeerState,
+} from "./ops/status.js";
 export {
   normalizeScreen,
   truncateDumpText,

@@ -5,7 +5,13 @@ import type { Clock, OpsResult } from "./types.js";
 import { isTrue, normalizeScreen, numberArg, optionalString } from "./util.js";
 
 /** `running` only appears when sampling is off — busy and idle are indistinguishable then. */
-export type PeerState = "busy" | "waiting" | "idle" | "exited" | "running";
+export type PeerState =
+  | "busy"
+  | "waiting"
+  | "idle"
+  | "exited"
+  | "running"
+  | "unknown";
 
 /** Pane list already in hand, so status does not re-fetch what the caller has. */
 export type StatusSource = {
@@ -43,6 +49,12 @@ const QUESTION =
  * where it is or it would fire on chrome.
  */
 const PROMPT_WINDOW = 24;
+
+/** Default overall budget for a sampled status pass (covers IPC + dumps). */
+export const DEFAULT_STATUS_TIMEOUT_MS = 30_000;
+
+/** How many dump-screen calls to run at once on the direct (non-bus) path. */
+export const STATUS_DUMP_CONCURRENCY = 3;
 
 export function lastLine(screen: string): string {
   const lines = screen.split("\n").filter((l) => l.trim());
@@ -90,6 +102,26 @@ export function classify(input: {
   return promptHolds(input.after, input.profile) ? "waiting" : "idle";
 }
 
+/** Run `fn` over items with at most `limit` in flight. */
+export async function mapPool<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const concurrency = Math.max(1, Math.min(limit, items.length));
+  const results = new Array<R>(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]!, i);
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  return results;
+}
+
 /**
  * Sample every pane twice and say who is working, who is stuck on a prompt,
  * and who is free — the routing question `list` cannot answer.
@@ -100,6 +132,14 @@ export async function peerStatus(
   clock: Clock,
   supplied?: StatusSource | null,
 ): Promise<OpsResult> {
+  const deadline =
+    clock.now() +
+    numberArg(args, "timeoutMs", DEFAULT_STATUS_TIMEOUT_MS, {
+      min: 1_000,
+      max: 900_000,
+    });
+  const remaining = (): number => Math.max(0, deadline - clock.now());
+
   const session =
     supplied?.session ??
     (
@@ -184,37 +224,81 @@ export async function peerStatus(
   }
 
   /**
-   * One batched read when the bus can serve it, otherwise a process per pane.
-   * Both paths normalize, which is what makes them comparable: the plugin pads
-   * lines to the terminal width and `dump-screen` does not.
+   * One batched read when the bus can serve it, otherwise dumps with bounded
+   * concurrency. Missing/timed-out screens stay null — never empty-string idle.
    */
-  const sample = async (): Promise<Map<string, string>> => {
+  const sample = async (): Promise<Map<string, string | null>> => {
     const batched = supplied?.readScreens
       ? await supplied.readScreens(live)
       : null;
     if (batched) {
       return new Map(
-        [...batched].map(([id, text]) => [id, normalizeScreen(text)]),
+        live.map((id) => {
+          const text = batched.get(id);
+          return [id, text === undefined ? null : normalizeScreen(text)] as const;
+        }),
       );
     }
-    const screens = new Map<string, string>();
-    for (const id of live) {
-      const dumped = await client.dumpPane({ session, paneId: id });
-      screens.set(id, normalizeScreen(dumped.text));
-    }
+    const screens = new Map<string, string | null>();
+    await mapPool(live, STATUS_DUMP_CONCURRENCY, async (id) => {
+      const left = remaining();
+      if (left <= 0) {
+        screens.set(id, null);
+        return;
+      }
+      try {
+        const dumped = await client.dumpPane({
+          session,
+          paneId: id,
+          timeoutMs: left,
+        });
+        screens.set(id, normalizeScreen(dumped.text));
+      } catch {
+        screens.set(id, null);
+      }
+    });
     return screens;
   };
 
   const before = await sample();
-  await clock.sleep(sampleMs);
-  const afterScreens = await sample();
+  const gap = Math.min(sampleMs, remaining());
+  if (gap > 0) await clock.sleep(gap);
+  const afterScreens =
+    remaining() > 0 ? await sample() : new Map<string, string | null>();
 
   const peers = [];
+  let partial = false;
   for (const pane of targets) {
-    const first = before.get(pane.id) ?? "";
-    const after = pane.exited ? first : (afterScreens.get(pane.id) ?? "");
+    if (pane.exited) {
+      peers.push({
+        id: pane.id,
+        title: pane.title,
+        state: "exited" as PeerState,
+        lastLine: "",
+      });
+      continue;
+    }
+    const first = before.get(pane.id);
+    const after = afterScreens.get(pane.id);
+    // A missing sample must not look like an idle empty screen.
+    if (first == null || after == null) {
+      partial = true;
+      const entry: Record<string, unknown> = {
+        id: pane.id,
+        title: pane.title,
+        state: "unknown" as PeerState,
+        lastLine: lastLine(after ?? first ?? "").slice(0, 160),
+      };
+      if (isTrue(args.verbose)) {
+        entry.command = pane.command ?? null;
+        entry.cwd = pane.cwd ?? null;
+        entry.tab = pane.tabName ?? null;
+      }
+      peers.push(entry);
+      continue;
+    }
     const state = classify({
-      exited: pane.exited,
+      exited: false,
       before: first,
       after,
       profile: resolveHarness(pane),
@@ -235,8 +319,14 @@ export async function peerStatus(
 
   peers.sort((a, b) => String(a.id).localeCompare(String(b.id)));
   const free = peers.filter((p) => p.state === "idle").map((p) => p.id);
-  return {
-    ok: true,
-    data: { session, source, sampled: true, sampleMs, peers, free },
+  const data: Record<string, unknown> = {
+    session,
+    source,
+    sampled: true,
+    sampleMs,
+    peers,
+    free,
   };
+  if (partial || remaining() <= 0) data.partial = true;
+  return { ok: true, data };
 }

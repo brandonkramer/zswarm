@@ -63,6 +63,22 @@ test("parseCliArgv maps flags onto dispatch args", () => {
     closeOnExit: true,
     cwd: "/repo",
   });
+  assert.deepEqual(parseCliArgv(["sessions", "--live"]), {
+    op: "sessions",
+    live: true,
+  });
+  assert.deepEqual(parseCliArgv(["sessions", "--all"]), {
+    op: "sessions",
+    all: true,
+  });
+  assert.deepEqual(parseCliArgv(["sessions", "--active"]), {
+    op: "sessions",
+    live: true,
+  });
+  assert.deepEqual(parseCliArgv(["status", "--timeout-ms", "5000"]), {
+    op: "status",
+    timeoutMs: 5000,
+  });
 });
 
 test("parseCliArgv keeps the positional shorthands", () => {

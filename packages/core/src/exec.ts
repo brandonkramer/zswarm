@@ -98,6 +98,7 @@ async function discoverRemoteIpc(
   runner: ExecFn,
   target: SshTarget,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<IpcDirs | undefined> {
   const shell = inferRemoteShell({
     explicit: target.remoteShell,
@@ -111,8 +112,10 @@ async function discoverRemoteIpc(
       ? [windowsDiscoverRemote(), unixDiscoverRemote()]
       : [unixDiscoverRemote(), windowsDiscoverRemote()];
   for (const probe of probes) {
+    if (signal?.aborted) return undefined;
     const result = await runner([...target.options, target.host, probe], {
       timeoutMs,
+      signal,
     });
     const dirs = pickIpcDirs(parseZellijServerPaths(result.stdout));
     if (dirs) return dirs;
@@ -131,28 +134,44 @@ export function createSshExec(
   const runner = createExec(target.ssh, env);
   let cached: IpcDirs | undefined;
 
-  async function resolveIpc(timeoutMs: number): Promise<IpcDirs | undefined> {
+  async function resolveIpc(
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<IpcDirs | undefined> {
     const requested = target.tmp?.trim();
     if (!requested) return undefined;
     if (requested.toLowerCase() !== "auto") {
       return { tmp: requested, socketDir: "" };
     }
     if (cached) return cached;
-    const dirs = await discoverRemoteIpc(runner, target, timeoutMs);
+    const dirs = await discoverRemoteIpc(runner, target, timeoutMs, signal);
     if (dirs) cached = dirs;
     return dirs;
   }
 
   return async (args, options) => {
-    const ipc = await resolveIpc(options.timeoutMs);
+    const started = Date.now();
+    const ipc = await resolveIpc(options.timeoutMs, options.signal);
+    const used = Date.now() - started;
+    const left = Math.max(1, options.timeoutMs - used);
+    if (options.signal?.aborted) {
+      return {
+        code: -1,
+        stdout: "",
+        stderr: `${target.ssh} cancelled`,
+      };
+    }
     const remote = buildSshRemoteCommand(
       target,
       args,
       ipc?.tmp,
-      options.timeoutMs,
+      left,
       ipc?.socketDir,
     );
-    return runner([...target.options, target.host, remote], options);
+    return runner([...target.options, target.host, remote], {
+      ...options,
+      timeoutMs: left,
+    });
   };
 }
 

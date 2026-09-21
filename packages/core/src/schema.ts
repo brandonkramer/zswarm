@@ -84,7 +84,15 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "all",
     type: "boolean",
     flags: ["--all", "-a"],
-    description: "broadcast: every terminal pane in the session",
+    description:
+      "broadcast: every terminal pane in the session; sessions: include EXITED resurrectable sessions",
+  },
+  {
+    name: "live",
+    type: "boolean",
+    flags: ["--live", "--active"],
+    description:
+      "sessions: only live (non-EXITED) sessions — this is the default; use --all to include EXITED",
   },
   {
     name: "group",
@@ -251,7 +259,8 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "timeoutMs",
     type: "number",
     flags: ["--timeout-ms"],
-    description: "wait: give up after this long (default 60000)",
+    description:
+      "wait: give up after this long (default 60000); status: overall deadline for IPC discovery and screen samples (default 30000)",
   },
   {
     name: "keys",

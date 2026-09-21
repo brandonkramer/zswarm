@@ -203,8 +203,20 @@ export async function dispatchZswarm(
     const client = injected ?? createZellijClient({ env: deps.env, signal });
     switch (op) {
       case "sessions": {
-        const sessions = await client.listSessions();
-        return { ok: true, data: { sessions, zellij: client.zellijPath } };
+        // Resolve SSH/IPC first (listSessions triggers tmp=auto discovery) so a
+        // Windows interactive crew is reachable before --live filters EXITED rows.
+        const listed = await client.listSessions();
+        const includeExited = isTrue(args.all);
+        const sessions = includeExited
+          ? listed
+          : listed.filter((s) => !s.exited);
+        const data: Record<string, unknown> = {
+          sessions,
+          zellij: client.zellijPath,
+          transport: client.transport,
+          filter: includeExited ? "all" : "live",
+        };
+        return { ok: true, data };
       }
       case "list": {
         const { session } = await client.resolveSession(

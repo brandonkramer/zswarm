@@ -39,6 +39,7 @@ import {
   DEFAULT_TIMEOUT_MS,
   NOT_FOUND_EXIT,
   defaultExec,
+  ensureZellijIdentity,
   resolveSshTarget,
   resolveZellijBinary,
   sanitizeZellijEnv,
@@ -56,6 +57,7 @@ import {
   resolveSelfPaneId,
   sessionFromEnv,
   sessionFromList,
+  type ZellijSession,
   type ZellijSessionResolve,
 } from "./session.js";
 
@@ -65,16 +67,32 @@ export type ZellijClientOptions = {
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** Skip the one-time `zellij --version` identity probe (tests). */
+  skipIdentityProbe?: boolean;
+};
+
+export type ZellijTransport = {
+  kind: "local" | "ssh";
+  mode: "local" | "ssh" | "interactive";
+  host?: string;
+  remoteBin?: string;
+  tmp?: string;
 };
 
 /** Thin, stateless wrapper over the `zellij` binary. */
 export function createZellijClient(options: ZellijClientOptions = {}) {
   const env = options.env ?? process.env;
-  // A remote crew never resolves a local binary.
+  // A remote crew never resolves a local binary. An injected exec is a unit
+  // test (or in-process stand-in) — skip PATH/env resolution so a poisoned
+  // ZSWARM_BIN in the host environment cannot fail client construction.
   const ssh = options.exec ? null : resolveSshTarget(env);
   const zellijPath =
     options.zellijPath ??
-    (ssh ? `ssh://${ssh.host}/${ssh.remoteBin}` : resolveZellijBinary(env));
+    (options.exec
+      ? "zellij"
+      : ssh
+        ? `ssh://${ssh.host}/${ssh.remoteBin}`
+        : resolveZellijBinary(env));
   const rawExec =
     options.exec ??
     (ssh
@@ -84,9 +102,32 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     rawExec(args, { ...opts, signal: opts.signal ?? options.signal });
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const selfPaneId = resolveSelfPaneId(env);
+  const transport: ZellijTransport = ssh
+    ? {
+        kind: "ssh",
+        mode: ssh.mode ?? "ssh",
+        host: ssh.host,
+        remoteBin: ssh.remoteBin,
+        tmp: ssh.tmp,
+      }
+    : { kind: "local", mode: "local" };
 
-  async function run(args: string[], label: string) {
-    const result = await exec(args, { timeoutMs });
+  let identityReady: Promise<void> | null = null;
+  function ensureIdentity(): Promise<void> {
+    if (options.skipIdentityProbe || options.exec) return Promise.resolve();
+    if (!identityReady) {
+      identityReady = ensureZellijIdentity(exec, zellijPath, timeoutMs);
+    }
+    return identityReady;
+  }
+
+  async function run(
+    args: string[],
+    label: string,
+    callTimeoutMs = timeoutMs,
+  ) {
+    await ensureIdentity();
+    const result = await exec(args, { timeoutMs: callTimeoutMs });
     if (result.code === NOT_FOUND_EXIT) {
       throw new ZellijError(
         "zellij_missing",
@@ -94,16 +135,26 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
       );
     }
     if (result.code !== 0) {
+      const detail =
+        result.stderr.trim() || result.stdout.trim() || "no output";
+      if (/usage:\s*zswarm/i.test(detail) || /unknown arg:/i.test(detail)) {
+        throw new ZellijError(
+          "zellij_wrong_bin",
+          `resolved binary looks like zswarm, not Zellij (${zellijPath}): ${detail}`,
+        );
+      }
       throw new ZellijError(
         "zellij_failed",
-        `${label} failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim() || "no output"}`,
+        `${label} failed (exit ${result.code}): ${detail}`,
       );
     }
     return result;
   }
 
-  async function listSessions(): Promise<string[]> {
-    const result = await exec(["list-sessions", "--short", "--no-formatting"], {
+  async function listSessions(): Promise<ZellijSession[]> {
+    await ensureIdentity();
+    // Keep annotations (EXITED / current); --short drops them.
+    const result = await exec(["list-sessions", "--no-formatting"], {
       timeoutMs,
     });
     if (result.code === NOT_FOUND_EXIT) {
@@ -113,13 +164,21 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
       );
     }
     if (result.code !== 0) {
+      const detail =
+        result.stderr.trim() || result.stdout.trim() || "no output";
+      if (/usage:\s*zswarm/i.test(detail) || /unknown arg:/i.test(detail)) {
+        throw new ZellijError(
+          "zellij_wrong_bin",
+          `resolved binary looks like zswarm, not Zellij (${zellijPath}): ${detail}`,
+        );
+      }
       // Nonzero here is Zellij's normal "none running", not a crash. Empty
       // lets resolveSession throw zellij_no_session so unworktree can treat
       // it as no occupants instead of zellij_failed.
       if (isZellijNoSessionsOutput(result.stdout, result.stderr)) return [];
       throw new ZellijError(
         "zellij_failed",
-        `zellij list-sessions failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim() || "no output"}`,
+        `zellij list-sessions failed (exit ${result.code}): ${detail}`,
       );
     }
     return parseSessionList(result.stdout);
@@ -163,11 +222,13 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     session: string;
     paneId: string;
     full?: boolean;
+    timeoutMs?: number;
   }): Promise<{ paneId: string; session: string; text: string }> {
     const paneId = normalizePaneId(input.paneId);
     const result = await run(
       buildDumpArgs(input.session, paneId, input.full),
       "zellij action dump-screen",
+      input.timeoutMs ?? timeoutMs,
     );
     return { paneId, session: input.session, text: result.stdout };
   }
@@ -425,6 +486,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   return {
     zellijPath,
     selfPaneId,
+    transport,
     /** A `file:` plugin url only names a path on the machine running Zellij. */
     remote: ssh !== null,
     listSessions,

@@ -416,6 +416,41 @@ test("status reports who is free", async () => {
   assert.deepEqual(res.data.free, ["terminal_2"]);
 });
 
+test("status marks missed dumps unknown instead of idle", async () => {
+  let dumps = 0;
+  const client = createZellijClient({
+    env: {},
+    exec: async (args) => {
+      if (args.includes("list-sessions")) return { code: 0, stdout: "demo\n", stderr: "" };
+      if (args.includes("list-panes")) {
+        return { code: 0, stdout: JSON.stringify(PANES), stderr: "" };
+      }
+      if (args.includes("dump-screen")) {
+        dumps += 1;
+        // Fail every dump for terminal_2 (second live pane).
+        if (args.includes("terminal_2")) {
+          return { code: 1, stdout: "", stderr: "boom" };
+        }
+        return { code: 0, stdout: "steady", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const res = await dispatchZswarm(
+    { op: "status", sampleMs: 50, timeoutMs: 5000 },
+    client,
+    fakeClock(),
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.data.partial, true);
+  const byId = Object.fromEntries(res.data.peers.map((p) => [p.id, p.state]));
+  assert.equal(byId.terminal_1, "idle");
+  assert.equal(byId.terminal_2, "unknown");
+  assert.equal(byId.terminal_3, "exited");
+  assert.ok(!res.data.free.includes("terminal_2"));
+  assert.ok(dumps >= 2);
+});
+
 test("log reads back deliveries and filters them", async () => {
   const { client } = harness();
   const state = tempState();

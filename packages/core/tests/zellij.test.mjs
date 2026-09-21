@@ -11,9 +11,12 @@ import { join } from "node:path";
 import {
   createZellijClient,
   resolveZellijBinary,
+  looksLikeZswarmBinary,
   sanitizeZellijEnv,
   dispatchZswarm,
   truncateDumpText,
+  parseSessionList,
+  liveSessionNames,
   DEFAULT_DUMP_MAX_CHARS,
 } from "../dist/index.js";
 
@@ -306,6 +309,7 @@ test("listSessions treats Zellij's no-sessions exit as empty", async () => {
   const listed = await dispatchZswarm({ op: "sessions" }, client);
   assert.equal(listed.ok, true);
   assert.deepEqual(listed.data.sessions, []);
+  assert.equal(listed.data.filter, "live");
 });
 
 test("listSessions still fails on a real zellij error", async () => {
@@ -321,4 +325,95 @@ test("listSessions still fails on a real zellij error", async () => {
     () => client.listSessions(),
     /zellij list-sessions failed/,
   );
+});
+
+test("looksLikeZswarmBinary detects the CLI wrapper", () => {
+  assert.equal(looksLikeZswarmBinary("/home/box/.local/bin/zswarm"), true);
+  assert.equal(looksLikeZswarmBinary("C:\\\\Tools\\\\zswarm.exe"), true);
+  assert.equal(looksLikeZswarmBinary("/home/box/.local/bin/zellij"), false);
+});
+
+test("resolveZellijBinary rejects ZSWARM_BIN pointing at zswarm", () => {
+  const fake = join(tmpdir(), `zswarm-${Date.now()}`);
+  writeFileSync(fake, "#!/usr/bin/env node\nimport \"@zswarm/cli\";\n");
+  try {
+    assert.throws(
+      () => resolveZellijBinary({ ZSWARM_BIN: fake, PATH: "" }),
+      /points at zswarm/,
+    );
+  } finally {
+    unlinkSync(fake);
+  }
+});
+
+test("parseSessionList keeps EXITED annotations and liveSessionNames drops them", () => {
+  const listed = parseSessionList(
+    [
+      "crew [Created 1h ago] (current)",
+      "gone [Created 36s ago] (EXITED - attach to resurrect)",
+      "bare-name",
+      "",
+    ].join("\n"),
+  );
+  assert.deepEqual(listed, [
+    { name: "crew", exited: false, current: true },
+    { name: "gone", exited: true, current: false },
+    { name: "bare-name", exited: false, current: false },
+  ]);
+  assert.deepEqual(liveSessionNames(listed), ["crew", "bare-name"]);
+});
+
+test("sessions defaults to live and --all includes EXITED", async () => {
+  const client = createZellijClient({
+    env: {},
+    exec: async (args) => {
+      assert.equal(args.includes("--short"), false);
+      assert.ok(args.includes("--no-formatting"));
+      if (args.includes("list-sessions")) {
+        return {
+          code: 0,
+          stdout:
+            "crew [Created 1h ago] \ngone [Created 1m ago] (EXITED - attach to resurrect)\n",
+          stderr: "",
+        };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const live = await dispatchZswarm({ op: "sessions" }, client);
+  assert.equal(live.ok, true);
+  assert.equal(live.data.filter, "live");
+  assert.deepEqual(
+    live.data.sessions.map((s) => s.name),
+    ["crew"],
+  );
+  const all = await dispatchZswarm({ op: "sessions", all: true }, client);
+  assert.equal(all.data.filter, "all");
+  assert.deepEqual(
+    all.data.sessions.map((s) => [s.name, s.exited]),
+    [
+      ["crew", false],
+      ["gone", true],
+    ],
+  );
+});
+
+test("resolveSession ignores EXITED rows when picking the sole live session", async () => {
+  const client = createZellijClient({
+    env: {},
+    exec: async (args) => {
+      if (args.includes("list-sessions")) {
+        return {
+          code: 0,
+          stdout:
+            "only-live [Created 1h ago] \nold [Created 1d ago] (EXITED - attach to resurrect)\n",
+          stderr: "",
+        };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const resolved = await client.resolveSession();
+  assert.equal(resolved.session, "only-live");
+  assert.equal(resolved.source, "sole_live");
 });
