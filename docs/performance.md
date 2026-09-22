@@ -37,14 +37,25 @@ zswarm --serve 'ssh://Administrator@host:22?servePort=9419' status --session cre
 `host:port` and `tcp://host:port` still mean an already-open loopback endpoint.
 `ssh://` is parsed separately: zswarm spawns foreground `ssh -N -T` with
 `-L 127.0.0.1:<ephemeral>:127.0.0.1:<servePort>`, `ExitOnForwardFailure`, and
-keepalives. Host-key verification stays on. `ZSWARM_SSH_BIN` / `ZSWARM_SSH_OPTS`
-are honored; ControlMaster/daemonize that would outlive the tracked child is
-rejected. TCP connect is not readiness — `probeServe` (hello) must succeed
-before any application op. Wrong token, auth, or hello never dispatches.
-CLI disposes the child on success, failure, and cancel before exit. MCP reuses
-a healthy owned tunnel until stdin EOF. Reconnect only happens before a request
-is sent; a lost reply is `uncertain` and is never retried. Serve never falls
-back to direct `ZSWARM_SSH`.
+keepalives. Host-key verification stays on. An explicit URI authority port
+becomes `ssh -p`; an omitted port is not forced to 22, so an SSH alias's
+configured `Port` still applies. Required ownership options
+(`ControlPath=none` / `-S none`, `ForkAfterAuthentication=no`,
+`ControlMaster=no`, `BatchMode=yes`, `ExitOnForwardFailure=yes`) are placed so
+OpenSSH's first-obtained-value rule wins over user `-o` and `ssh_config`.
+`ZSWARM_SSH_BIN` / `ZSWARM_SSH_OPTS` still supply identities, proxy settings,
+and host-key files; ControlMaster/daemonize/fork/extra forwards/remote commands
+that would outlive or escape the tracked child are rejected. TCP connect is not
+readiness — `probeServe` (hello) must succeed with the caller's credentials
+before any application op, including reuse of a live tunnel. Wrong token, auth,
+or hello never reports the tunnel as ready and never dispatches. CLI disposes
+every owned child (including in-flight startups) on success, failure, and
+cancel before exit. MCP reuses a healthy owned tunnel until stdin EOF, then
+cancels pending work, reaps children, and closes stdio. `closeAll` is terminal:
+later acquires are rejected. Reconnect only happens before a request is sent; a
+lost reply is `uncertain` and is never retried. Invalidating one lease does not
+kill another caller's still-active child. Serve never falls back to direct
+`ZSWARM_SSH`.
 
 `--serve ADDRESS` overrides inherited SSH/serve destinations for one call;
 `--local`, `--ssh`, and `--serve` are mutually exclusive. MCP accepts
@@ -199,7 +210,10 @@ callers with different timeout or cancellation budgets.
 For direct SSH, existing OpenSSH connection multiplexing can be configured in
 `~/.ssh/config` or `ZSWARM_SSH_OPTS` where the controller's SSH implementation
 supports it. zswarm does not create control sockets or rewrite SSH config.
-`ssh://` serve tunnels are the exception: they force a foreground-owned child
-(`ControlMaster=no`) so the LocalForward cannot outlive the process that
-spawned it. Explicit sessions, a persistent serve process, and the bus provide
-the main improvements without requiring multiplexing.
+`ssh://` serve tunnels are the exception: they force a private foreground-owned
+child (`ControlPath=none`, `-S none`, `ForkAfterAuthentication=no`,
+`ControlMaster=no`) so the LocalForward cannot attach to an external master or
+outlive the process that spawned it. Direct SSH continues to honor the
+controller's existing OpenSSH multiplexing configuration. Explicit sessions, a
+persistent serve process, and the bus provide the main improvements without
+requiring multiplexing.

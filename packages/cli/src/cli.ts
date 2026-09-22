@@ -59,6 +59,7 @@ if (args.op === "serve" && args.install !== true && args.clear !== true) {
   const ac = new AbortController();
   const onStop = () => {
     if (!ac.signal.aborted) ac.abort();
+    void serveTunnels.closeAll();
   };
   process.once("SIGINT", onStop);
   process.once("SIGTERM", onStop);

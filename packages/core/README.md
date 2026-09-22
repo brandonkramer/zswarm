@@ -31,9 +31,10 @@ const result = await dispatchZswarm({ op: "list" });
 invocation's destination is known.
 
 `ZSWARM_SERVE` / `--serve` may be `host:port`, `tcp://host:port`, or
-`ssh://user@host[:port]?servePort=9419`. The ssh URI opens a process-owned
-SSH LocalForward and calls `probeServe` before ops; pass a `serveTunnels`
-manager if the caller (MCP) should reuse it.
+`ssh://user@host[:sshPort]?servePort=9419`. The ssh URI opens a process-owned
+SSH LocalForward and calls `probeServe` before ops (including before reuse);
+pass a `serveTunnels` manager if the caller (MCP) should reuse it. Omitting
+the SSH port leaves `Port` to OpenSSH instead of forcing 22.
 
 Spawn lifecycle, body files, guarded keys, status tabs and routing context: [crew operations](../../docs/crew-operations.md).
 

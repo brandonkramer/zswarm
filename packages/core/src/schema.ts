@@ -180,7 +180,7 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "string",
     flags: ["--serve"],
     description:
-      "existing serve endpoint: host:port, tcp://host:port, or ssh://user@host[:sshPort]?servePort=9419. ssh:// opens a process-owned SSH LocalForward and probes hello before ops (desktop serve must already be running). Uses ZSWARM_SERVE_TOKEN",
+      "existing serve endpoint: host:port, tcp://host:port, or ssh://user@host[:sshPort]?servePort=9419. ssh:// opens a process-owned SSH LocalForward and probes hello before ops (desktop serve must already be running). Omit sshPort to use ssh_config Port. Uses ZSWARM_SERVE_TOKEN",
   },
   {
     name: "limit",

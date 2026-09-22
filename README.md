@@ -159,7 +159,7 @@ zswarm await --channel tests --count 3          # Wait for 3 worker signals
 | `ZSWARM_TMP` | Remote IPC temp directory, or `auto` to parse live `zellij --server` paths |
 | `ZSWARM_SSH_MODE` | `interactive` — Windows only: run each CLI call in the desktop session (scheduled task, same idea as `schtasks /IT`) |
 | `ZSWARM_REMOTE_SHELL` | `cmd` or `sh` — override remote quoting (inferred from `.exe` / Windows tmp / interactive) |
-| `ZSWARM_SERVE` | `127.0.0.1:9419`, `tcp://127.0.0.1:9419`, or `ssh://user@host[:22]?servePort=9419` — Forward ops to `zswarm serve`. `ssh://` opens a process-owned SSH LocalForward to remote loopback (desktop serve must already be running) |
+| `ZSWARM_SERVE` | `127.0.0.1:9419`, `tcp://127.0.0.1:9419`, or `ssh://user@host[:sshPort]?servePort=9419` — Forward ops to `zswarm serve`. `ssh://` opens a process-owned SSH LocalForward to remote loopback (desktop serve must already be running). Omit `sshPort` to keep an SSH alias's configured Port |
 | `ZSWARM_SERVE_TOKEN` | Shared secret for `zswarm serve`. Required even on loopback (another local OS user can connect to 127.0.0.1); send the same value on the client |
 
 ### Remote crews
