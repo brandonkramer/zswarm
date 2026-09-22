@@ -44,14 +44,16 @@ async function shutdown(): Promise<void> {
     while (inflight > 0 && Date.now() < bound) {
       await sleep(15);
     }
-    await serveTunnels.closeAll();
+    await Promise.race([
+      serveTunnels.closeAll(),
+      sleep(2_000),
+    ]);
+    await Promise.race([
+      server.close().catch(() => undefined),
+      sleep(500),
+    ]);
     try {
-      await server.close();
-    } catch {
-      /* already closed */
-    }
-    try {
-      await transport.close();
+      await Promise.race([transport.close(), sleep(500)]);
     } catch {
       /* already closed */
     }
@@ -60,7 +62,11 @@ async function shutdown(): Promise<void> {
 }
 
 function requestShutdown(exitAfter: boolean): void {
+  const force = setTimeout(() => {
+    if (exitAfter) process.exit(0);
+  }, SHUTDOWN_BOUND_MS);
   void shutdown().finally(() => {
+    clearTimeout(force);
     if (exitAfter) process.exit(0);
   });
 }
