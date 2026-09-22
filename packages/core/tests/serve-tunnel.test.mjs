@@ -476,9 +476,8 @@ test("private loopback port retries instead of stealing a foreign listener", asy
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.ok(n >= 2, `expected a retry after the occupied port, got ${n}`);
   const used = fixture.launches.map((l) => l.args[l.args.indexOf("-L") + 1].split(":")[1]);
-  assert.equal(used.includes(String(occupied.port)), true);
-  const last = used.at(-1);
-  assert.notEqual(last, String(occupied.port));
+  assert.equal(used.includes(String(occupied.port)), false);
+  assert.ok(used.length >= 1);
 });
 
 test("reconnects only before send; a lost reply is uncertain and is not retried", async (t) => {

@@ -185,7 +185,7 @@ export function parseSshServeTarget(raw: string): ParsedSshServeTarget {
   if (url.searchParams.getAll("servePort").length > 1) {
     invalid("ssh:// serve target must not repeat servePort", trimmed);
   }
-  const host = url.hostname.trim();
+  const host = url.hostname.trim().replace(/^\[|\]$/g, "");
   rejectHost(host, trimmed);
   const sshPort = url.port
     ? parsePort(url.port, "SSH port", trimmed)
@@ -568,6 +568,10 @@ export function createServeTunnelManager(
         );
       }
       const localPort = await allocatePort();
+      if (await waitForTcp(localPort, 50, signal)) {
+        lastError = `loopback port ${localPort} is already in use`;
+        continue;
+      }
       const argv = buildSshTunnelArgv(target, localPort, env);
       const child = spawnSsh(argv.bin, argv.args, {
         env: sshSpawnEnv(env),
@@ -611,7 +615,11 @@ export function createServeTunnelManager(
           Math.min(TCP_PROBE_MS, remaining(deadline)),
           signal,
         );
-        if (ok) return entry;
+        if (ok) {
+          await sleep(Math.min(30, remaining(deadline) || 30), signal).catch(() => undefined);
+          if (childAlive(child)) return entry;
+          break;
+        }
         await sleep(Math.min(SPAWN_RETRY_MS, remaining(deadline) || SPAWN_RETRY_MS), signal).catch(
           () => undefined,
         );
