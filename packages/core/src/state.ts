@@ -202,6 +202,28 @@ export function createStateStore(options: StateStoreOptions = {}) {
     }
   }
 
+  /**
+   * Drop this process's lock file only. A close-then-retry unlink of whatever
+   * sits at the path will delete a waiter that already recreated it with wx;
+   * a third process then enters fn() and last-rename drops cursor keys
+   * (macOS 80-child writeCursor wave under parallel `node --test` files).
+   */
+  function unlinkOwnedLock(lockPath: string): void {
+    const until = Date.now() + 500;
+    while (true) {
+      if (readLockOwner(lockPath)?.pid !== process.pid) return;
+      try {
+        rmSync(lockPath, { force: true });
+        return;
+      } catch (err) {
+        if (!lockBusy((err as NodeJS.ErrnoException).code) || Date.now() >= until) {
+          return;
+        }
+        sleepSync(10);
+      }
+    }
+  }
+
   function withFileLock<T>(lockName: string, fn: () => T): T {
     ensureDir();
     const lockPath = join(dir, lockName);
@@ -213,8 +235,15 @@ export function createStateStore(options: StateStoreOptions = {}) {
           writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
           return fn();
         } finally {
-          closeSync(fd);
-          unlinkLock(lockPath);
+          // Windows cannot unlink while this handle is open (EPERM). Unix must
+          // unlink *before* close: once the fd is gone, a retry unlink can
+          // land on a successor's wx file.
+          try {
+            if (process.platform !== "win32") unlinkOwnedLock(lockPath);
+          } finally {
+            closeSync(fd);
+            if (process.platform === "win32") unlinkOwnedLock(lockPath);
+          }
         }
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;

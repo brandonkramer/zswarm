@@ -99,8 +99,8 @@ test("postSignal steals a live-pid lock older than the stale window", () => {
 test("writeCursor serializes writers across processes", async (t) => {
   // 80 at once is the Windows case: open(wx) returns EPERM while the holder
   // still has cursors.lock, not EEXIST. Fewer workers never hit it on CI.
-  // Doctor fixtures load only after this test (below). macOS CI also runs
-  // node --test --test-concurrency=1 so other files cannot spawn during the wave.
+  // Non-zero child exits fail before the key check, so a missing key is a
+  // lost write (lock not exclusive), not a crashed worker.
   const dir = mkdtempSync(join(tmpdir(), "zswarm-cur-"));
   t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const worker = join(dir, "worker.mjs");
@@ -126,7 +126,7 @@ store.writeCursor(process.argv[3], process.argv[3]);
   );
   const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
   for (let i = 0; i < workers; i++) {
-    assert.equal(store.readCursor(`k${i}`), `k${i}`);
+    assert.equal(store.readCursor(`k${i}`), `k${i}`, `k${i} missing after all 80 workers exited 0`);
   }
 });
 
