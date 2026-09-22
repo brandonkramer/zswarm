@@ -61,6 +61,8 @@ export type ParamSpec = {
   flags: string[];
   /** Repeatable flags collect into an array (`--key a --key b`). */
   repeat?: boolean;
+  /** Local CLI preprocessing, excluded from the MCP protocol. */
+  cliOnly?: boolean;
   values?: readonly string[];
   description: string;
 };
@@ -192,6 +194,13 @@ export const PARAMS: readonly ParamSpec[] = [
     description: "send: message body",
   },
   {
+    name: "bodyFile",
+    type: "string",
+    flags: ["--body-file"],
+    cliOnly: true,
+    description: "send: read UTF-8 on the caller from PATH, or - for stdin; cannot combine with --body/--text",
+  },
+  {
     name: "text",
     type: "string",
     flags: [],
@@ -274,7 +283,7 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "number",
     flags: ["--timeout-ms"],
     description:
-      "wait: give up after this long (default 60000); status: overall deadline for IPC discovery and screen samples (default 30000)",
+      "wait: timeout (default 60000); status/spawn: overall deadline (default 30000), including setup and observation",
   },
   {
     name: "keys",
@@ -364,6 +373,12 @@ export const PARAMS: readonly ParamSpec[] = [
       "send/broadcast: auto verifies the paste actually submitted and presses Enter again if not (default)",
   },
   {
+    name: "observeMs",
+    type: "number",
+    flags: ["--observe-ms"],
+    description: "spawn: observe creation/alias for up to 3000ms; pane lookup: retry absence for 1000ms; 0 disables retries",
+  },
+  {
     name: "settleMs",
     type: "number",
     flags: ["--settle-ms"],
@@ -374,7 +389,7 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "string",
     flags: ["--expect"],
     description:
-      "text the target pane's screen must contain before zswarm will write to it",
+      "send/keys/interrupt: case-insensitive substring required on the current screen immediately before input",
   },
   {
     name: "message",
@@ -491,7 +506,9 @@ export function mcpInputSchema(): Record<string, unknown> {
       description: OP_NAMES.join(" | "),
     },
   };
-  for (const param of PARAMS) properties[param.name] = propertyFor(param);
+  for (const param of PARAMS) {
+    if (!param.cliOnly) properties[param.name] = propertyFor(param);
+  }
   return {
     type: "object",
     additionalProperties: false,
@@ -580,6 +597,9 @@ export function parseCliArgv(argv: string[]): Record<string, unknown> {
         out[param.name] = true;
         continue;
       }
+      if ((param.name === "body" || param.name === "bodyFile") && Object.hasOwn(out, param.name)) {
+        throw new ZellijError("usage", "provide exactly one body source");
+      }
       const value = rest[++i];
       if (value === undefined) {
         throw new ZellijError("usage", `${token} needs a value`);
@@ -600,7 +620,7 @@ export function parseCliArgv(argv: string[]): Record<string, unknown> {
       out.to = token;
       continue;
     }
-    if (!out.body && op === "send") {
+    if (!Object.hasOwn(out, "body") && op === "send") {
       out.body = token;
       continue;
     }
@@ -608,5 +628,8 @@ export function parseCliArgv(argv: string[]): Record<string, unknown> {
   }
 
   for (const [name, values] of repeated) out[name] = values;
+  if (out.bodyFile !== undefined && (op !== "send" || out.body !== undefined || out.text !== undefined)) {
+    throw new ZellijError("usage", "--body-file requires send and cannot be combined with another body source");
+  }
   return out;
 }

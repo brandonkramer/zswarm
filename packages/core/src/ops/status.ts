@@ -85,17 +85,43 @@ function trailingLines(screen: string, n: number): string[] {
     .slice(-n);
 }
 
-function promptHolds(screen: string, profile?: HarnessProfile | null): boolean {
+export type WaitingEvidence = { reason: "approval_menu" | "prompt"; evidence: string; source: "screen" };
+
+export function waitingPrompt(screen: string, profile?: HarnessProfile | null): WaitingEvidence | null {
   const lines = trailingLines(screen, PROMPT_WINDOW);
-  const patterns = profile?.waiting;
-  if (patterns && patterns.length > 0) {
-    for (const line of lines) {
-      for (const re of patterns) {
-        if (re.test(line)) return true;
-      }
+  // A menu requires a choice structure AND navigation chrome. A lone "Allow
+  // once" in logs/help must not turn a worker into an approval request.
+  const choices = lines.filter((line) => /^(?:[›❯>●]\s*)?\d+[.)]\s+(?:Yes\b|No\b|Allow\b|Deny\b|Cancel\b)/i.test(line));
+  const navigation = lines.some((line) => /(?:enter|return)\s+(?:to\s+)?(?:select|confirm)|(?:esc|escape)\s+(?:to\s+)?cancel/i.test(line));
+  const approval = lines.find((line) => /^(?:[›❯>]\s*)?(?:Approve (?:this|the) (?:operation|command|action)|Approval required|Would you like to run the following command\?|Run this command\?)[?:]?$/i.test(line));
+  if (approval && choices.length >= 2 && navigation) {
+    return { reason: "approval_menu", evidence: choices.slice(0, 3).join("\n").slice(0, 320), source: "screen" };
+  }
+  for (const line of lines) {
+    if (profile?.waiting.some((re) => re.test(line))) {
+      return { reason: "prompt", evidence: line.slice(0, 320), source: "screen" };
     }
   }
-  return QUESTION.test(lines[lines.length - 1] ?? "");
+  const last = lines[lines.length - 1] ?? "";
+  return QUESTION.test(last) ? { reason: "prompt", evidence: last.slice(0, 320), source: "screen" } : null;
+}
+
+function promptHolds(screen: string, profile?: HarnessProfile | null): boolean {
+  return waitingPrompt(screen, profile) !== null;
+}
+
+/** Compact summary of the selected terminal peers, including inactive tabs. */
+export function statusTabs(peers: Record<string, unknown>[]) {
+  const tabs = new Map<string, { id: unknown; name: unknown; panes: number; states: Record<string, number> }>();
+  for (const peer of peers) {
+    const key = JSON.stringify([peer.tabId, peer.tab]);
+    const tab = tabs.get(key) ?? { id: peer.tabId, name: peer.tab, panes: 0, states: {} };
+    tab.panes++;
+    const state = String(peer.state);
+    tab.states[state] = (tab.states[state] ?? 0) + 1;
+    tabs.set(key, tab);
+  }
+  return [...tabs.values()];
 }
 
 export function classify(input: {
@@ -146,14 +172,16 @@ function peerEntry(
   const entry: Record<string, unknown> = {
     id: pane.id,
     title: pane.title,
+    tab: pane.tabName ?? null,
+    tabId: pane.tabId ?? null,
     state,
     lastLine: lastLine(screen).slice(0, 160),
     ...extra,
   };
+  if (state === "waiting") entry.waiting = waitingPrompt(screen, resolveHarness(pane));
   if (verbose) {
     entry.command = pane.command ?? null;
     entry.cwd = pane.cwd ?? null;
-    entry.tab = pane.tabName ?? null;
   }
   return entry;
 }
@@ -220,7 +248,7 @@ export async function peerStatus(
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
     return {
       ok: true,
-      data: { session, source, sampled: false, sampleMs: 0, peers },
+      data: { session, source, sampled: false, sampleMs: 0, peers, tabs: statusTabs(peers) },
     };
   }
   const sampleMs = Math.max(50, requested);
@@ -240,7 +268,9 @@ export async function peerStatus(
             return peerEntry(pane, "exited", "", verbose);
           }
           const row = changed.get(pane.id);
-          const state: PeerState = row?.changed
+          const state: PeerState = !row
+            ? "unknown"
+            : row.changed
             ? "busy"
             : promptHolds(row?.screen ?? "", resolveHarness(pane))
               ? "waiting"
@@ -258,6 +288,7 @@ export async function peerStatus(
           sampled: false,
           sinceLast: true,
           peers,
+          tabs: statusTabs(peers),
           free: peers.filter((p) => p.state === "idle").map((p) => p.id),
         },
       };
@@ -397,6 +428,7 @@ export async function peerStatus(
     sampled: true,
     sampleMs,
     peers,
+    tabs: statusTabs(peers),
     free,
   };
   if (partial || remaining() <= 0) data.partial = true;

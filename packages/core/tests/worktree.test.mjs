@@ -58,6 +58,7 @@ function gitHarness({ porcelain = PORCELAIN, branches = [], dirty = "" } = {}) {
 
 function zellijHarness(panes = []) {
   const calls = [];
+  let created = null;
   const client = createZellijClient({
     env: {},
     exec: async (args) => {
@@ -66,9 +67,13 @@ function zellijHarness(panes = []) {
         return { code: 0, stdout: "demo\n", stderr: "" };
       }
       if (args.includes("list-panes")) {
-        return { code: 0, stdout: panesJson(panes), stderr: "" };
+        return { code: 0, stdout: panesJson(created ? [...panes.filter((p) => p.id !== 5), created] : panes), stderr: "" };
+      }
+      if (args.includes("list-tabs")) {
+        return { code: 0, stdout: JSON.stringify([{ position: 0, tab_id: 0, name: "crew" }]), stderr: "" };
       }
       if (args.includes("new-pane")) {
+        created = { id: 5, title: args[args.indexOf("--name") + 1], is_plugin: false, tab_id: 0, exited: false };
         return { code: 0, stdout: "terminal_5\n", stderr: "" };
       }
       return { code: 0, stdout: "", stderr: "" };

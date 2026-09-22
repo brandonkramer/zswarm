@@ -1,0 +1,2 @@
+WARNING: TERM=dumb; terminal features are limited.
+Press enter to continue

@@ -13,7 +13,7 @@ test("MCP schema exposes exactly the shared param table", () => {
   assert.deepEqual(schema.properties.op.enum, [...OP_NAMES]);
   assert.deepEqual(schema.required, ["op"]);
   assert.equal(schema.additionalProperties, false);
-  for (const param of PARAMS) {
+  for (const param of PARAMS.filter((p) => !p.cliOnly)) {
     assert.ok(schema.properties[param.name], `missing ${param.name}`);
     assert.ok(
       schema.properties[param.name].description,
@@ -22,7 +22,7 @@ test("MCP schema exposes exactly the shared param table", () => {
   }
   assert.equal(
     Object.keys(schema.properties).length,
-    PARAMS.length + 1,
+    PARAMS.filter((p) => !p.cliOnly).length + 1,
     "schema and PARAMS drifted",
   );
   // stringOrArray params must stay callable with either shape.

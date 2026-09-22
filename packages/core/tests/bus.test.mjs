@@ -371,7 +371,7 @@ test("list reads the bus and reports where the answer came from", async () => {
     ["terminal_2", "terminal_5"],
   );
   // Absent, not null: the plugin does not know the command.
-  assert.deepEqual(Object.keys(listed.data.panes[0]).sort(), ["id", "tab", "title"]);
+  assert.deepEqual(Object.keys(listed.data.panes[0]).sort(), ["id", "tab", "tabId", "title"]);
 });
 
 test("verbose list skips the bus, which has no cwd to give", async () => {

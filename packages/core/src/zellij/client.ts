@@ -354,10 +354,11 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     return { paneId, session: input.session };
   }
 
-  async function listTabs(session: string): Promise<ZellijTab[]> {
+  async function listTabs(session: string, callTimeoutMs = timeoutMs): Promise<ZellijTab[]> {
     const result = await run(
       buildListTabsArgs(session),
       "zellij action list-tabs",
+      callTimeoutMs,
     );
     return parseTabList(result.stdout);
   }
@@ -401,14 +402,15 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
 
   /** `new-pane` prints the created pane id; `new-tab` prints a tab id instead. */
   function parseCreatedPaneId(stdout: string): string | null {
-    const match = /(terminal|plugin)_\d+/i.exec(stdout);
-    return match ? match[0].toLowerCase() : null;
+    const ids = new Set(stdout.split(/\r?\n/).map((line) => line.trim().toLowerCase())
+      .filter((line) => /^(terminal|plugin)_\d+$/.test(line)));
+    return ids.size === 1 ? [...ids][0]! : null;
   }
 
   async function newPane(
     input: NewPaneInput,
   ): Promise<{ session: string; paneId: string | null; stdout: string }> {
-    const result = await run(buildNewPaneArgs(input), "zellij action new-pane");
+    const result = await run(buildNewPaneArgs(input), "zellij action new-pane", input.timeoutMs ?? timeoutMs);
     return {
       session: input.session,
       paneId: parseCreatedPaneId(result.stdout),
@@ -419,11 +421,12 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   async function newTab(
     input: NewTabInput,
   ): Promise<{ session: string; tabId: number | null; stdout: string }> {
-    const result = await run(buildNewTabArgs(input), "zellij action new-tab");
-    const digits = /-?\d+/.exec(result.stdout);
+    const result = await run(buildNewTabArgs(input), "zellij action new-tab", input.timeoutMs ?? timeoutMs);
+    const ids = new Set(result.stdout.split(/\r?\n/).map((line) => line.trim())
+      .filter((line) => /^\d+$/.test(line)).map(Number).filter(Number.isSafeInteger));
     return {
       session: input.session,
-      tabId: digits ? Number(digits[0]) : null,
+      tabId: ids.size === 1 ? [...ids][0]! : null,
       stdout: result.stdout.trim(),
     };
   }
@@ -532,7 +535,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   /** Visible prefix so peer CLIs can tell zSwarm injects from human prompts. */
   function formatPeerMessage(from: string, body: string): string {
     const sender = from.trim() || "swarm";
-    return `[zswarm from=${sender}]\n${body.trim()}`;
+    return `[zswarm from=${sender}]\n${body}`;
   }
 
   return {

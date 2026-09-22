@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "pnpm run build && node --test",
+    "test": "pnpm run build && node --import ./test-support/clean-env.mjs --test",
     "prepublishOnly": "node ../../scripts/check-publish.mjs"
   },
   "devDependencies": {

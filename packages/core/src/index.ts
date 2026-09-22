@@ -170,6 +170,7 @@ export {
   DEFAULT_DUMP_MAX_CHARS,
   DEFAULT_WAIT_MAX_CHARS,
 } from "./ops/util.js";
+export type { RoutingContext } from "./ops/routing.js";
 export type { DispatchDeps, OpsResult } from "./ops/types.js";
 export { normalizeKey, normalizeKeys, tokenizeCommand } from "./keys.js";
 export {

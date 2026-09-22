@@ -43,6 +43,8 @@ export type BusSnapshot = {
   paneUpdates: number;
   tabUpdates: number;
   tabs: string[];
+  /** Stable IDs by tab position; absent on older running plugin instances. */
+  tabIds?: (number | null)[];
   panes: BusPane[];
 };
 
@@ -248,6 +250,7 @@ function toSnapshot(value: Record<string, unknown>): BusSnapshot | null {
     tabs: Array.isArray(value.tabs)
       ? value.tabs.filter((t): t is string => typeof t === "string")
       : [],
+    ...(Array.isArray(value.tabIds) ? { tabIds: value.tabIds.map((id) => typeof id === "number" && Number.isInteger(id) && id >= 0 ? id : null) } : {}),
     panes,
   };
 }
@@ -348,7 +351,7 @@ export function busToPanes(snapshot: BusSnapshot): ZellijPane[] {
       command: pane.command,
       cwd: null,
       tabName: snapshot.tabs[pane.tab] ?? null,
-      tabId: pane.tab,
+      tabId: snapshot.tabIds?.[pane.tab] ?? null,
       focused: pane.focused,
       exited: pane.exited,
       floating: false,

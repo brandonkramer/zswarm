@@ -25,12 +25,14 @@ import { attachKnownSender, deliverTo, withSenderLabel, selfPaneTitle } from "./
 import {
   assertNotPlugin,
   assertNotSelf,
-  assertPaneExpects,
+  assertExpectedScreen,
   assertWritable,
 } from "./guards.js";
 import { readDeliveryLog } from "./log.js";
 import { awaitSignal, listSignals, postSignal } from "./signals.js";
 import { spawnPane } from "./spawn.js";
+import { observationBudget } from "./observation.js";
+import { invocationContext, type RoutingContext } from "./routing.js";
 import {
   DEFAULT_STATUS_TIMEOUT_MS,
   peerStatus,
@@ -147,38 +149,50 @@ async function resolveTarget(
   env?: NodeJS.ProcessEnv,
   policy?: Policy,
   op?: string,
+  signal?: AbortSignal,
 ): Promise<{ session: string; panes: ZellijPane[]; pane: ZellijPane }> {
   const to = String(args.to ?? "").trim();
   if (!to) throw new ZellijError("missing_peer", "to required");
-  const { session } = await client.resolveSession(
-    typeof args.session === "string" ? args.session : undefined,
-  );
-  // The plugin manifest carries no cwd/command/floating, so verbose
-  // responses have to go the polling route.
-  const bus = isVerbose(args)
-    ? null
-    : await busSnapshot(client, state, session, clock, env);
+  const budget = observationBudget(clock, numberArg(args, "timeoutMs", 30_000, { min: 1, max: 900_000 }), signal);
+  const observeMs = numberArg(args, "observeMs", 1_000, { min: 0, max: 30_000 });
+  const { session } = await client.resolveSession(optionalString(args.session), budget.require());
+  const bus = isVerbose(args) ? null : await busSnapshot(client, state, session, clock, env, "status", {
+    deadlineAt: budget.deadline, signal,
+  });
   let panes: ZellijPane[] | null = null;
   if (bus) {
-    const busPanes = busToPanes(bus.snapshot);
+    const snapshot = busToPanes(bus.snapshot);
     try {
-      client.resolvePane(busPanes, to);
-      panes = busPanes;
-    } catch {
-      // A command-shaped `to` only matches the polled list.
+      client.resolvePane(snapshot, to);
+      panes = snapshot;
+    } catch { /* An absent title/command/ID gets a fresh direct observation. */ }
+  }
+  const until = Math.min(budget.deadline, clock.now() + observeMs);
+  let pane: ZellijPane;
+  for (;;) {
+    const left = observeMs === 0 ? budget.require() : Math.min(budget.require(), Math.max(1, until - clock.now()));
+    panes ??= await client.listPanes(session, left);
+    throwIfAborted(signal);
+    try {
+      pane = client.resolvePane(panes, to);
+      break;
+    } catch (err) {
+      if (!(err instanceof ZellijError) || err.code !== "peer_not_found" || clock.now() >= until) throw err;
+      await budget.pause(until);
+      if (clock.now() >= until) throw err;
+      panes = null;
     }
   }
-  if (!panes) panes = await client.listPanes(session);
-  const pane = client.resolvePane(panes, to);
   if (policy && op) assertPaneAllowed(policy, pane, op);
   return { session, panes, pane };
 }
 
-/** Shared MCP/CLI dispatch for zswarm ops. */
-export async function dispatchZswarm(
+async function dispatchOperation(
   args: Record<string, unknown>,
-  injected?: ZellijClient,
-  deps: DispatchDeps = {},
+  injected: ZellijClient | undefined,
+  deps: DispatchDeps,
+  context: RoutingContext,
+  env: NodeJS.ProcessEnv,
 ): Promise<OpsResult> {
   const op = String(args.op ?? "");
   const verbose = isVerbose(args);
@@ -193,9 +207,13 @@ export async function dispatchZswarm(
             reject(new ZellijError("cancelled", "operation cancelled"));
             return;
           }
-          const timer = setTimeout(resolve, ms);
+          const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+          }, ms);
           const onAbort = () => {
             clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
             reject(new ZellijError("cancelled", "operation cancelled"));
           };
           signal?.addEventListener("abort", onAbort, { once: true });
@@ -205,10 +223,9 @@ export async function dispatchZswarm(
   let gitClient: GitClient | null = deps.git ?? null;
   const git = () => (gitClient ??= createGitClient());
   let stateStore: StateStore | null = deps.state ?? null;
-  const state = () => (stateStore ??= createStateStore());
+  const state = () => (stateStore ??= createStateStore({ env }));
   try {
     throwIfAborted(signal);
-    const env = resolveInvocationEnv(args, deps.env ?? process.env);
     const policy = deps.policy ?? loadPolicy(env);
     // Policy gates the op before anything touches the session.
     assertOpAllowed(policy, op);
@@ -241,9 +258,17 @@ export async function dispatchZswarm(
         env.ZSWARM_SERVE_TOKEN,
       );
     }
-    const client =
-      injected ??
-      createZellijClient({ env, signal });
+    const baseClient = injected ?? createZellijClient({ env, signal });
+    const client: ZellijClient = {
+      ...baseClient,
+      get transport() { return baseClient.transport; },
+      async resolveSession(...input) {
+        const resolved = await baseClient.resolveSession(...input);
+        context.session = resolved.session;
+        context.origin.session = resolved.source;
+        return resolved;
+      },
+    };
     switch (op) {
       case "sessions": {
         // Resolve SSH/IPC first so a Windows interactive crew is reachable
@@ -308,16 +333,10 @@ export async function dispatchZswarm(
           env,
           policy,
           op,
+          signal,
         );
         assertWritable(client, pane, args, "send");
-        // A pane that dropped back to a shell will *run* the message. There is
-        // no reliable way to tell an agent from a prompt, so the caller names
-        // something the screen must show first.
-        const expect = typeof args.expect === "string" ? args.expect.trim() : "";
-        if (expect) {
-          const screen = await client.dumpPane({ session, paneId: pane.id });
-          assertPaneExpects(screen.text, expect, pane.id);
-        }
+        await assertExpectedScreen(client, session, pane.id, args, signal);
         const labeled = withSenderLabel(args, {
           env,
           selfTitle: selfPaneTitle(client, panes),
@@ -355,8 +374,10 @@ export async function dispatchZswarm(
           env,
           policy,
           op,
+          signal,
         );
         assertWritable(client, pane, args, op);
+        await assertExpectedScreen(client, session, pane.id, args, signal);
         const chars = typeof args.chars === "string" ? args.chars : "";
         if (op === "keys" && chars) {
           await client.writeChars({ session, paneId: pane.id, chars });
@@ -416,6 +437,9 @@ export async function dispatchZswarm(
           state(),
           clock,
           env,
+          undefined,
+          undefined,
+          signal,
         );
         const dumped = await client.dumpPane({
           session,
@@ -444,6 +468,9 @@ export async function dispatchZswarm(
           state(),
           clock,
           env,
+          undefined,
+          undefined,
+          signal,
         );
         return await tailPane(client, state(), args, target);
       }
@@ -454,6 +481,9 @@ export async function dispatchZswarm(
           state(),
           clock,
           env,
+          undefined,
+          undefined,
+          signal,
         );
         // The plugin holds one pipe for the whole wait and polls far tighter
         // than spawning a process allows. It declines a regex needle — it has
@@ -616,7 +646,7 @@ export async function dispatchZswarm(
       case "checkpoint":
         return await peerCheckpoint(git(), args, clock);
       case "spawn":
-        return await spawnPane(client, args, deps.git);
+        return await spawnPane(client, args, deps.git, clock, signal);
       case "worktrees":
         return await listPeerWorktrees(git(), client, args);
       case "unworktree":
@@ -630,6 +660,7 @@ export async function dispatchZswarm(
           env,
           policy,
           op,
+          signal,
         );
         // Not assertWritable: closing an exited pane is the point of close.
         assertNotPlugin(pane, "close");
@@ -653,6 +684,33 @@ export async function dispatchZswarm(
           `zswarm requires op=${OP_NAMES.join("|")}`,
         );
     }
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+/** Shared MCP/CLI dispatch, with invocation routing on successes and failures. */
+export async function dispatchZswarm(
+  args: Record<string, unknown>,
+  injected?: ZellijClient,
+  deps: DispatchDeps = {},
+): Promise<OpsResult> {
+  try {
+    const env = resolveInvocationEnv(args, deps.env ?? process.env);
+    const context = invocationContext(args, env, injected?.transport);
+    const result = await dispatchOperation(args, injected, deps, context, env);
+    if (context.transport === "serve" && result.context) {
+      context.server = result.context;
+      context.session = result.context.session;
+      context.origin.session = result.context.origin.session;
+    } else if (context.transport === "serve" && result.ok && result.data && typeof result.data === "object") {
+      const session = (result.data as Record<string, unknown>).session;
+      if (typeof session === "string") {
+        context.session = session;
+        context.origin.session = "server";
+      }
+    }
+    return { ...result, context };
   } catch (err) {
     return fail(err);
   }

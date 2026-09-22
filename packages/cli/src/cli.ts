@@ -8,6 +8,9 @@ import {
   startServe,
 } from "@zswarm/core";
 
+import { readBodyFile } from "./input.js";
+import { routingNotice } from "./output.js";
+
 const argv = process.argv.slice(2);
 if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") {
   process.stderr.write(cliUsage());
@@ -21,6 +24,15 @@ try {
   const message = err instanceof ZellijError ? err.message : String(err);
   process.stderr.write(`${message}\n${cliUsage()}`);
   process.exit(2);
+}
+
+try {
+  args = await readBodyFile(args);
+} catch (err) {
+  const code = err instanceof ZellijError ? err.code : "body_file_read";
+  const message = err instanceof Error ? err.message : String(err);
+  process.stdout.write(JSON.stringify({ ok: false, error: { code, message } }) + "\n");
+  process.exit(1);
 }
 
 // TCP server holds the event loop; process.exit would tear it down.
@@ -43,6 +55,7 @@ if (args.op === "serve" && args.install !== true && args.clear !== true) {
   }
 } else {
   const result = await dispatchZswarm(args);
+  process.stderr.write(routingNotice(result, process.stderr.isTTY === true));
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   process.exit(result.ok ? 0 : 1);
 }

@@ -190,7 +190,10 @@ test("ZSWARM_SERVE forwards dispatch when no client is injected", async () => {
       undefined,
       { env: { ZSWARM_SERVE: label, ZSWARM_SERVE_TOKEN: "secret" } },
     );
-    assert.deepEqual(result, { ok: true, data: { forwarded: "list" } });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.data, { forwarded: "list" });
+    assert.equal(result.context.transport, "serve");
+    assert.equal(result.context.host, label);
   } finally {
     await close();
   }

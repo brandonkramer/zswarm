@@ -33,6 +33,7 @@ export function paneViewSlim(p: ZellijPane) {
     title: p.title,
     command: p.command ?? null,
     tab: p.tabName ?? null,
+    tabId: p.tabId ?? null,
   };
 }
 
@@ -41,7 +42,7 @@ export function paneViewSlim(p: ZellijPane) {
  * left out rather than reported as null — absent means unknown, not none.
  */
 export function paneViewBus(p: ZellijPane) {
-  return { id: p.id, title: p.title, tab: p.tabName ?? null };
+  return { id: p.id, title: p.title, tab: p.tabName ?? null, tabId: p.tabId ?? null };
 }
 
 export function paneViewFull(p: ZellijPane) {

@@ -203,6 +203,7 @@ test("dispatch list sorts panes and send uses paste+Enter", async () => {
     "command",
     "id",
     "tab",
+    "tabId",
     "title",
   ]);
 

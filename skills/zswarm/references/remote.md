@@ -57,6 +57,26 @@ ZSWARM_SERVE=127.0.0.1:9419 ZSWARM_SERVE_TOKEN=secret zswarm list
 `ZSWARM_SSH` only forwards Zellij. Git worktrees, `diff`, and `checkpoint` stay
 local — use `serve` on the host that owns the repo if those ops should run there.
 
-MCP: set `ZSWARM_SERVE` (and usually `ZSWARM_SESSION`) in the server env. Do
-**not** call `op: "serve"` to listen — that is CLI-only. Other ops forward.
+MCP: set `ZSWARM_SERVE` in the MCP server env. Pass `session` explicitly or
+configure `ZSWARM_SESSION` on the host running `serve`. Do **not** call
+`op: "serve"` to listen — that is CLI-only. Other ops forward.
 A client with `ZSWARM_SERVE` never sends a local wasm path across the tunnel.
+
+## Invocation routing
+
+`--local` clears SSH, serve, and remote IPC for this call only. It preserves the
+parent environment and inherited session selection; use `--session` explicitly
+when switching hosts. `--ssh user@host` overrides the inherited destination and
+serve for this call. Passing both flags is a usage error.
+
+Normal responses carry `context`: transport, host, resolved session, and the
+origin of those settings. Serve responses also identify the server's context
+when supported, because the endpoint may be a local tunnel. Interactive CLI
+routing notices go to stderr; stdout stays JSON. Scope remote env vars to the
+remote launcher and give local crew wrappers fixed `--local --session` flags.
+Configure each MCP server's environment explicitly.
+
+Dedicated crew Zellij configs can disable startup distractions with
+`show_startup_tips false` and `show_release_notes false`. Correct TERM on the
+host that starts workers. Terminal screen reads do not prove the presence or
+absence of all Zellij overlays; inspect held exit output before recovery.
