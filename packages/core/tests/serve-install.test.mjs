@@ -1,7 +1,7 @@
 process.env.ZSWARM_LOG = "0";
 process.env.ZSWARM_BUS = "0";
 
-import { test } from "node:test";
+import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -273,6 +273,7 @@ function baseInput(t, extra = {}) {
   };
 }
 
+describe("Windows serve --install readiness", { concurrency: 1 }, () => {
 test("CLI parse covers the Windows install contract", () => {
   assert.equal(DEFAULT_SERVE_INSTALL_TIMEOUT_MS, 30_000);
   assert.deepEqual(
@@ -836,4 +837,5 @@ test("register scripts parse on Windows PowerShell", {
     );
     assert.equal(spawned.status, 0, `${action} parse failed: ${spawned.stdout}\n${spawned.stderr}`);
   }
+});
 });
