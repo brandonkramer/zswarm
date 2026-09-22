@@ -50,15 +50,19 @@ export type BusPlan = {
   installed: boolean;
 };
 
-/** Set once a pipe has failed, so one dead plugin costs one timeout, not many. */
-let processDisabled: string | null = null;
+/** Back off failed pipes briefly, isolated to their transport/session/plugin. */
+const busFailures = new Map<string, { reason: string; until: number }>();
 /** The key that actually answered, per session, for the life of this process. */
 const answeredWith = new Map<string, string>();
 
 /** Tests share a module instance; this drops what a previous case cached. */
 export function resetBusCache(): void {
-  processDisabled = null;
+  busFailures.clear();
   answeredWith.clear();
+}
+
+function busScope(client: ZellijClient, session: string, plan: Pick<BusPlan, "url" | "configKey">): string {
+  return JSON.stringify([client.contextKey(), session, plan.url, plan.configKey]);
 }
 
 function affirmative(raw: string | undefined): boolean {
@@ -102,7 +106,10 @@ export function planBus(
       reason: "no plugin wasm found; run pnpm build:plugin or set ZSWARM_BUS_PLUGIN",
     };
   }
-  if (processDisabled) return { ...base, reason: processDisabled };
+  const scope = busScope(client, session, base);
+  const failed = busFailures.get(scope);
+  if (failed && Date.now() < failed.until) return { ...base, reason: failed.reason };
+  if (failed) busFailures.delete(scope);
   if (affirmative(env.ZSWARM_BUS)) {
     return { ...base, enabled: true, reason: "ZSWARM_BUS=1" };
   }
@@ -139,7 +146,7 @@ async function nudgeManifest(
   if (loadPolicy(env).readOnly) return;
   const listBudget = Math.min(DEFAULT_TIMEOUT_MS, remaining());
   if (listBudget <= 0) return;
-  const panes = await client.listPanes(session, listBudget);
+  const panes = await client.listPanes(session, listBudget, { fresh: true });
   const pane = panes.find((p) => !p.isPlugin && !p.exited && p.title.trim());
   if (!pane) return;
   const renameBudget = Math.min(DEFAULT_TIMEOUT_MS, remaining());
@@ -183,7 +190,8 @@ export async function busSnapshot(
   const url = plan.url;
   if (!plan.enabled || !url || !pluginPath) return null;
 
-  const configKey = answeredWith.get(session) ?? plan.configKey;
+  const scope = busScope(client, session, plan);
+  const configKey = answeredWith.get(scope) ?? plan.configKey;
   const ask = async (): Promise<BusSnapshot | null> => {
     const budget = Math.min(DEFAULT_BUS_TIMEOUT_MS, remaining());
     if (budget <= 0) return null;
@@ -210,11 +218,16 @@ export async function busSnapshot(
   // An expired request says nothing about bus health or an empty cold manifest.
   if (remaining() <= 0 && !snapshot?.ready) return null;
   if (snapshot) {
-    answeredWith.set(session, configKey);
+    answeredWith.set(scope, configKey);
+    if (answeredWith.size > 256) answeredWith.delete(answeredWith.keys().next().value!);
+    if (snapshot.ready) client.observeManifest(session, JSON.stringify([
+      scope, snapshot.paneUpdates, snapshot.tabUpdates, snapshot.panes, snapshot.tabs, snapshot.tabIds,
+    ]));
     return { snapshot, configKey };
   }
 
-  processDisabled = "plugin did not answer; using zellij polling for this run";
+  busFailures.set(scope, { reason: "plugin did not answer; using zellij polling for 5s", until: Date.now() + 5000 });
+  if (busFailures.size > 256) busFailures.delete(busFailures.keys().next().value!);
   return null;
 }
 
@@ -241,7 +254,7 @@ export async function busScreens(
   if (paneIds.length < 2) return null;
   const plan = planBus(client, state, env, session);
   if (!plan.enabled || !plan.url) return null;
-  const configKey = answeredWith.get(session) ?? plan.configKey;
+  const configKey = answeredWith.get(busScope(client, session, plan)) ?? plan.configKey;
   const reply = await client.scrollbackPlugin({
     session,
     url: plan.url,
@@ -277,7 +290,7 @@ export async function busWait(
 ): Promise<BusWait | null> {
   const plan = planBus(client, state, env, session);
   if (!plan.enabled || !plan.url) return null;
-  const configKey = answeredWith.get(session) ?? plan.configKey;
+  const configKey = answeredWith.get(busScope(client, session, plan)) ?? plan.configKey;
   const reply = await client.waitPlugin({
     session,
     url: plan.url,
@@ -306,7 +319,7 @@ export async function busChanged(
   if (paneIds.length === 0) return null;
   const plan = planBus(client, state, env, session);
   if (!plan.enabled || !plan.url) return null;
-  const configKey = answeredWith.get(session) ?? plan.configKey;
+  const configKey = answeredWith.get(busScope(client, session, plan)) ?? plan.configKey;
   const reply = await client.changedPlugin({
     session,
     url: plan.url,
@@ -316,7 +329,8 @@ export async function busChanged(
   });
   const parsed = parseChangedReply(reply.stdout);
   if (!parsed || !parsed.ready) return null;
-  return parsed.panes.length === paneIds.length ? parsed : null;
+  const received = new Set([...parsed.panes.map((pane) => pane.id), ...parsed.missing]);
+  return paneIds.every((id) => received.has(id)) ? parsed : null;
 }
 
 function installedReply(
@@ -347,7 +361,7 @@ async function listBusPluginPanes(
   session: string,
   pluginPath: string | null,
 ) {
-  const panes = await client.listPanes(session);
+  const panes = await client.listPanes(session, undefined, { fresh: true });
   return panes.filter((pane) => isBusPluginPane(pane, pluginPath));
 }
 

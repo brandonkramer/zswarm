@@ -219,6 +219,8 @@ ZSWARM_SERVE=127.0.0.1:9419 ZSWARM_SERVE_TOKEN=secret zswarm list
 
 For spawn lifecycle fields, file/stdin handoffs, guarded menu input, tab summaries, and routing diagnostics, see [Reliable crew operations](docs/crew-operations.md).
 
+For repeated status calls, see [polling performance and serve/tunnel setup](docs/performance.md).
+
 ## 📜 License
 
 [MIT](LICENSE)

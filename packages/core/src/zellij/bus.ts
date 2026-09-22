@@ -134,7 +134,7 @@ export function parseChangedReply(stdout: string): BusChanged | null {
     for (const row of value.panes) {
       if (!row || typeof row !== "object") continue;
       const p = row as Record<string, unknown>;
-      if (typeof p.id !== "string") continue;
+      if (typeof p.id !== "string" || typeof p.changed !== "boolean" || typeof p.first !== "boolean" || !Array.isArray(p.viewport)) continue;
       panes.push({
         id: p.id,
         screen: screenOf(p.viewport),

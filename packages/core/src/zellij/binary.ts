@@ -134,33 +134,43 @@ export function identityCacheKey(
     options: string[];
     mode?: string;
     remoteBin?: string;
+    /** SSH client binary (`SshTarget.ssh`). */
+    ssh?: string;
+    sshBin?: string;
+    remoteShell?: string;
   } | null,
 ): string {
-  if (!ssh) return zellijPath;
-  return [
+  if (!ssh) return JSON.stringify([zellijPath]);
+  return JSON.stringify([
     zellijPath,
     ssh.host,
     ssh.remoteBin ?? "",
     ssh.mode ?? "ssh",
-    ssh.options.join("\0"),
-  ].join("|");
+    ssh.options,
+    ssh.sshBin ?? ssh.ssh ?? "",
+    ssh.remoteShell ?? "",
+  ]);
 }
 
 /**
  * Confirm the resolved binary is Zellij. Only verified identities are cached.
  * Transport timeouts leave the cache empty so a later call can retry.
  * Returns false when verification is unresolved; only true is cached.
+ * In-flight probes are never shared — each caller supplies its own timeout.
  */
 export async function ensureZellijIdentity(
   exec: ExecFn,
   zellijPath: string,
   timeoutMs = 3_000,
   cacheKey = zellijPath,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   if (identityCache.has(cacheKey)) return true;
+  if (signal?.aborted) return false;
   assertZellijBinaryPath(zellijPath);
   const result = await exec(["--version"], {
     timeoutMs: Math.min(timeoutMs, 5_000),
+    signal,
   });
   const text = `${result.stdout}\n${result.stderr}`;
   if (/usage:\s*zswarm/i.test(text) || /unknown arg:/i.test(text)) {
@@ -176,6 +186,7 @@ export async function ensureZellijIdentity(
     );
   }
   if (result.code === 0) {
+    if (signal?.aborted) return false;
     if (isZellijVersionOutput(result.stdout, result.stderr)) {
       identityCache.add(cacheKey);
       return true;
@@ -201,10 +212,13 @@ export async function ensureZellijCapabilities(
   zellijPath: string,
   timeoutMs = 3_000,
   cacheKey = zellijPath,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   if (capabilityCache.has(cacheKey)) return true;
+  if (signal?.aborted) return false;
   const result = await exec(["list-sessions", "--help"], {
     timeoutMs: Math.min(timeoutMs, 5_000),
+    signal,
   });
   const text = `${result.stdout}\n${result.stderr}`;
   if (/usage:\s*zswarm/i.test(text)) {
@@ -225,6 +239,7 @@ export async function ensureZellijCapabilities(
     /--no-formatting/i.test(text) &&
     /list-sessions/i.test(text)
   ) {
+    if (signal?.aborted) return false;
     capabilityCache.add(cacheKey);
     return true;
   }
@@ -236,6 +251,29 @@ export async function ensureZellijCapabilities(
   }
   // Soft: leave unresolved on transport failure.
   return false;
+}
+
+/**
+ * Identity and capability are independent reads. Run them together under one
+ * remaining budget; do not share in-flight work with another caller.
+ */
+export async function ensureZellijProbes(
+  exec: ExecFn,
+  zellijPath: string,
+  timeoutMs = 3_000,
+  cacheKey = zellijPath,
+  signal?: AbortSignal,
+): Promise<{ identity: boolean; capabilities: boolean }> {
+  if (signal?.aborted) return { identity: false, capabilities: false };
+  const probeTimeout = Math.min(timeoutMs, 5_000);
+  // Settle both so a wrong-bin throw does not leave the other SSH probe running.
+  const settled = await Promise.allSettled([
+    ensureZellijIdentity(exec, zellijPath, probeTimeout, cacheKey, signal),
+    ensureZellijCapabilities(exec, zellijPath, probeTimeout, cacheKey, signal),
+  ]);
+  if (settled[0].status === "rejected") throw settled[0].reason;
+  if (settled[1].status === "rejected") throw settled[1].reason;
+  return { identity: settled[0].value, capabilities: settled[1].value };
 }
 
 /** Test helper: drop cached identity/capability probes. */

@@ -93,7 +93,7 @@ export async function broadcast(
   const { session } = await client.resolveSession(
     typeof args.session === "string" ? args.session : undefined,
   );
-  const panes = await client.listPanes(session);
+  const panes = await client.listPanes(session, undefined, { fresh: true });
   const labeled = withSenderLabel(args, {
     env,
     selfTitle: selfPaneTitle(client, panes),

@@ -85,3 +85,5 @@ For menus: wait for a match and check `reason`, perform one
 also applies to `chars` and `interrupt`. It is a fresh case-insensitive screen
 check, not an atomic transaction. Serialize input per pane and avoid blind
 retries. Waiting evidence is a screen heuristic, not authorization to approve.
+
+Ordinary status uses bus changes without a sample gap by default; first/missing observations are unknown unless a prompt is visible. `sampleMs` explicitly selects two-sample observation (0 = metadata only). Bus change history is shared by the plugin instance. Read-only listings use a 500ms process cache; `fresh: true` bypasses it, and `ZSWARM_CACHE_TTL_MS=0` disables reuse. Writes/spawn settling use fresh metadata. Serve retains caches across client CLI calls.

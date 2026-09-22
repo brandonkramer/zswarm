@@ -72,7 +72,7 @@ else console.log("crew");
 // well past the budget; launch-time assertions below detect fresh child budgets.
 const statusTimeoutMs = 3000;
 for (const scenario of [
-  { name: "identity", delays: { identity: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity"] },
+  { name: "identity", delays: { identity: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },
   { name: "capabilities with sampling", delays: { identity: 100, capabilities: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },
   { name: "capabilities without sampling", delays: { identity: 100, capabilities: 10_000 }, session: "crew", sampleMs: 0, calls: ["identity", "capabilities"] },
   { name: "session listing", delays: { identity: 100, capabilities: 100, sessions: 10_000 }, sampleMs: 50, calls: ["identity", "capabilities", "sessions"] },
@@ -92,7 +92,9 @@ ${standardReplies}
     assert.equal(result.ok, false);
     assert.equal(result.error.code, "zellij_failed", JSON.stringify(result));
     assert.match(result.error.message, /timed out/);
-    assert.deepEqual(fixture.calls().map((c) => c.op), scenario.calls);
+    const observed = fixture.calls().map((c) => c.op);
+    assert.deepEqual(observed.slice(0, 2).sort(), ["capabilities", "identity"]);
+    assert.deepEqual(observed.slice(2), scenario.calls.slice(2));
     for (const call of fixture.launches) {
       const remaining = statusTimeoutMs - (call.at - start);
       assert.ok(remaining > 0, "child started after the deadline");
@@ -235,7 +237,7 @@ ${standardReplies}
         });
       }
       assert.equal(fixture.calls().filter((c) => c.op === probe).length, 2);
-      assert.equal(fixture.calls().filter((c) => c.op === "sessions").length, valid ? 2 : 0);
+      assert.equal(fixture.calls().filter((c) => c.op === "sessions").length, valid ? 1 : 0);
     });
   }
 }
