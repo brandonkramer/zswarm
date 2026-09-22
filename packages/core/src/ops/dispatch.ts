@@ -266,6 +266,7 @@ async function dispatchOperation(
         request,
         serveCallTimeout(args),
         env.ZSWARM_SERVE_TOKEN,
+        signal,
       );
     }
     const baseClient = injected ?? createZellijClient({ env, signal, cache: isTrue(args.fresh) ? false : undefined });

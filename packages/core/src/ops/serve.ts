@@ -1,5 +1,8 @@
 import { createServer, connect, type Socket } from "node:net";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+import { hostname } from "node:os";
 import { ZellijError } from "../errors.js";
 import { encodePowerShellCommand } from "../zellij/ipc.js";
 import type { OpsResult } from "./types.js";
@@ -8,13 +11,90 @@ export const DEFAULT_SERVE_LISTEN = "127.0.0.1:9419";
 export const SERVE_TASK_NAME = "zswarm-serve";
 /** One JSONL request; a client that never sends newline cannot grow forever. */
 export const SERVE_MAX_REQUEST_BYTES = 1024 * 1024;
+/** One JSONL reply; a truncated flood cannot grow forever on the client. */
+export const SERVE_MAX_REPLY_BYTES = SERVE_MAX_REQUEST_BYTES;
 /** Drop a socket that never finishes a JSONL line. */
 export const SERVE_IDLE_TIMEOUT_MS = 30_000;
 /** Concurrent TCP clients, including in-flight wait ops. */
 export const SERVE_MAX_CONNECTIONS = 32;
 /** Wait/await allow 15 minutes; this is that plus slack. */
 export const SERVE_CALL_TIMEOUT_CAP_MS = 16 * 60_000;
+/** TCP connect is bounded even when the op wait budget is long. */
+export const SERVE_CONNECT_TIMEOUT_MS = 15_000;
+/** Hello probe wait is bounded within the overall deadline. */
+export const SERVE_HELLO_TIMEOUT_MS = 15_000;
+/** Wire protocol number returned by hello. */
+export const SERVE_PROTOCOL = 1;
+export const SERVE_CONTROL_FIELD = "serveControl";
+export const SERVE_HELLO_CONTROL = "hello";
+export const SERVE_CAPABILITY_HELLO = "hello";
 const SERVE_TOKEN_FIELD = "serveToken";
+
+const CORE_VERSION = readCoreVersion();
+
+function readCoreVersion(): string {
+  const pkg = createRequire(import.meta.url)("../../package.json") as {
+    version?: unknown;
+  };
+  if (typeof pkg.version !== "string" || !pkg.version.trim()) {
+    throw new Error("@zswarm/core package.json is missing version");
+  }
+  return pkg.version.trim();
+}
+
+export type ServePhase = "connect" | "hello" | "request";
+/** Conservative: `uncertain` means a request was written and no complete reply arrived. */
+export type ServeDelivery = "not_sent" | "uncertain" | "replied";
+export type ServeErrorDetails = {
+  phase: ServePhase;
+  endpoint: string;
+  delivery: ServeDelivery;
+  remedy: string;
+};
+export type ServeCapability = typeof SERVE_CAPABILITY_HELLO;
+export type ServeHelloData = {
+  protocol: number;
+  serverId: string;
+  hostname: string;
+  platform: string;
+  version: string;
+  capabilities: string[];
+};
+export type ProbeServeOptions = {
+  token?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+};
+export type CallServeOptions = {
+  timeoutMs?: number;
+  token?: string;
+  signal?: AbortSignal;
+  maxReplyBytes?: number;
+  connectTimeoutMs?: number;
+};
+
+export const SERVE_REMEDY = {
+  connect:
+    "Check that zswarm serve is running and the tunnel still forwards to this endpoint. Serve does not fall back to SSH.",
+  unauthorized:
+    "Set the same ZSWARM_SERVE_TOKEN on the server and this caller.",
+  helloUnsupported:
+    "This endpoint does not speak serve hello (protocol 1). Upgrade zswarm serve. Ordinary commands still work without probing hello first.",
+  incompatible:
+    "This serve protocol is not supported by this client. Upgrade zswarm on both sides.",
+  protocol:
+    "The endpoint returned a malformed or unexpected serve reply. Do not echo or retry blindly.",
+  timeoutConnect:
+    "The TCP connection did not complete in time. Check the tunnel and that zswarm serve is listening.",
+  timeoutHello:
+    "Connected but serve hello did not finish. Check the tunnel; do not treat this as a completed command.",
+  timeoutRequest:
+    "The request was sent but no reply arrived. Treat the remote outcome as uncertain; do not retry automatically.",
+  incomplete:
+    "The connection closed before a complete reply. If a request was already sent, treat the remote outcome as uncertain; do not retry automatically.",
+  cancelled:
+    "The caller cancelled this serve call. If a request was already sent, treat the remote outcome as uncertain; do not retry automatically.",
+} as const;
 
 export function isLoopbackHost(host: string): boolean {
   const h = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
@@ -100,6 +180,16 @@ function unauthorized(): OpsResult {
   };
 }
 
+function protocolError(message: string): OpsResult {
+  return {
+    ok: false,
+    error: {
+      code: "serve_protocol",
+      message,
+    },
+  };
+}
+
 function takeServeToken(
   args: Record<string, unknown>,
 ): { token: string | undefined; request: Record<string, unknown> } {
@@ -110,6 +200,63 @@ function takeServeToken(
   const request = { ...args };
   delete request[SERVE_TOKEN_FIELD];
   return { token, request };
+}
+
+function helloData(serverId: string): ServeHelloData {
+  return {
+    protocol: SERVE_PROTOCOL,
+    serverId,
+    hostname: hostname() || "unknown",
+    platform: process.platform,
+    version: CORE_VERSION,
+    capabilities: [SERVE_CAPABILITY_HELLO],
+  };
+}
+
+function isHelloOp(op: unknown): boolean {
+  return typeof op === "string" && op.trim() === SERVE_HELLO_CONTROL;
+}
+
+/** Control plane after auth; never dispatches an application op for hello. */
+function handleServeControl(
+  request: Record<string, unknown>,
+  hello: ServeHelloData,
+): { handled: true; result: OpsResult } | { handled: false } {
+  const hasControl = Object.prototype.hasOwnProperty.call(request, SERVE_CONTROL_FIELD);
+  const hasOp = Object.prototype.hasOwnProperty.call(request, "op");
+  if (hasControl && hasOp) {
+    return {
+      handled: true,
+      result: protocolError("serve request cannot include both serveControl and op"),
+    };
+  }
+  if (hasControl) {
+    const control = request[SERVE_CONTROL_FIELD];
+    if (typeof control !== "string" || !control.trim()) {
+      return {
+        handled: true,
+        result: protocolError("serveControl must be a non-empty string"),
+      };
+    }
+    const name = control.trim();
+    if (name !== SERVE_HELLO_CONTROL) {
+      return {
+        handled: true,
+        result: protocolError(`unknown serve control (${name})`),
+      };
+    }
+    return {
+      handled: true,
+      result: { ok: true, data: { ...hello, capabilities: [...hello.capabilities] } },
+    };
+  }
+  if (isHelloOp(request.op)) {
+    return {
+      handled: true,
+      result: { ok: true, data: { ...hello, capabilities: [...hello.capabilities] } },
+    };
+  }
+  return { handled: false };
 }
 
 export function startServe(
@@ -138,6 +285,7 @@ export function startServe(
   const maxRequestBytes = options.maxRequestBytes ?? SERVE_MAX_REQUEST_BYTES;
   const idleTimeoutMs = options.idleTimeoutMs ?? SERVE_IDLE_TIMEOUT_MS;
   const maxConnections = options.maxConnections ?? SERVE_MAX_CONNECTIONS;
+  const hello = helloData(randomUUID());
   return new Promise((resolve, reject) => {
     const sockets = new Set<Socket>();
     const server = createServer((socket) => {
@@ -186,18 +334,32 @@ export function startServe(
             const line = buf.slice(0, nl).trim();
             buf = buf.slice(nl + 1);
             if (line) {
-              let result: OpsResult;
+              let result: OpsResult | undefined;
+              let parsed: unknown;
               try {
-                const parsed = JSON.parse(line) as Record<string, unknown>;
-                const taken = takeServeToken(parsed);
-                if (taken.token !== token) {
-                  result = unauthorized();
-                } else {
-                  result = await dispatch(taken.request);
+                parsed = JSON.parse(line);
+              } catch {
+                result = { ok: false, error: { code: "bad_arg", message: "serve request is not JSON" } };
+              }
+              if (!result) {
+                try {
+                  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                    result = protocolError("serve request must be a JSON object");
+                  } else {
+                    const taken = takeServeToken(parsed as Record<string, unknown>);
+                    if (taken.token !== token) {
+                      result = unauthorized();
+                    } else {
+                      const control = handleServeControl(taken.request, hello);
+                      result = control.handled
+                        ? control.result
+                        : await dispatch(taken.request);
+                    }
+                  }
+                } catch (err) {
+                  const message = err instanceof Error ? err.message : "serve dispatch failed";
+                  result = { ok: false, error: { code: "failed", message } };
                 }
-              } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
-                result = { ok: false, error: { code: "bad_arg", message } };
               }
               if (!socket.destroyed) {
                 socket.write(`${JSON.stringify(result)}\n`);
@@ -237,65 +399,317 @@ export function parseServeTarget(raw: string): { host: string; port: number } {
   return parseListenAddress(raw);
 }
 
-export function callServe(
-  target: string,
+function serveFail(code: string, message: string, details: ServeErrorDetails): OpsResult {
+  return { ok: false, error: { code, message, details } };
+}
+
+function remedyFor(code: string, phase: ServePhase, delivery: ServeDelivery): string {
+  if (code === "serve_unauthorized") return SERVE_REMEDY.unauthorized;
+  if (code === "cancelled") return SERVE_REMEDY.cancelled;
+  if (code === "serve_unreachable") return SERVE_REMEDY.connect;
+  if (code === "serve_hello_unsupported") return SERVE_REMEDY.helloUnsupported;
+  if (code === "serve_incompatible") return SERVE_REMEDY.incompatible;
+  if (code === "timeout") {
+    if (phase === "connect") return SERVE_REMEDY.timeoutConnect;
+    if (phase === "hello") return SERVE_REMEDY.timeoutHello;
+    if (delivery === "uncertain") return SERVE_REMEDY.timeoutRequest;
+    return SERVE_REMEDY.timeoutConnect;
+  }
+  if (delivery === "uncertain") return SERVE_REMEDY.incomplete;
+  return SERVE_REMEDY.protocol;
+}
+
+function asOpsResult(value: unknown): OpsResult | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as { ok?: unknown; error?: unknown };
+  if (v.ok === true) return value as OpsResult;
+  if (v.ok !== false || !v.error || typeof v.error !== "object") return null;
+  const error = v.error as { code?: unknown; message?: unknown };
+  if (typeof error.code !== "string" || typeof error.message !== "string") return null;
+  return value as OpsResult;
+}
+
+function isServeHelloData(data: unknown): data is ServeHelloData {
+  if (!data || typeof data !== "object") return false;
+  const d = data as Record<string, unknown>;
+  return (
+    typeof d.protocol === "number" &&
+    Number.isFinite(d.protocol) &&
+    typeof d.serverId === "string" &&
+    d.serverId.trim() !== "" &&
+    typeof d.hostname === "string" &&
+    d.hostname.trim() !== "" &&
+    typeof d.platform === "string" &&
+    d.platform.trim() !== "" &&
+    typeof d.version === "string" &&
+    d.version.trim() !== "" &&
+    Array.isArray(d.capabilities) &&
+    d.capabilities.every((cap) => typeof cap === "string" && cap.trim() !== "")
+  );
+}
+
+function attachToken(
   args: Record<string, unknown>,
-  timeoutMs = 15_000,
   token?: string,
-): Promise<OpsResult> {
-  const { host, port } = parseServeTarget(target);
-  const payload =
-    token && token.trim()
-      ? { ...args, [SERVE_TOKEN_FIELD]: token.trim() }
-      : args;
+): Record<string, unknown> {
+  return token && token.trim() ? { ...args, [SERVE_TOKEN_FIELD]: token.trim() } : args;
+}
+
+function exchangeServe(input: {
+  target: string;
+  payload: Record<string, unknown>;
+  timeoutMs: number;
+  phase: Exclude<ServePhase, "connect">;
+  signal?: AbortSignal;
+  maxReplyBytes?: number;
+  connectTimeoutMs?: number;
+}): Promise<OpsResult> {
+  const { host, port } = parseServeTarget(input.target);
+  const endpoint = formatListenLabel(host, port);
+  const timeoutMs = Math.max(1, input.timeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  const maxReplyBytes = input.maxReplyBytes ?? SERVE_MAX_REPLY_BYTES;
+  const remaining = () => Math.max(0, deadline - Date.now());
+
   return new Promise((resolve) => {
-    const socket = connect({ host, port });
-    let buf = "";
+    let phase: ServePhase = "connect";
+    let sent = false;
     let settled = false;
+    let buf = "";
+    let connectTimer: ReturnType<typeof setTimeout> | undefined;
+    let waitTimer: ReturnType<typeof setTimeout> | undefined;
+    let overallTimer: ReturnType<typeof setTimeout> | undefined;
+    let socket: Socket | undefined;
+
+    const delivery = (): ServeDelivery => (sent ? "uncertain" : "not_sent");
+
     const finish = (result: OpsResult) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      socket.destroy();
+      if (connectTimer) clearTimeout(connectTimer);
+      if (waitTimer) clearTimeout(waitTimer);
+      if (overallTimer) clearTimeout(overallTimer);
+      input.signal?.removeEventListener("abort", onAbort);
+      if (socket) {
+        socket.removeAllListeners();
+        socket.destroy();
+      }
       resolve(result);
     };
-    const timer = setTimeout(() => {
-      finish({
-        ok: false,
-        error: {
-          code: "timeout",
-          message: `zswarm serve at ${host}:${port} timed out after ${timeoutMs}ms`,
-        },
-      });
-    }, timeoutMs);
+
+    const fail = (code: string, message: string) => {
+      const state = delivery();
+      finish(serveFail(code, message, {
+        phase,
+        endpoint,
+        delivery: state,
+        remedy: remedyFor(code, phase, state),
+      }));
+    };
+
+    const onAbort = () => {
+      fail("cancelled", "operation cancelled");
+    };
+
+    if (input.signal?.aborted) {
+      fail("cancelled", "operation cancelled");
+      return;
+    }
+
+    if (remaining() <= 0) {
+      fail("timeout", `zswarm serve at ${endpoint} timed out after ${timeoutMs}ms`);
+      return;
+    }
+
+    socket = connect({ host, port });
     socket.setEncoding("utf8");
+    input.signal?.addEventListener("abort", onAbort, { once: true });
+
+    overallTimer = setTimeout(() => {
+      fail("timeout", `zswarm serve at ${endpoint} timed out after ${timeoutMs}ms`);
+    }, timeoutMs);
+
+    connectTimer = setTimeout(() => {
+      fail("timeout", `zswarm serve at ${endpoint} timed out after ${timeoutMs}ms`);
+    }, Math.max(1, Math.min(input.connectTimeoutMs ?? SERVE_CONNECT_TIMEOUT_MS, remaining())));
+
     socket.on("error", (err) => {
-      finish({
-        ok: false,
-        error: {
-          code: "serve_unreachable",
-          message: `cannot reach zswarm serve at ${host}:${port}: ${err.message}`,
-        },
-      });
+      if (phase === "connect" && !sent) {
+        fail("serve_unreachable", `cannot reach zswarm serve at ${endpoint}: ${err.message}`);
+        return;
+      }
+      fail("serve_protocol", `zswarm serve at ${endpoint} closed before a complete reply`);
     });
-    socket.on("data", (chunk: string) => {
-      buf += chunk;
-      const nl = buf.indexOf("\n");
-      if (nl === -1) return;
-      const line = buf.slice(0, nl).trim();
+
+    socket.on("connect", () => {
+      if (settled || !socket) return;
+      if (connectTimer) {
+        clearTimeout(connectTimer);
+        connectTimer = undefined;
+      }
+      phase = input.phase;
+      const waitBound =
+        phase === "hello" ? Math.min(SERVE_HELLO_TIMEOUT_MS, remaining()) : remaining();
+      if (waitBound <= 0) {
+        fail("timeout", `zswarm serve at ${endpoint} timed out after ${timeoutMs}ms`);
+        return;
+      }
+      if (phase === "hello") {
+        waitTimer = setTimeout(() => {
+          fail("timeout", `zswarm serve at ${endpoint} timed out after ${timeoutMs}ms`);
+        }, Math.max(1, waitBound));
+      }
+      sent = true;
       try {
-        finish(JSON.parse(line) as OpsResult);
+        socket.write(`${JSON.stringify(input.payload)}\n`);
       } catch {
-        finish({
-          ok: false,
-          error: { code: "failed", message: `serve returned non-JSON: ${line}` },
-        });
+        fail("serve_protocol", `zswarm serve at ${endpoint} closed before a complete reply`);
       }
     });
-    socket.on("connect", () => {
-      socket.write(`${JSON.stringify(payload)}\n`);
+
+    socket.on("data", (chunk: string) => {
+      if (settled) return;
+      buf += chunk;
+      if (buf.length > maxReplyBytes) {
+        fail("serve_protocol", `serve reply exceeded ${maxReplyBytes} bytes`);
+        return;
+      }
+      while (!settled) {
+        const nl = buf.indexOf("\n");
+        if (nl === -1) return;
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try {
+          const parsed = asOpsResult(JSON.parse(line) as unknown);
+          if (!parsed) {
+            fail("serve_protocol", `zswarm serve at ${endpoint} returned an invalid reply`);
+            return;
+          }
+          finish(parsed);
+        } catch {
+          fail("serve_protocol", `zswarm serve at ${endpoint} returned non-JSON`);
+        }
+        return;
+      }
     });
+
+    const onClosed = () => {
+      if (settled) return;
+      if (buf.trim()) {
+        fail("serve_protocol", `zswarm serve at ${endpoint} returned a truncated reply`);
+        return;
+      }
+      fail("serve_protocol", `zswarm serve at ${endpoint} closed before a complete reply`);
+    };
+    socket.on("end", onClosed);
+    socket.on("close", onClosed);
   });
+}
+
+function interpretServeHello(result: OpsResult, endpoint: string): OpsResult {
+  if (!result.ok) {
+    if (
+      result.error.code === "serve_unauthorized" ||
+      result.error.code === "serve_unreachable" ||
+      result.error.code === "timeout" ||
+      result.error.code === "cancelled" ||
+      result.error.code === "serve_protocol" ||
+      result.error.code === "serve_incompatible" ||
+      result.error.code === "serve_hello_unsupported"
+    ) {
+      return result;
+    }
+    return serveFail(
+      "serve_hello_unsupported",
+      `zswarm serve at ${endpoint} does not speak hello (protocol ${SERVE_PROTOCOL})`,
+      {
+        phase: "hello",
+        endpoint,
+        delivery: "replied",
+        remedy: SERVE_REMEDY.helloUnsupported,
+      },
+    );
+  }
+  const data = result.data;
+  if (data && typeof data === "object" && typeof (data as { protocol?: unknown }).protocol === "number") {
+    const protocol = (data as { protocol: number }).protocol;
+    if (protocol !== SERVE_PROTOCOL) {
+      return serveFail(
+        "serve_incompatible",
+        `zswarm serve at ${endpoint} speaks protocol ${protocol}; this client supports ${SERVE_PROTOCOL}`,
+        {
+          phase: "hello",
+          endpoint,
+          delivery: "replied",
+          remedy: SERVE_REMEDY.incompatible,
+        },
+      );
+    }
+    if (
+      !isServeHelloData(data) ||
+      !data.capabilities.includes(SERVE_CAPABILITY_HELLO)
+    ) {
+      return serveFail(
+        "serve_protocol",
+        `zswarm serve at ${endpoint} returned an invalid hello`,
+        {
+          phase: "hello",
+          endpoint,
+          delivery: "replied",
+          remedy: SERVE_REMEDY.protocol,
+        },
+      );
+    }
+    return { ok: true, data };
+  }
+  return serveFail(
+    "serve_hello_unsupported",
+    `zswarm serve at ${endpoint} does not speak hello (protocol ${SERVE_PROTOCOL})`,
+    {
+      phase: "hello",
+      endpoint,
+      delivery: "replied",
+      remedy: SERVE_REMEDY.helloUnsupported,
+    },
+  );
+}
+
+export function callServe(
+  target: string,
+  args: Record<string, unknown>,
+  timeoutMsOrOptions: number | CallServeOptions = 15_000,
+  token?: string,
+  signal?: AbortSignal,
+): Promise<OpsResult> {
+  const options: CallServeOptions =
+    typeof timeoutMsOrOptions === "object" && timeoutMsOrOptions !== null
+      ? timeoutMsOrOptions
+      : { timeoutMs: timeoutMsOrOptions, token, signal };
+  return exchangeServe({
+    target,
+    payload: attachToken(args, options.token),
+    timeoutMs: options.timeoutMs ?? 15_000,
+    phase: "request",
+    signal: options.signal,
+    maxReplyBytes: options.maxReplyBytes,
+    connectTimeoutMs: options.connectTimeoutMs,
+  });
+}
+
+/** Authenticated hello probe. Never reports a legacy or incompatible endpoint as healthy. */
+export function probeServe(
+  target: string,
+  options: ProbeServeOptions = {},
+): Promise<OpsResult> {
+  const { label: endpoint } = parseListenAddress(target);
+  return exchangeServe({
+    target,
+    payload: attachToken({ [SERVE_CONTROL_FIELD]: SERVE_HELLO_CONTROL }, options.token),
+    timeoutMs: options.timeoutMs ?? 15_000,
+    phase: "hello",
+    signal: options.signal,
+  }).then((result) => interpretServeHello(result, endpoint));
 }
 
 export function redactServeSecret(command: string, token: string): string {

@@ -38,6 +38,66 @@ If embedding `startServe` yourself, pass `serveChildEnv(process.env)` to the
 handler's `dispatchZswarm` environment, as the CLI does, so inherited routing
 does not forward requests back into the server.
 
+## Serve hello and transport errors
+
+After token auth, and before any application op, `zswarm serve` answers a reserved
+hello control without touching Zellij, the bus, or a session:
+
+```json
+{ "serveControl": "hello", "serveToken": "<token>" }
+```
+
+`{ "op": "hello", "serveToken": "<token>" }` is accepted for compatibility. A
+request must not include both `serveControl` and `op`. Unknown controls return
+`serve_protocol` and never run an application op as a side effect.
+
+A successful hello `data` object is:
+
+| Field | Meaning |
+| --- | --- |
+| `protocol` | `1` |
+| `serverId` | Opaque id unique to this `startServe` instance |
+| `hostname` | Server hostname |
+| `platform` | `process.platform` |
+| `version` | `@zswarm/core` package version |
+| `capabilities` | Currently `["hello"]` only |
+
+`probeServe(target, { token, timeoutMs, signal })` sends that hello and validates
+protocol 1 plus the hello capability. A legacy serve, a malformed hello, or
+another protocol number is an explicit diagnostic failure — never a false
+healthy. Ordinary commands still work against a legacy serve without probing
+hello first.
+
+Wrong or missing tokens keep `serve_unauthorized` with no hello metadata.
+
+`callServe` keeps its callers and `OpsResult` shape. Client-side transport
+failures add `error.details`:
+
+| Field | Meaning |
+| --- | --- |
+| `phase` | `connect`, `hello`, or `request` |
+| `endpoint` | `host:port` label |
+| `delivery` | `not_sent`, `uncertain` (request written, no complete reply), or `replied` |
+| `remedy` | Conservative next step |
+
+`delivery: "uncertain"` means the remote outcome is unknown; do not retry.
+Connect and hello waits are bounded inside the overall deadline so a long
+`wait`/`await` budget is not spent on a dead TCP handshake. A socket EOF or
+truncated JSONL settles promptly. Serve failures never fall back to SSH.
+Authorization and application errors keep `serve_unauthorized` / their app
+codes and are not labeled as a dead tunnel.
+
+Protocol codes:
+
+| Code | Meaning |
+| --- | --- |
+| `serve_protocol` | Unknown/ambiguous control, or malformed/truncated/incomplete JSONL |
+| `serve_incompatible` | Hello `protocol` is not `1` |
+| `serve_hello_unsupported` | Endpoint answered but does not speak hello |
+| `serve_unreachable` | TCP connect failed before a request was sent |
+| `serve_unauthorized` | Missing or wrong token |
+| `timeout` | Connect, hello, or request deadline |
+
 Direct SSH status includes `polling.recommendation` explaining the serve path;
 interactive CLI use also prints this advice on stderr. `polling.busAvailable`
 and `polling.reason` expose bus availability. JSON stdout stays machine-readable.
