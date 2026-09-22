@@ -8,11 +8,42 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createStateStore } from "../dist/index.js";
-// Same worker as writeCursor: a separate *.test.mjs file is another node --test
-// process and macOS CI drops keys from the 80-child persistence wave.
-import "./doctor.mjs";
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), "../dist/index.js");
+
+test("writeCursor serializes writers across processes", async (t) => {
+  // 80 at once is the Windows case: open(wx) returns EPERM while the holder
+  // still has cursors.lock, not EEXIST. Fewer workers never hit it on CI.
+  // Run this before doctor serve fixtures in this worker: extra TCP servers
+  // on the same event loop were overlapping the persistence wave on macOS.
+  const dir = mkdtempSync(join(tmpdir(), "zswarm-cur-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const worker = join(dir, "worker.mjs");
+  writeFileSync(
+    worker,
+    `import { createStateStore } from ${JSON.stringify(pathToFileURL(DIST).href)};
+const store = createStateStore({ dir: process.argv[2], env: { ZSWARM_LOG: "0" } });
+store.writeCursor(process.argv[3], process.argv[3]);
+`,
+  );
+  const workers = 80;
+  await Promise.all(
+    Array.from({ length: workers }, (_, i) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [worker, dir, `k${i}`], {
+          stdio: "inherit",
+        });
+        child.on("exit", (code) =>
+          code === 0 ? resolve() : reject(new Error(`worker exit ${code}`)),
+        );
+      }),
+    ),
+  );
+  const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
+  for (let i = 0; i < workers; i++) {
+    assert.equal(store.readCursor(`k${i}`), `k${i}`);
+  }
+});
 
 test("postSignal serializes writers across processes", async () => {
   const dir = mkdtempSync(join(tmpdir(), "zswarm-sig-"));
@@ -99,38 +130,6 @@ test("postSignal steals a live-pid lock older than the stale window", () => {
   assert.equal(store.readSignals().ch.count, 1);
 });
 
-test("writeCursor serializes writers across processes", async (t) => {
-  // 80 at once is the Windows case: open(wx) returns EPERM while the holder
-  // still has cursors.lock, not EEXIST. Fewer workers never hit it on CI.
-  const dir = mkdtempSync(join(tmpdir(), "zswarm-cur-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
-  const worker = join(dir, "worker.mjs");
-  writeFileSync(
-    worker,
-    `import { createStateStore } from ${JSON.stringify(pathToFileURL(DIST).href)};
-const store = createStateStore({ dir: process.argv[2], env: { ZSWARM_LOG: "0" } });
-store.writeCursor(process.argv[3], process.argv[3]);
-`,
-  );
-  const workers = 80;
-  await Promise.all(
-    Array.from({ length: workers }, (_, i) =>
-      new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, [worker, dir, `k${i}`], {
-          stdio: "inherit",
-        });
-        child.on("exit", (code) =>
-          code === 0 ? resolve() : reject(new Error(`worker exit ${code}`)),
-        );
-      }),
-    ),
-  );
-  const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
-  for (let i = 0; i < workers; i++) {
-    assert.equal(store.readCursor(`k${i}`), `k${i}`);
-  }
-});
-
 test("bus markers are per session and inherit a legacy flat file", () => {
   const dir = mkdtempSync(join(tmpdir(), "zswarm-bus-state-"));
   writeFileSync(
@@ -162,3 +161,9 @@ test("bus markers are per session and inherit a legacy flat file", () => {
   assert.equal(store.readBus("dogster"), null);
   assert.equal(store.readBus("trex").installedAt, 11);
 });
+
+// Same worker as writeCursor: a separate doctor *.test.mjs file is another
+// node --test process and macOS CI drops keys from the 80-child wave.
+// Load after writeCursor so doctor TCP fixtures do not occupy this event loop
+// during that persistence wave. Standalone: node --import ./test-support/clean-env.mjs --test tests/doctor.mjs
+await import("./doctor.mjs");
