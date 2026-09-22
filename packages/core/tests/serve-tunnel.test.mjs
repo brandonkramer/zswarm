@@ -685,6 +685,11 @@ function waitExit(child, timeoutMs = 8_000) {
       return;
     }
     const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
       reject(new Error("process did not exit"));
     }, timeoutMs);
     child.once("exit", (code, signal) => {
@@ -1027,6 +1032,15 @@ test("CLI timeout during hello exits and reaps the ssh child", async (t) => {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  });
   let stdout = "";
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
@@ -1079,6 +1093,15 @@ test("MCP stdin EOF during hello exits and reaps the ssh child", async (t) => {
     },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
+  });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
   });
   let stdout = "";
   child.stdout.setEncoding("utf8");
