@@ -1,4 +1,5 @@
 import { ZellijError } from "../errors.js";
+import { ListingCache, executorIdentity, listingTtl, routingEnvironment, sharedListings } from "./cache.js";
 import {
   buildClosePaneArgs,
   buildDumpArgs,
@@ -39,8 +40,7 @@ import {
   DEFAULT_TIMEOUT_MS,
   NOT_FOUND_EXIT,
   defaultExec,
-  ensureZellijCapabilities,
-  ensureZellijIdentity,
+  ensureZellijProbes,
   identityCacheKey,
   resolveSshTarget,
   resolveZellijBinary,
@@ -71,6 +71,10 @@ export type ZellijClientOptions = {
   signal?: AbortSignal;
   /** Skip the one-time `zellij --version` identity probe (tests). */
   skipIdentityProbe?: boolean;
+  /** Completed listing cache shared by long-lived MCP/serve calls; false bypasses reads. */
+  cache?: ListingCache | false;
+  /** Clock for cache TTLs; process deadlines continue using wall time. */
+  now?: () => number;
 };
 
 export type ZellijTransport = {
@@ -84,7 +88,7 @@ export type ZellijTransport = {
   ipc?: IpcDiscoveryState;
 };
 
-/** Thin, stateless wrapper over the `zellij` binary. */
+/** Zellij wrapper with bounded caches of completed discovery observations. */
 export function createZellijClient(options: ZellijClientOptions = {}) {
   const env = options.env ?? process.env;
   // A remote crew never resolves a local binary. An injected exec is a unit
@@ -101,7 +105,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   const sshExec: SshExecFn | null =
     options.exec || !ssh
       ? null
-      : createSshExec(ssh, sanitizeZellijEnv(env));
+      : createSshExec(ssh, sanitizeZellijEnv(env), { pinIpc: true });
   const rawExec: ZellijExecFn =
     options.exec ??
     (sshExec ? sshExec : defaultExec(zellijPath, env));
@@ -109,7 +113,50 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     rawExec(args, { ...opts, signal: opts.signal ?? options.signal });
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const selfPaneId = resolveSelfPaneId(env);
-  const probeKey = identityCacheKey(zellijPath, ssh);
+  const probeKey = JSON.stringify([identityCacheKey(zellijPath, ssh), routingEnvironment(env)]);
+  const now = options.now ?? Date.now;
+  const cache = options.cache instanceof ListingCache ? options.cache : sharedListings;
+  const ttl = options.cache === false || (options.exec && !options.cache) ? 0 : listingTtl(env);
+  const baseContext = JSON.stringify([zellijPath, ssh, executorIdentity(options.exec), routingEnvironment(env)]);
+  const scopeFor = (session?: string) => JSON.stringify([baseContext, session ?? null]);
+  const contextKey = () => JSON.stringify([baseContext, readTransport().ipc ?? null]);
+  const cacheUsable = () => {
+    const ipc = readTransport().ipc;
+    return ttl > 0 && (ipc?.requested?.toLowerCase() !== "auto" || ipc.status === "resolved");
+  };
+
+  function invalidateListings(session: string): void {
+    cache.invalidate(scopeFor(session));
+    cache.invalidate(scopeFor());
+  }
+
+  function observeManifest(session: string, revision: string): void {
+    if (cache.observe(scopeFor(session), revision)) cache.invalidate(scopeFor());
+  }
+
+  async function listing<T>(kind: string, session: string | undefined, budget: number, fresh: boolean, read: (remaining: () => number) => Promise<T>): Promise<T> {
+    const remaining = operationBudget(budget, `zellij ${kind}`);
+    remaining(); // An aborted/expired caller cannot consume a cached value.
+    // Resolve auto IPC before selecting the namespace, including cold reads.
+    // A sibling can refresh discovery while this read is in flight, so keep
+    // the original namespace and refuse to cache under a different one later.
+    if (ssh?.tmp?.trim().toLowerCase() === "auto") {
+      await sshExec!.prepareIpc(remaining(), options.signal);
+      remaining();
+    }
+    const key = () => JSON.stringify([contextKey(), session ?? null, kind]);
+    const startedKey = key();
+    if (cacheUsable() && !fresh) {
+      const hit = cache.get<T>(startedKey, now());
+      if (hit !== undefined) return hit;
+    }
+    const scope = scopeFor(session);
+    const ticket = cache.begin(scope);
+    const value = await read(remaining);
+    remaining();
+    if (cacheUsable() && key() === startedKey) cache.put(startedKey, scope, ticket, value, ttl, now());
+    return value;
+  }
 
   function readTransport(): ZellijTransport {
     if (!ssh) return { kind: "local", mode: "local" };
@@ -152,11 +199,11 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     if (options.skipIdentityProbe || options.exec) return;
     // Only the helpers' positively verified results are cached. In-flight or
     // unresolved probes must not tie this call to another operation's budget.
-    await ensureZellijIdentity(exec, zellijPath, remaining(), probeKey);
-    await ensureZellijCapabilities(exec, zellijPath, remaining(), probeKey);
+    if (sshExec?.prepareIpc) await sshExec.prepareIpc(remaining(), options.signal);
+    await ensureZellijProbes(exec, zellijPath, remaining(), probeKey, options.signal);
   }
 
-  async function run(
+  async function runCommand(
     args: string[],
     label: string,
     callTimeoutMs = timeoutMs,
@@ -187,37 +234,58 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     return result;
   }
 
+  const mutations = new Set([
+    "new-pane", "new-tab", "close-pane", "rename-pane", "rename-tab-by-id",
+    "focus-pane-id", "stack-panes", "launch-or-focus-plugin", "paste", "send-keys", "write-chars",
+  ]);
+
+  async function run(args: string[], label: string, callTimeoutMs = timeoutMs) {
+    const action = args[args.indexOf("action") + 1];
+    const index = args.indexOf("--session");
+    const session = index >= 0 ? args[index + 1] : undefined;
+    const mutation = session && mutations.has(action ?? "");
+    if (mutation) invalidateListings(session);
+    try { return await runCommand(args, label, callTimeoutMs); }
+    finally {
+      // Failed/uncertain writes can still have reached Zellij. Drop both reads
+      // from before the write and reads that raced while it was in flight.
+      if (mutation) invalidateListings(session);
+    }
+  }
+
   async function listSessions(
     callTimeoutMs = timeoutMs,
+    opts: { fresh?: boolean } = {},
   ): Promise<ZellijSession[]> {
-    const remaining = operationBudget(callTimeoutMs, "zellij list-sessions");
-    await ensureIdentity(remaining);
-    // Keep annotations (EXITED / current); --short drops them.
-    const result = await exec(["list-sessions", "--no-formatting"], {
-      timeoutMs: remaining(),
-    });
-    if (result.code === NOT_FOUND_EXIT) {
-      throw new ZellijError(
-        "zellij_missing",
-        `zellij binary not found (${zellijPath}); install Zellij ≥ 0.42, add it to PATH, or set ZSWARM_BIN / ZSWARM_PATH`,
-      );
-    }
-    if (result.code !== 0) {
-      const detail =
-        result.stderr.trim() || result.stdout.trim() || "no output";
-      if (/usage:\s*zswarm/i.test(detail) || /unknown arg:/i.test(detail)) {
+    return listing("list-sessions", undefined, callTimeoutMs, opts.fresh === true, async (remaining) => {
+      await ensureIdentity(remaining);
+      // Keep annotations (EXITED / current); --short drops them.
+      const result = await exec(["list-sessions", "--no-formatting"], {
+        timeoutMs: remaining(),
+      });
+      if (result.code === NOT_FOUND_EXIT) {
         throw new ZellijError(
-          "zellij_wrong_bin",
-          `resolved binary looks like zswarm, not Zellij (${zellijPath}): ${detail}`,
+          "zellij_missing",
+          `zellij binary not found (${zellijPath}); install Zellij ≥ 0.42, add it to PATH, or set ZSWARM_BIN / ZSWARM_PATH`,
         );
       }
-      if (isZellijNoSessionsOutput(result.stdout, result.stderr)) return [];
-      throw new ZellijError(
-        "zellij_failed",
-        `zellij list-sessions failed (exit ${result.code}): ${detail}`,
-      );
-    }
-    return parseSessionList(result.stdout);
+      if (result.code !== 0) {
+        const detail =
+          result.stderr.trim() || result.stdout.trim() || "no output";
+        if (/usage:\s*zswarm/i.test(detail) || /unknown arg:/i.test(detail)) {
+          throw new ZellijError(
+            "zellij_wrong_bin",
+            `resolved binary looks like zswarm, not Zellij (${zellijPath}): ${detail}`,
+          );
+        }
+        if (isZellijNoSessionsOutput(result.stdout, result.stderr)) return [];
+        throw new ZellijError(
+          "zellij_failed",
+          `zellij list-sessions failed (exit ${result.code}): ${detail}`,
+        );
+      }
+      return parseSessionList(result.stdout);
+    });
   }
 
   async function resolveSession(
@@ -233,13 +301,12 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   async function listPanes(
     session: string,
     callTimeoutMs = timeoutMs,
+    opts: { fresh?: boolean } = {},
   ): Promise<ZellijPane[]> {
-    const result = await run(
-      buildListPanesArgs(session),
-      "zellij action list-panes",
-      callTimeoutMs,
-    );
-    return parsePaneList(result.stdout);
+    return listing("list-panes", session, callTimeoutMs, opts.fresh === true, async (remaining) => {
+      const result = await run(buildListPanesArgs(session), "zellij action list-panes", remaining());
+      return parsePaneList(result.stdout);
+    });
   }
 
   async function injectPane(input: {
@@ -354,13 +421,11 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     return { paneId, session: input.session };
   }
 
-  async function listTabs(session: string, callTimeoutMs = timeoutMs): Promise<ZellijTab[]> {
-    const result = await run(
-      buildListTabsArgs(session),
-      "zellij action list-tabs",
-      callTimeoutMs,
-    );
-    return parseTabList(result.stdout);
+  async function listTabs(session: string, callTimeoutMs = timeoutMs, opts: { fresh?: boolean } = {}): Promise<ZellijTab[]> {
+    return listing("list-tabs", session, callTimeoutMs, opts.fresh === true, async (remaining) => {
+      const result = await run(buildListTabsArgs(session), "zellij action list-tabs", remaining());
+      return parseTabList(result.stdout);
+    });
   }
 
   async function dumpLayout(session: string): Promise<string> {
@@ -541,6 +606,9 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   return {
     zellijPath,
     selfPaneId,
+    contextKey,
+    invalidateListings,
+    observeManifest,
     get transport() {
       return readTransport();
     },

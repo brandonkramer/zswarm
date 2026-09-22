@@ -29,7 +29,7 @@ export async function renameTarget(
 
   const tabKey = optionalString(args.tab);
   if (tabKey) {
-    const tab = client.resolveTab(await client.listTabs(sess), tabKey);
+    const tab = client.resolveTab(await client.listTabs(sess, undefined, { fresh: true }), tabKey);
     const renamed = await client.renameTab({
       session: sess,
       tabId: tab.id,
@@ -43,7 +43,7 @@ export async function renameTarget(
 
   const to = optionalString(args.to);
   if (!to) throw new ZellijError("missing_peer", "to (or tab) required");
-  const pane = client.resolvePane(await client.listPanes(sess), to);
+  const pane = client.resolvePane(await client.listPanes(sess, undefined, { fresh: true }), to);
   if (policy) assertPaneAllowed(policy, pane, "rename");
   await client.renamePane({ session: sess, paneId: pane.id, name });
   return {
@@ -60,7 +60,7 @@ export async function focusTarget(
   const to = optionalString(args.to);
   if (!to) throw new ZellijError("missing_peer", "to required");
   const sess = await session(client, args);
-  const pane = client.resolvePane(await client.listPanes(sess), to);
+  const pane = client.resolvePane(await client.listPanes(sess, undefined, { fresh: true }), to);
   if (policy) assertPaneAllowed(policy, pane, "focus");
   // Zellij exits non-zero when asked to focus the already-focused pane.
   if (pane.focused) {
@@ -131,7 +131,7 @@ export async function stackTargets(
   const list = optionalString(args.to);
   if (!list) throw new ZellijError("missing_peer", "to (comma list) required");
   const sess = await session(client, args);
-  const panes = await client.listPanes(sess);
+  const panes = await client.listPanes(sess, undefined, { fresh: true });
   const ids = list
     .split(",")
     .map((k) => k.trim())

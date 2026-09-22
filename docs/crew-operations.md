@@ -92,3 +92,5 @@ with fixed `--local --session crew` for local work, and scope remote environment
 variables to the remote launcher. Configure MCP server environments explicitly.
 SSH alone does not share git/barrier state: remote worktrees and `signal/await`
 require `serve` on the host that owns the crew.
+
+Ordinary status prefers bus change observations when available. See [polling performance](performance.md) for explicit sampling, listing cache controls, and the recommended Windows serve/tunnel setup.

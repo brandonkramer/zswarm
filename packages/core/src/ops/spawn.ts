@@ -38,7 +38,7 @@ export async function spawnPane(
     : null;
   const cwd = worktree ? worktree.path : optionalString(args.cwd);
   const name = optionalString(args.name) ?? worktree?.branch ?? null;
-  const beforePanes = await client.listPanes(session, budget.require());
+  const beforePanes = await client.listPanes(session, budget.require(), { fresh: true });
   const before = new Set(beforePanes.map((p) => p.id));
   let paneId: string | null = null;
   let tabId: number | null = null;
@@ -58,7 +58,7 @@ export async function spawnPane(
     if (typeof args.tabId === "number") {
       tabId = args.tabId;
     } else if (tabName) {
-      tabId = client.resolveTab(await client.listTabs(session, budget.require()), tabName).id;
+      tabId = client.resolveTab(await client.listTabs(session, budget.require(), { fresh: true }), tabName).id;
     } else {
       // Address a tab explicitly even when no viewer is attached.
       const focused = beforePanes.find((p) => p.focused && p.tabId != null);
@@ -66,7 +66,7 @@ export async function spawnPane(
       tabId = focused?.tabId ?? first?.tabId ?? null;
       tabSource = focused ? "focused-pane" : "first-tab";
       if (tabId === null) {
-        const tabs = await client.listTabs(session, budget.require());
+        const tabs = await client.listTabs(session, budget.require(), { fresh: true });
         tabId = [...tabs].sort((a, b) => a.position - b.position)[0]?.id ?? null;
       }
       if (tabId === null) throw new ZellijError("tab_not_found", "no tab for spawn; use --new-tab");
@@ -91,7 +91,7 @@ export async function spawnPane(
       firstRead = false;
       try {
         const left = observeMs === 0 ? budget.require() : Math.min(budget.require(), Math.max(1, observedUntil - clock.now()));
-        const panes = await client.listPanes(session, left);
+        const panes = await client.listPanes(session, left, { fresh: true });
         throwIfAborted(signal);
         if (paneId) {
           pane = panes.find((p) => p.id === paneId && !p.isPlugin) ?? null;

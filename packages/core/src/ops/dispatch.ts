@@ -12,7 +12,7 @@ import {
 import { createStateStore, type StateStore } from "../state.js";
 import { busToPanes } from "../zellij/bus.js";
 import { broadcast } from "./broadcast.js";
-import { busChanged, busOp, busScreens, busSnapshot, busWait } from "./bus.js";
+import { busChanged, busOp, busScreens, busSnapshot, busWait, planBus } from "./bus.js";
 import {
   dumpLayoutOp,
   focusTarget,
@@ -74,14 +74,20 @@ export function resolveInvocationEnv(
   const local = isTrue(args.local);
   const sshDest =
     typeof args.ssh === "string" && args.ssh.trim() ? args.ssh.trim() : null;
-  if (local && sshDest) {
+  const serveAddress = optionalString(args.serveAddress);
+  if (Number(local) + Number(Boolean(sshDest)) + Number(Boolean(serveAddress)) > 1) {
     throw new ZellijError(
       "usage",
-      "pass --local or --ssh, not both",
+      "choose only one of --local, --ssh, or --serve",
     );
   }
-  if (!local && !sshDest) return base;
+  if (!local && !sshDest && !serveAddress) return base;
   const env = { ...base };
+  if (serveAddress) {
+    env.ZSWARM_SERVE = serveAddress;
+    delete env.ZSWARM_SSH;
+    return env;
+  }
   if (local) {
     delete env.ZSWARM_SSH;
     delete env.ZSWARM_SSH_OPTS;
@@ -169,9 +175,10 @@ async function resolveTarget(
   }
   const until = Math.min(budget.deadline, clock.now() + observeMs);
   let pane: ZellijPane;
+  let fresh = isTrue(args.fresh) || Boolean(op);
   for (;;) {
     const left = observeMs === 0 ? budget.require() : Math.min(budget.require(), Math.max(1, until - clock.now()));
-    panes ??= await client.listPanes(session, left);
+    panes ??= await client.listPanes(session, left, { fresh });
     throwIfAborted(signal);
     try {
       pane = client.resolvePane(panes, to);
@@ -181,6 +188,7 @@ async function resolveTarget(
       await budget.pause(until);
       if (clock.now() >= until) throw err;
       panes = null;
+      fresh = true;
     }
   }
   if (policy && op) assertPaneAllowed(policy, pane, op);
@@ -251,14 +259,16 @@ async function dispatchOperation(
     // An injected client is a unit-test (or in-process) Zellij; do not skip it
     // just because the host env has ZSWARM_SERVE set.
     if (!injected && env.ZSWARM_SERVE?.trim()) {
+      const request = { ...attachKnownSender(args, env) };
+      delete request.serveAddress; // Routing is consumed here, never forwarded back into a tunnel.
       return await callServe(
         env.ZSWARM_SERVE.trim(),
-        attachKnownSender(args, env),
+        request,
         serveCallTimeout(args),
         env.ZSWARM_SERVE_TOKEN,
       );
     }
-    const baseClient = injected ?? createZellijClient({ env, signal });
+    const baseClient = injected ?? createZellijClient({ env, signal, cache: isTrue(args.fresh) ? false : undefined });
     const client: ZellijClient = {
       ...baseClient,
       get transport() { return baseClient.transport; },
@@ -306,9 +316,10 @@ async function dispatchOperation(
         );
         // The plugin's manifest carries no cwd or floating flag, so anything
         // verbose has to go the polling route.
-        const bus = verbose
+        const observedBus = verbose
           ? null
           : await busSnapshot(client, state(), session, clock, env);
+        const bus = observedBus?.snapshot.ready ? observedBus : null;
         const view = bus ? paneViewBus : verbose ? paneViewFull : paneViewSlim;
         const panes = (bus ? busToPanes(bus.snapshot) : await client.listPanes(session))
           .filter((p) => !p.isPlugin)
@@ -539,20 +550,31 @@ async function dispatchOperation(
           setupBudget(),
         );
         throwIfAborted(signal);
-        // Verbose reports cwd and command, which the plugin manifest lacks.
-        const bus =
-          verbose || remaining() <= 0
-            ? null
-            : await busSnapshot(client, state(), session, clock, env, "status", {
-                deadlineAt,
-                signal,
-              });
+        // Once the session is known, verbose metadata and the bus manifest
+        // are independent reads. Both consume this operation's remaining time.
+        const readBus = () => remaining() <= 0 ? Promise.resolve(null)
+          : busSnapshot(client, state(), session, clock, env, "status", { deadlineAt, signal });
+        let observedBus: Awaited<ReturnType<typeof busSnapshot>>;
+        let detailedPanes: ZellijPane[] | undefined;
+        if (verbose) {
+          const reads = await Promise.allSettled([
+            readBus(), client.listPanes(session, setupBudget(), { fresh: true }),
+          ]);
+          throwIfAborted(signal);
+          if (reads[1].status === "rejected") throw reads[1].reason;
+          if (reads[0].status === "rejected") throw reads[0].reason;
+          observedBus = reads[0].value;
+          detailedPanes = reads[1].value;
+        } else {
+          observedBus = await readBus();
+        }
+        const bus = observedBus?.snapshot.ready ? observedBus : null;
         throwIfAborted(signal);
         // Always hand peerStatus the resolved session (and panes) so it does
         // not spend the overall budget resolving again.
-        const panes = bus
+        const panes = detailedPanes ?? (bus
           ? busToPanes(bus.snapshot)
-          : await client.listPanes(session, setupBudget());
+          : await client.listPanes(session, setupBudget()));
         throwIfAborted(signal);
         let supplied: {
           session: string;
@@ -572,7 +594,7 @@ async function dispatchOperation(
         } = {
           session,
           panes,
-          source: bus ? "plugin" : "zellij",
+          source: bus && !verbose ? "plugin" : "zellij",
         };
         if (bus) {
           supplied = {
@@ -613,13 +635,24 @@ async function dispatchOperation(
           } catch {
             // Command-shaped `to` needs the polled list; re-fetch without bus.
             const polled = await client.listPanes(session, setupBudget());
-            supplied = { session, panes: polled, source: "zellij" };
+            supplied = { ...supplied, session, panes: polled, source: "zellij" };
           }
         }
-        return await peerStatus(client, args, clock, supplied, {
+        const result = await peerStatus(client, args, clock, supplied, {
           deadlineAt,
           signal,
         });
+        if (result.ok && result.data && typeof result.data === "object") {
+          const data = result.data as Record<string, unknown>;
+          data.polling = {
+            busAvailable: Boolean(bus),
+            ...(bus ? {} : { reason: planBus(client, state(), env, session).reason }),
+            ...(client.remote ? {
+              recommendation: "For frequent status calls, run zswarm serve beside Zellij and use --serve 127.0.0.1:9419 through an SSH tunnel; direct SSH cannot use the local event bus.",
+            } : {}),
+          };
+        }
+        return result;
       }
       case "bus":
         return await busOp(client, state(), args, clock, env, policy);

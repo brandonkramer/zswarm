@@ -103,7 +103,7 @@ export async function listPeerWorktrees(
     const { session } = await client.resolveSession(
       typeof args.session === "string" ? args.session : undefined,
     );
-    panes = await client.listPanes(session);
+    panes = await client.listPanes(session, undefined, { fresh: true });
   } catch {
     // Worktrees are useful to list even with no live Zellij session.
   }
@@ -178,7 +178,7 @@ export async function removePeerWorktree(
     const { session } = await client.resolveSession(
       typeof args.session === "string" ? args.session : undefined,
     );
-    occupants = panesIn(await client.listPanes(session), target.path);
+    occupants = panesIn(await client.listPanes(session, undefined, { fresh: true }), target.path);
   } catch (err) {
     // No live session means nobody is working in it. Any other failure must
     // not look like "empty" — that is how a clean busy worktree gets deleted.

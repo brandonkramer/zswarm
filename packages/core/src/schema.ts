@@ -160,14 +160,26 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "number",
     flags: ["--sample-ms"],
     description:
-      "status: gap between the two screen samples (default 400); 0 skips sampling and reports running/exited only",
+      "status: explicitly sample twice with this gap (fallback default 400); 0 reports running/exited only; default prefers bus changes",
   },
   {
     name: "sinceLast",
     type: "boolean",
     flags: ["--since-last"],
     description:
-      "status: classify by what changed since the last status call instead of sampling twice; needs the event bus, no sample gap",
+      "status: classify changes since the previous bus observation (default when bus available); first observation is unknown unless a prompt is recognized",
+  },
+  {
+    name: "fresh",
+    type: "boolean",
+    flags: ["--fresh"],
+    description: "bypass the short-lived session/pane/tab listing cache for this call",
+  },
+  {
+    name: "serveAddress",
+    type: "string",
+    flags: ["--serve"],
+    description: "use an existing serve endpoint (e.g. 127.0.0.1:9419 through an SSH tunnel); preferred for frequent status calls; uses ZSWARM_SERVE_TOKEN",
   },
   {
     name: "limit",
@@ -545,7 +557,7 @@ export function cliUsage(): string {
     "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force). --expect requires the screen to contain a substring first.",
     "Bus: `zswarm bus --install` once per Zellij session. `--force` closes orphan bus panes and reloads; do not use it as a retry.",
     "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE (+ ZSWARM_SERVE_TOKEN). Serve binds loopback only and always requires a token.",
-    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZSWARM_FROM, ZELLIJ_PANE_ID, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN",
+    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZSWARM_FROM, ZELLIJ_PANE_ID, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN, ZSWARM_CACHE_TTL_MS",
     "",
   );
   return lines.join("\n");

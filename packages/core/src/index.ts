@@ -1,4 +1,5 @@
 export { ZellijError } from "./errors.js";
+export { ListingCache } from "./zellij/cache.js";
 export {
   createExec,
   NOT_FOUND_EXIT,

@@ -400,7 +400,7 @@ test("verbose list skips the bus, which has no cwd to give", async () => {
   assert.equal(pipes().length, 0);
 });
 
-test("verbose status skips the bus, which has no command to give", async () => {
+test("verbose status obtains metadata alongside the bus", async () => {
   resetBusCache();
   const store = installed(tempState());
   const panesJson = JSON.stringify([
@@ -423,7 +423,8 @@ test("verbose status skips the bus, which has no command to give", async () => {
     { state: store, env: {} },
   );
   assert.equal(status.data.source, "zellij");
-  assert.equal(pipes().length, 0);
+  assert.equal(status.data.peers[0].cwd, "/repo");
+  assert.equal(pipes().length, 1);
 });
 
 test("status with sampleMs=0 answers from the bus without dumping screens", async () => {

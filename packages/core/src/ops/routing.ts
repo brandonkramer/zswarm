@@ -28,7 +28,7 @@ export function invocationContext(
     session: selected?.session ?? null,
     origin: {
       transport: injected ? "injected" : isTrue(args.local) ? "--local"
-        : optionalString(args.ssh) ? "--ssh" : serve ? "ZSWARM_SERVE"
+        : optionalString(args.ssh) ? "--ssh" : optionalString(args.serveAddress) ? "--serve" : serve ? "ZSWARM_SERVE"
         : ssh ? "ZSWARM_SSH" : "default",
       session: selected?.source ?? "unresolved",
     },

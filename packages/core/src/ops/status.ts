@@ -254,12 +254,18 @@ export async function peerStatus(
   const sampleMs = Math.max(50, requested);
   const live = targets.filter((pane) => !pane.exited);
 
-  if (isTrue(args.sinceLast) && supplied?.readChanged) {
+  // Explicit sampling retains its interval semantics. Ordinary status prefers
+  // one bus observation, including a single-pane crew, with no sample sleep.
+  const preferChanges = isTrue(args.sinceLast) || (args.sinceLast === undefined && args.sampleMs === undefined);
+  if (preferChanges && supplied?.readChanged) {
     const left = remaining();
-    const changed = left > 0 ? await supplied.readChanged(
-      live.map((p) => p.id),
-      left,
-    ) : null;
+    let changed: Awaited<ReturnType<NonNullable<StatusSource["readChanged"]>>> = null;
+    try {
+      changed = live.length === 0 ? new Map() : left > 0 ? await supplied.readChanged(live.map((p) => p.id), left) : null;
+    } catch (err) {
+      if (isCancelledError(err) || signal?.aborted) throw new ZellijError("cancelled", "operation cancelled");
+      // A missing/older bus falls back to bounded screen samples below.
+    }
     throwIfAborted(signal);
     if (changed) {
       const peers = targets
@@ -268,13 +274,9 @@ export async function peerStatus(
             return peerEntry(pane, "exited", "", verbose);
           }
           const row = changed.get(pane.id);
-          const state: PeerState = !row
-            ? "unknown"
-            : row.changed
-            ? "busy"
-            : promptHolds(row?.screen ?? "", resolveHarness(pane))
-              ? "waiting"
-              : "idle";
+          const state: PeerState = !row ? "unknown"
+            : promptHolds(row.screen, resolveHarness(pane)) ? "waiting"
+            : row.first ? "unknown" : row.changed ? "busy" : "idle";
           return peerEntry(pane, state, row?.screen ?? "", verbose, {
             ...(row?.first ? { first: true } : {}),
           });
@@ -287,6 +289,7 @@ export async function peerStatus(
           source,
           sampled: false,
           sinceLast: true,
+          observation: "bus-changes",
           peers,
           tabs: statusTabs(peers),
           free: peers.filter((p) => p.state === "idle").map((p) => p.id),
@@ -426,6 +429,7 @@ export async function peerStatus(
     session,
     source,
     sampled: true,
+    observation: "samples",
     sampleMs,
     peers,
     tabs: statusTabs(peers),

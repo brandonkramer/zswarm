@@ -80,3 +80,5 @@ Dedicated crew Zellij configs can disable startup distractions with
 `show_startup_tips false` and `show_release_notes false`. Correct TERM on the
 host that starts workers. Terminal screen reads do not prove the presence or
 absence of all Zellij overlays; inspect held exit output before recovery.
+
+For frequent status polling, prefer serve beside Zellij with an SSH tunnel. Use `--serve 127.0.0.1:9419 --session crew` (MCP: `serveAddress`) to select an existing endpoint explicitly; keep `ZSWARM_SERVE_TOKEN` configured on both sides. Direct SSH status reports its bus limitation and a serve recommendation. The flag does not start a tunnel or change the parent environment. See [performance guidance](../../../docs/performance.md).

@@ -103,7 +103,131 @@ export type IpcDiscoveryState = {
   socketDir?: string;
 };
 
-export type SshExecFn = ExecFn & { ipcState: IpcDiscoveryState };
+export type SshExecFn = ExecFn & {
+  ipcState: IpcDiscoveryState;
+  /**
+   * Resolve `ZSWARM_TMP=auto` once under this caller's budget before parallel
+   * identity/capability probes. Independent of other callers' in-flight work.
+   */
+  prepareIpc: (
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ) => Promise<IpcDirs | undefined>;
+};
+
+/** Positive `auto` IPC hits only; failures/cancels never enter this map. */
+export const DEFAULT_IPC_DISCOVERY_TTL_MS = 15_000;
+export const DEFAULT_IPC_DISCOVERY_CACHE_LIMIT = 512;
+
+type IpcCacheEntry = { dirs: IpcDirs; expiresAt: number };
+
+const ipcDiscoveryCache = new Map<string, IpcCacheEntry>();
+let ipcDiscoveryTtlMs = DEFAULT_IPC_DISCOVERY_TTL_MS;
+let ipcDiscoveryCacheLimit = DEFAULT_IPC_DISCOVERY_CACHE_LIMIT;
+
+const IPC_USER_ENV = [
+  "USER",
+  "USERNAME",
+  "LOGNAME",
+  "HOME",
+  "USERPROFILE",
+  "USERDOMAIN",
+  "SSH_AUTH_SOCK",
+  "PATH",
+  "Path",
+  "XDG_CONFIG_HOME",
+] as const;
+
+/** Fully scoped key so hosts / SSH bins / remote shells / users never collide. */
+export function ipcDiscoveryCacheKey(
+  target: SshTarget,
+  env: NodeJS.ProcessEnv = {},
+): string {
+  const requested = target.tmp?.trim() ?? "";
+  const user = IPC_USER_ENV.map((name) => env[name] ?? "");
+  return JSON.stringify([
+    target.ssh,
+    target.host,
+    target.options,
+    target.remoteBin,
+    target.remoteShell ?? "",
+    target.mode ?? "ssh",
+    requested.toLowerCase() === "auto" ? "auto" : requested,
+    user,
+  ]);
+}
+
+/**
+ * Probe list for `ZSWARM_TMP=auto`. Known Windows (cmd / interactive / .exe)
+ * skips the Unix `ps` fallback; explicit `sh` skips PowerShell. Unknown
+ * `zellij` still tries both — a Windows host with remoteBin=zellij looks Unix.
+ */
+export function ipcDiscoveryProbes(target: SshTarget): string[] {
+  const shell = inferRemoteShell({
+    explicit: target.remoteShell,
+    remoteBin: target.remoteBin,
+    mode: target.mode,
+  });
+  const windows = windowsDiscoverRemote();
+  const unix = unixDiscoverRemote();
+  if (shell === "cmd") return [windows];
+  if (target.remoteShell === "sh") return [unix];
+  return [unix, windows];
+}
+
+export function resetIpcDiscoveryCache(): void {
+  ipcDiscoveryCache.clear();
+  ipcDiscoveryTtlMs = DEFAULT_IPC_DISCOVERY_TTL_MS;
+  ipcDiscoveryCacheLimit = DEFAULT_IPC_DISCOVERY_CACHE_LIMIT;
+}
+
+/** Test helper: shrink the positive-hit TTL without exposing the map. */
+export function setIpcDiscoveryTtlMs(ttlMs: number): void {
+  ipcDiscoveryTtlMs = Math.max(0, ttlMs);
+}
+
+export function peekIpcDiscoveryCache(key: string): IpcDirs | undefined {
+  const entry = ipcDiscoveryCache.get(key);
+  if (!entry) return undefined;
+  if (entry.expiresAt <= Date.now()) {
+    ipcDiscoveryCache.delete(key);
+    return undefined;
+  }
+  return { tmp: entry.dirs.tmp, socketDir: entry.dirs.socketDir };
+}
+
+/**
+ * Canonical SSH + resolved IPC namespace. Listing caches should hash this
+ * (or `ipcState.tmp` / `socketDir` after a refreshed read) so a warmed
+ * socket context matches across `createSshExec` instances.
+ */
+export function sshIpcContextKey(
+  target: SshTarget,
+  env: NodeJS.ProcessEnv = {},
+  ipc?: { tmp?: string; socketDir?: string } | null,
+): string {
+  return JSON.stringify([ipcDiscoveryCacheKey(target, env), ipc?.tmp ?? "", ipc?.socketDir ?? ""]);
+}
+
+/** Test helper: shrink the positive-hit map so eviction is observable. */
+export function setIpcDiscoveryCacheLimit(limit: number): void {
+  ipcDiscoveryCacheLimit = Math.max(1, limit);
+}
+
+export function ipcDiscoveryCacheSize(): number {
+  return ipcDiscoveryCache.size;
+}
+
+function storeIpcDiscovery(key: string, dirs: IpcDirs): void {
+  ipcDiscoveryCache.delete(key);
+  ipcDiscoveryCache.set(key, {
+    dirs: { ...dirs },
+    expiresAt: Date.now() + ipcDiscoveryTtlMs,
+  });
+  while (ipcDiscoveryCache.size > ipcDiscoveryCacheLimit) {
+    ipcDiscoveryCache.delete(ipcDiscoveryCache.keys().next().value!);
+  }
+}
 
 async function discoverRemoteIpc(
   runner: ExecFn,
@@ -111,17 +235,7 @@ async function discoverRemoteIpc(
   remaining: () => number,
   signal?: AbortSignal,
 ): Promise<IpcDirs | undefined> {
-  const shell = inferRemoteShell({
-    explicit: target.remoteShell,
-    remoteBin: target.remoteBin,
-    mode: target.mode,
-  });
-  // `auto` has no tmp yet, so a Windows host with remoteBin=zellij still looks
-  // like Unix. Try both listings; pickIpcDirs ignores lines without --server.
-  const probes =
-    shell === "cmd"
-      ? [windowsDiscoverRemote(), unixDiscoverRemote()]
-      : [unixDiscoverRemote(), windowsDiscoverRemote()];
+  const probes = ipcDiscoveryProbes(target);
   for (const probe of probes) {
     if (signal?.aborted) return undefined;
     const left = remaining();
@@ -130,6 +244,8 @@ async function discoverRemoteIpc(
       timeoutMs: left,
       signal,
     });
+    if (result.code !== 0) continue;
+    if (remaining() <= 0) return undefined;
     const dirs = pickIpcDirs(parseZellijServerPaths(result.stdout));
     if (dirs) return dirs;
   }
@@ -143,23 +259,65 @@ async function discoverRemoteIpc(
 export function createSshExec(
   target: SshTarget,
   env: NodeJS.ProcessEnv,
+  options: { pinIpc?: boolean } = {},
 ): SshExecFn {
   const runner = createExec(target.ssh, env);
-  let cached: IpcDirs | undefined;
-  let autoAttempted = false;
-  const requestedTmp = target.tmp?.trim() || null;
+  const cacheKey = ipcDiscoveryCacheKey(target, env);
+  let autoFailed = false;
+  let pinnedIpc: IpcDirs | undefined;
   const ipcState: IpcDiscoveryState = {
-    requested: requestedTmp,
-    status:
-      !requestedTmp
-        ? "none"
-        : requestedTmp.toLowerCase() === "auto"
-          ? "none"
-          : "skipped",
-    ...(requestedTmp && requestedTmp.toLowerCase() !== "auto"
-      ? { tmp: requestedTmp, socketDir: "" }
-      : {}),
+    requested: null,
+    status: "none",
   };
+
+  function adopt(dirs: IpcDirs): IpcDirs {
+    if (options.pinIpc) {
+      pinnedIpc ??= { ...dirs };
+      dirs = pinnedIpc;
+    }
+    autoFailed = false;
+    ipcState.status = "resolved";
+    ipcState.tmp = dirs.tmp;
+    ipcState.socketDir = dirs.socketDir;
+    return { ...dirs };
+  }
+
+  /** Seed from a positive hit; unpinned execs drop resolved dirs after TTL. */
+  function refreshIpcView(): IpcDiscoveryState {
+    const requested = target.tmp?.trim() || null;
+    ipcState.requested = requested;
+    if (!requested) {
+      ipcState.status = "none";
+      delete ipcState.tmp;
+      delete ipcState.socketDir;
+      return ipcState;
+    }
+    if (requested.toLowerCase() !== "auto") {
+      ipcState.status = "skipped";
+      ipcState.tmp = requested;
+      ipcState.socketDir = "";
+      return ipcState;
+    }
+    // A high-level client pins its namespace so pane lookup and the following
+    // write cannot switch sockets when another caller refreshes discovery.
+    if (pinnedIpc) return ipcState;
+    // Diagnostics describe this exec's last attempt, not a sibling's later
+    // success. A subsequent actual invocation may adopt a positive cache hit.
+    if (autoFailed) return ipcState;
+    const cached = peekIpcDiscoveryCache(cacheKey);
+    if (cached) {
+      adopt(cached);
+      return ipcState;
+    }
+    if (ipcState.status === "resolved") {
+      ipcState.status = "none";
+      delete ipcState.tmp;
+      delete ipcState.socketDir;
+    }
+    return ipcState;
+  }
+
+  refreshIpcView();
 
   async function resolveIpc(
     remaining: () => number,
@@ -178,40 +336,47 @@ export function createSshExec(
       ipcState.socketDir = "";
       return { tmp: requested, socketDir: "" };
     }
-    if (cached) {
-      ipcState.status = "resolved";
-      ipcState.tmp = cached.tmp;
-      ipcState.socketDir = cached.socketDir;
-      return cached;
-    }
+    if (pinnedIpc) return adopt(pinnedIpc);
+    const cached = peekIpcDiscoveryCache(cacheKey);
+    if (cached) return adopt(cached);
     // Do not re-probe after a failed/expired/cancelled attempt on this exec.
-    if (autoAttempted) return undefined;
+    // A later createSshExec with the same key still probes — failures are not
+    // stored, and in-flight work is never shared across callers' budgets.
+    if (autoFailed) return undefined;
     if (signal?.aborted) {
+      autoFailed = true;
       ipcState.status = "cancelled";
       return undefined;
     }
     if (remaining() <= 0) {
+      autoFailed = true;
       ipcState.status = "expired";
       return undefined;
     }
-    autoAttempted = true;
     const dirs = await discoverRemoteIpc(runner, target, remaining, signal);
+    // Another probe on this client may have pinned a namespace while we were
+    // waiting. Its first positive result wins, even if this probe failed.
+    if (pinnedIpc) return adopt(pinnedIpc);
     if (signal?.aborted) {
+      autoFailed = true;
       ipcState.status = "cancelled";
       return undefined;
     }
     if (dirs) {
-      cached = dirs;
-      ipcState.status = "resolved";
-      ipcState.tmp = dirs.tmp;
-      ipcState.socketDir = dirs.socketDir;
-      return dirs;
+      if (remaining() <= 0) {
+        autoFailed = true;
+        ipcState.status = "expired";
+        return undefined;
+      }
+      storeIpcDiscovery(cacheKey, dirs);
+      return adopt(dirs);
     }
+    autoFailed = true;
     ipcState.status = remaining() <= 0 ? "expired" : "failed";
     return undefined;
   }
 
-  const exec: SshExecFn = async (args, options) => {
+  const exec = (async (args: string[], options: ExecOptions) => {
     const deadline = Date.now() + options.timeoutMs;
     const remaining = (): number => Math.max(0, deadline - Date.now());
     const ipc = await resolveIpc(remaining, options.signal);
@@ -244,8 +409,18 @@ export function createSshExec(
       ...options,
       timeoutMs: left,
     });
+  }) as SshExecFn;
+  Object.defineProperty(exec, "ipcState", {
+    enumerable: true,
+    configurable: true,
+    get(): IpcDiscoveryState {
+      return { ...refreshIpcView() };
+    },
+  });
+  exec.prepareIpc = (timeoutMs, signal) => {
+    const deadline = Date.now() + timeoutMs;
+    return resolveIpc(() => Math.max(0, deadline - Date.now()), signal);
   };
-  exec.ipcState = ipcState;
   return exec;
 }
 
