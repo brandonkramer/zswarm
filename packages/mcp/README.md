@@ -43,7 +43,7 @@ labels `[zswarm from=…]` with the sending pane instead of `swarm`.
 `ZSWARM_SSH` or `ZSWARM_SERVE` routes the same tool at a remote crew.
 `ZSWARM_SERVE` may be `host:port` or `ssh://user@host?servePort=9419` (MCP reuses
 a healthy owned tunnel until stdin EOF, then cancels in-flight work and reaps
-the SSH child). Details: the [zswarm README](../../README.md).
+the SSH child). Details: the [zswarm README](../../README.md). Inspect-only `doctor`: [docs/doctor.md](../../docs/doctor.md).
 
 ## License
 

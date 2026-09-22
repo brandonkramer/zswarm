@@ -40,6 +40,7 @@ export const SERVE_PROTOCOL = 1;
 export const SERVE_CONTROL_FIELD = "serveControl";
 export const SERVE_HELLO_CONTROL = "hello";
 export const SERVE_CAPABILITY_HELLO = "hello";
+export const SERVE_CAPABILITY_DOCTOR = "doctor";
 const SERVE_TOKEN_FIELD = "serveToken";
 
 const CORE_VERSION = readCoreVersion();
@@ -63,7 +64,7 @@ export type ServeErrorDetails = {
   delivery: ServeDelivery;
   remedy: string;
 };
-export type ServeCapability = typeof SERVE_CAPABILITY_HELLO;
+export type ServeCapability = typeof SERVE_CAPABILITY_HELLO | typeof SERVE_CAPABILITY_DOCTOR;
 export type ServeHelloData = {
   protocol: number;
   serverId: string;
@@ -221,7 +222,7 @@ function helloData(serverId: string): ServeHelloData {
     hostname: hostname() || "unknown",
     platform: process.platform,
     version: CORE_VERSION,
-    capabilities: [SERVE_CAPABILITY_HELLO],
+    capabilities: [SERVE_CAPABILITY_HELLO, SERVE_CAPABILITY_DOCTOR],
   };
 }
 

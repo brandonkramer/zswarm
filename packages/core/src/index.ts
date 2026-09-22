@@ -105,6 +105,25 @@ export {
 } from "./state.js";
 export { dispatchZswarm, resolveInvocationEnv } from "./ops/dispatch.js";
 export {
+  classifySshFailure,
+  inspectHostCrew,
+  inspectTailscalePeer,
+  isDoctorReport,
+  isDoctorRequiredCheck,
+  runDoctor,
+  DEFAULT_DOCTOR_TIMEOUT_MS,
+  DOCTOR_HOST_INSPECT_FIELD,
+  DOCTOR_HOST_INSPECT_VALUE,
+  TAILSCALE_MAX_BYTES,
+  TAILSCALE_MAX_MS,
+  type DoctorCheck,
+  type DoctorCheckScope,
+  type DoctorCheckState,
+  type DoctorReport,
+  type DoctorRoute,
+  type InspectHostCrewInput,
+} from "./ops/doctor.js";
+export {
   assertOpAllowed,
   assertPaneAllowed,
   isWriteOp,
@@ -146,6 +165,7 @@ export {
   probeServe,
   redactServeSecret,
   SERVE_CALL_TIMEOUT_CAP_MS,
+  SERVE_CAPABILITY_DOCTOR,
   SERVE_CAPABILITY_HELLO,
   SERVE_CONNECT_TIMEOUT_MS,
   SERVE_CONTROL_FIELD,

@@ -31,6 +31,7 @@ Prints JSON. No arguments prints usage, generated from the same schema as the
 MCP tool.
 
 Spawn lifecycle, body files, guarded keys, status tabs and routing context: [crew operations](../../docs/crew-operations.md).
+Inspect-only diagnosis: [doctor](../../docs/doctor.md).
 
 Ops, env, and the event bus: the [zswarm README](../../README.md).
 

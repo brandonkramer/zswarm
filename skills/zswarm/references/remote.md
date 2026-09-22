@@ -82,3 +82,5 @@ host that starts workers. Terminal screen reads do not prove the presence or
 absence of all Zellij overlays; inspect held exit output before recovery.
 
 For frequent status polling, prefer serve beside Zellij with an SSH tunnel. Use `--serve 127.0.0.1:9419 --session crew` (MCP: `serveAddress`) to select an already-open endpoint, or `--serve 'ssh://user@host?servePort=9419'` for a process-owned LocalForward that probes hello before ops. Keep `ZSWARM_SERVE_TOKEN` configured on both sides. Direct SSH status reports its bus limitation and a serve recommendation. `host:port` does not start a tunnel; `ssh://` starts only the local SSH child, never remote serve. See [performance guidance](../../../docs/performance.md).
+
+`zswarm doctor` inspects the same routes without mutation (OpenSSH over Tailscale; not Tailscale SSH). See [doctor](../../../docs/doctor.md).

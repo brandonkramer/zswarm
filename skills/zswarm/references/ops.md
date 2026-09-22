@@ -31,6 +31,7 @@ MCP: `zswarm({ op, ... })`. CLI: `zswarm <op>`. Same surface.
 | `sessions` | Live Zellij session names |
 | `bus` | Event-bus status; `install: true` loads the plugin, `clear: true` forgets it |
 | `serve` | Listen for remote zswarm (`--listen`). `--install` / `--clear` = Windows logon task. MCP cannot listen; set `ZSWARM_SERVE` on the client. See [remote.md](remote.md) |
+| `doctor` | Inspect-only local/SSH/serve diagnosis (no install/fix). See [doctor.md](../../../docs/doctor.md) |
 
 `submit=auto` retries Enter if the paste is still sitting in a TUI composer.
 `submit=double-enter` always sends the extra Enter; `submit=none` skips the check.

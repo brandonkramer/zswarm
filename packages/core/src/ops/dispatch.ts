@@ -61,6 +61,7 @@ import {
   uninstallServeLogon,
 } from "./serve.js";
 import { forwardServe } from "./serve-tunnel.js";
+import { runDoctor } from "./doctor.js";
 
 /**
  * Per-invocation routing from `--local` / `--ssh`. `--local` clears both SSH
@@ -238,6 +239,10 @@ async function dispatchOperation(
     // Policy gates the op before anything touches the session.
     assertOpAllowed(policy, op);
     assertSshGitAllowed(env, op, args);
+    if (op === "doctor") {
+      // Before ordinary serve forwarding and before mandatory session resolution.
+      return await runDoctor(args, deps, context, env, injected);
+    }
     if (op === "serve") {
       if (isTrue(args.clear)) {
         const cleared = await uninstallServeLogon({

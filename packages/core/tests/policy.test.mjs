@@ -97,7 +97,7 @@ test("isWriteOp covers the write set; list/dump/status are reads", () => {
   ]) {
     assert.equal(isWriteOp(op), true, op);
   }
-  for (const op of ["list", "dump", "status", "wait", "tail", "log", "signals"]) {
+  for (const op of ["list", "dump", "status", "wait", "tail", "log", "signals", "doctor"]) {
     assert.equal(isWriteOp(op), false, op);
   }
 });
@@ -120,6 +120,7 @@ test("ZSWARM_READONLY blocks writes but allows list/dump/status", () => {
   assert.doesNotThrow(() => assertOpAllowed(p, "list"));
   assert.doesNotThrow(() => assertOpAllowed(p, "dump"));
   assert.doesNotThrow(() => assertOpAllowed(p, "status"));
+  assert.doesNotThrow(() => assertOpAllowed(p, "doctor"));
 });
 
 test("allowlist matches pane id and title substring (case-insensitive)", () => {

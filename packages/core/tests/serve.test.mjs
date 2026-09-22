@@ -18,6 +18,7 @@ import {
   SERVE_CALL_TIMEOUT_CAP_MS,
   SERVE_CAPTURE_BUDGET_BYTES,
   SERVE_CAPABILITY_HELLO,
+  SERVE_CAPABILITY_DOCTOR,
   SERVE_CONTROL_FIELD,
   SERVE_HELLO_CONTROL,
   SERVE_MAX_HELLO_BYTES,
@@ -420,7 +421,7 @@ test("authenticated hello returns protocol identity and never dispatches", async
     assert.equal(preferred.data.hostname, hostname() || "unknown");
     assert.equal(preferred.data.platform, process.platform);
     assert.equal(preferred.data.version, CORE_VERSION);
-    assert.deepEqual(preferred.data.capabilities, [SERVE_CAPABILITY_HELLO]);
+    assert.deepEqual(preferred.data.capabilities, [SERVE_CAPABILITY_HELLO, SERVE_CAPABILITY_DOCTOR]);
     const compatible = await callServe(label, { op: "hello" }, 2_000, "secret");
     assert.equal(compatible.ok, true);
     assert.equal(compatible.data.serverId, preferred.data.serverId);

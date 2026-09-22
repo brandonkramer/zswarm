@@ -94,3 +94,5 @@ SSH alone does not share git/barrier state: remote worktrees and `signal/await`
 require `serve` on the host that owns the crew.
 
 Ordinary status prefers bus change observations when available. See [polling performance](performance.md) for explicit sampling, listing cache controls, and the recommended Windows serve/tunnel setup.
+
+Inspect-only route diagnosis (`zswarm doctor`) is documented in [doctor](doctor.md).

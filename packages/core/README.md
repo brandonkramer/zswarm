@@ -38,6 +38,8 @@ the SSH port leaves `Port` to OpenSSH instead of forcing 22.
 
 Spawn lifecycle, body files, guarded keys, status tabs and routing context: [crew operations](../../docs/crew-operations.md).
 
+Inspect-only local/SSH/serve diagnosis: [doctor](../../docs/doctor.md).
+
 Ops, env, and the event bus: the [zswarm README](../../README.md).
 
 ## License
