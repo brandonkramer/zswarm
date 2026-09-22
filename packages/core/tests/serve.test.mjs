@@ -211,7 +211,13 @@ test("an injected client is not skipped for ZSWARM_SERVE", async () => {
     { env: { ZSWARM_SERVE: "127.0.0.1:1" } },
   );
   assert.equal(result.ok, true);
-  assert.equal(result.data.sessions[0], "demo");
+  assert.deepEqual(result.data.sessions[0], {
+    name: "demo",
+    exited: false,
+    current: false,
+  });
+  assert.equal(result.data.filter, "live");
+  assert.equal(result.data.transport.kind, "local");
 });
 
 test("startServe requires ZSWARM_SERVE_TOKEN on loopback", async () => {

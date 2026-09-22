@@ -4,6 +4,7 @@ import { loadPolicy, type Policy } from "../policy.js";
 import type { StateStore } from "../state.js";
 import {
   DEFAULT_BUS_KEY,
+  DEFAULT_BUS_TIMEOUT_MS,
   busPluginUrl,
   isBusPluginPane,
   parseBusReply,
@@ -18,8 +19,9 @@ import {
 } from "../zellij/bus.js";
 import type { WaitRequest } from "../zellij/args.js";
 import type { ZellijClient } from "../zellij/client.js";
+import { DEFAULT_TIMEOUT_MS } from "../zellij/binary.js";
 import type { Clock, OpsResult } from "./types.js";
-import { isTrue } from "./util.js";
+import { isTrue, throwIfAborted } from "./util.js";
 
 /**
  * Whether to ask the event-bus plugin, and what to do when it does not answer.
@@ -114,8 +116,11 @@ async function askOnce(
   url: string,
   configKey: string,
   payload: string,
+  timeoutMs: number,
 ): Promise<BusSnapshot | null> {
-  const result = await client.pipePlugin({ session, url, configKey, payload });
+  const result = await client.pipePlugin({
+    session, url, configKey, payload, timeoutMs,
+  });
   return parseBusReply(result.stdout);
 }
 
@@ -129,12 +134,22 @@ async function nudgeManifest(
   client: ZellijClient,
   session: string,
   env: NodeJS.ProcessEnv,
+  remaining: () => number,
 ): Promise<void> {
   if (loadPolicy(env).readOnly) return;
-  const panes = await client.listPanes(session);
+  const listBudget = Math.min(DEFAULT_TIMEOUT_MS, remaining());
+  if (listBudget <= 0) return;
+  const panes = await client.listPanes(session, listBudget);
   const pane = panes.find((p) => !p.isPlugin && !p.exited && p.title.trim());
   if (!pane) return;
-  await client.renamePane({ session, paneId: pane.id, name: pane.title });
+  const renameBudget = Math.min(DEFAULT_TIMEOUT_MS, remaining());
+  if (renameBudget <= 0) return;
+  await client.renamePane({
+    session,
+    paneId: pane.id,
+    name: pane.title,
+    timeoutMs: renameBudget,
+  });
 }
 
 /**
@@ -154,29 +169,46 @@ export async function busSnapshot(
   clock: Clock,
   env: NodeJS.ProcessEnv = process.env,
   payload = "status",
+  opts: { deadlineAt?: number; signal?: AbortSignal } = {},
 ): Promise<{ snapshot: BusSnapshot; configKey: string } | null> {
+  const remaining = (): number => {
+    throwIfAborted(opts.signal);
+    return opts.deadlineAt === undefined
+      ? Infinity
+      : Math.max(0, opts.deadlineAt - clock.now());
+  };
+  if (remaining() <= 0) return null;
   const plan = planBus(client, state, env, session);
   const pluginPath = plan.plugin;
-  if (!plan.enabled || !plan.url || !pluginPath) return null;
+  const url = plan.url;
+  if (!plan.enabled || !url || !pluginPath) return null;
 
   const configKey = answeredWith.get(session) ?? plan.configKey;
-  let snapshot = await askOnce(client, session, plan.url, configKey, payload);
-  if (snapshot && !snapshot.ready) {
-    await clock.sleep(COLD_RETRY_MS);
-    snapshot =
-      (await askOnce(client, session, plan.url, configKey, payload)) ??
-      snapshot;
+  const ask = async (): Promise<BusSnapshot | null> => {
+    const budget = Math.min(DEFAULT_BUS_TIMEOUT_MS, remaining());
+    if (budget <= 0) return null;
+    const snapshot = await askOnce(
+      client, session, url, configKey, payload, budget,
+    );
+    throwIfAborted(opts.signal);
+    return snapshot;
+  };
+  let snapshot = await ask();
+  if (snapshot && !snapshot.ready && remaining() > 0) {
+    await clock.sleep(Math.min(COLD_RETRY_MS, remaining()));
+    snapshot = (await ask()) ?? snapshot;
   }
-  if (snapshot && !snapshot.ready) {
+  if (snapshot && !snapshot.ready && remaining() > 0) {
     try {
-      await nudgeManifest(client, session, env);
-      snapshot =
-        (await askOnce(client, session, plan.url, configKey, payload)) ??
-        snapshot;
+      await nudgeManifest(client, session, env, remaining);
+      snapshot = (await ask()) ?? snapshot;
     } catch {
+      throwIfAborted(opts.signal);
       // A failed nudge must not fail the op — the caller polls instead.
     }
   }
+  // An expired request says nothing about bus health or an empty cold manifest.
+  if (remaining() <= 0 && !snapshot?.ready) return null;
   if (snapshot) {
     answeredWith.set(session, configKey);
     return { snapshot, configKey };
@@ -204,6 +236,7 @@ export async function busScreens(
   paneIds: string[],
   clock: Clock,
   env: NodeJS.ProcessEnv = process.env,
+  timeoutMs?: number,
 ): Promise<Map<string, string> | null> {
   if (paneIds.length < 2) return null;
   const plan = planBus(client, state, env, session);
@@ -214,6 +247,7 @@ export async function busScreens(
     url: plan.url,
     configKey,
     panes: paneIds,
+    timeoutMs,
   });
   const parsed = parseScrollbackReply(reply.stdout);
   if (!parsed || !parsed.ready) return null;
@@ -267,6 +301,7 @@ export async function busChanged(
   session: string,
   paneIds: string[],
   env: NodeJS.ProcessEnv = process.env,
+  timeoutMs?: number,
 ): Promise<BusChanged | null> {
   if (paneIds.length === 0) return null;
   const plan = planBus(client, state, env, session);
@@ -277,6 +312,7 @@ export async function busChanged(
     url: plan.url,
     configKey,
     panes: paneIds,
+    timeoutMs,
   });
   const parsed = parseChangedReply(reply.stdout);
   if (!parsed || !parsed.ready) return null;

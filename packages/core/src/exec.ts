@@ -94,10 +94,22 @@ export function buildSshRemoteCommand(
   return withTmp;
 }
 
+/** Outcome of `ZSWARM_TMP=auto` discovery for session diagnostics. */
+export type IpcDiscoveryState = {
+  requested: string | null;
+  /** `none` = no tmp routing; `resolved`/`failed` only after an auto attempt. */
+  status: "none" | "skipped" | "resolved" | "failed" | "cancelled" | "expired";
+  tmp?: string;
+  socketDir?: string;
+};
+
+export type SshExecFn = ExecFn & { ipcState: IpcDiscoveryState };
+
 async function discoverRemoteIpc(
   runner: ExecFn,
   target: SshTarget,
-  timeoutMs: number,
+  remaining: () => number,
+  signal?: AbortSignal,
 ): Promise<IpcDirs | undefined> {
   const shell = inferRemoteShell({
     explicit: target.remoteShell,
@@ -111,8 +123,12 @@ async function discoverRemoteIpc(
       ? [windowsDiscoverRemote(), unixDiscoverRemote()]
       : [unixDiscoverRemote(), windowsDiscoverRemote()];
   for (const probe of probes) {
+    if (signal?.aborted) return undefined;
+    const left = remaining();
+    if (left <= 0) return undefined;
     const result = await runner([...target.options, target.host, probe], {
-      timeoutMs,
+      timeoutMs: left,
+      signal,
     });
     const dirs = pickIpcDirs(parseZellijServerPaths(result.stdout));
     if (dirs) return dirs;
@@ -127,33 +143,110 @@ async function discoverRemoteIpc(
 export function createSshExec(
   target: SshTarget,
   env: NodeJS.ProcessEnv,
-): ExecFn {
+): SshExecFn {
   const runner = createExec(target.ssh, env);
   let cached: IpcDirs | undefined;
+  let autoAttempted = false;
+  const requestedTmp = target.tmp?.trim() || null;
+  const ipcState: IpcDiscoveryState = {
+    requested: requestedTmp,
+    status:
+      !requestedTmp
+        ? "none"
+        : requestedTmp.toLowerCase() === "auto"
+          ? "none"
+          : "skipped",
+    ...(requestedTmp && requestedTmp.toLowerCase() !== "auto"
+      ? { tmp: requestedTmp, socketDir: "" }
+      : {}),
+  };
 
-  async function resolveIpc(timeoutMs: number): Promise<IpcDirs | undefined> {
+  async function resolveIpc(
+    remaining: () => number,
+    signal?: AbortSignal,
+  ): Promise<IpcDirs | undefined> {
     const requested = target.tmp?.trim();
-    if (!requested) return undefined;
+    if (!requested) {
+      ipcState.requested = null;
+      ipcState.status = "none";
+      return undefined;
+    }
+    ipcState.requested = requested;
     if (requested.toLowerCase() !== "auto") {
+      ipcState.status = "skipped";
+      ipcState.tmp = requested;
+      ipcState.socketDir = "";
       return { tmp: requested, socketDir: "" };
     }
-    if (cached) return cached;
-    const dirs = await discoverRemoteIpc(runner, target, timeoutMs);
-    if (dirs) cached = dirs;
-    return dirs;
+    if (cached) {
+      ipcState.status = "resolved";
+      ipcState.tmp = cached.tmp;
+      ipcState.socketDir = cached.socketDir;
+      return cached;
+    }
+    // Do not re-probe after a failed/expired/cancelled attempt on this exec.
+    if (autoAttempted) return undefined;
+    if (signal?.aborted) {
+      ipcState.status = "cancelled";
+      return undefined;
+    }
+    if (remaining() <= 0) {
+      ipcState.status = "expired";
+      return undefined;
+    }
+    autoAttempted = true;
+    const dirs = await discoverRemoteIpc(runner, target, remaining, signal);
+    if (signal?.aborted) {
+      ipcState.status = "cancelled";
+      return undefined;
+    }
+    if (dirs) {
+      cached = dirs;
+      ipcState.status = "resolved";
+      ipcState.tmp = dirs.tmp;
+      ipcState.socketDir = dirs.socketDir;
+      return dirs;
+    }
+    ipcState.status = remaining() <= 0 ? "expired" : "failed";
+    return undefined;
   }
 
-  return async (args, options) => {
-    const ipc = await resolveIpc(options.timeoutMs);
+  const exec: SshExecFn = async (args, options) => {
+    const deadline = Date.now() + options.timeoutMs;
+    const remaining = (): number => Math.max(0, deadline - Date.now());
+    const ipc = await resolveIpc(remaining, options.signal);
+    if (options.signal?.aborted) {
+      return {
+        code: -1,
+        stdout: "",
+        stderr: `${target.ssh} cancelled`,
+      };
+    }
+    const left = remaining();
+    // Do not launch the target command after the caller's budget is gone —
+    // especially after two discovery probes ate the whole timeout.
+    if (left <= 0) {
+      return {
+        code: -1,
+        stdout: "",
+        stderr: `${target.ssh} timed out after ${options.timeoutMs}ms`,
+      };
+    }
+    // auto discovery failed: still run, but callers read ipcState for reachability.
     const remote = buildSshRemoteCommand(
       target,
       args,
       ipc?.tmp,
-      options.timeoutMs,
+      left,
       ipc?.socketDir,
     );
-    return runner([...target.options, target.host, remote], options);
+    return runner([...target.options, target.host, remote], {
+      ...options,
+      timeoutMs: left,
+    });
   };
+  exec.ipcState = ipcState;
+  return exec;
 }
 
 /** Read stdout until the answer is in hand, then stop caring about the child. */

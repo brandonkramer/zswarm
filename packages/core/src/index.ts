@@ -18,8 +18,13 @@ export {
 } from "./git.js";
 export {
   expandHomePath,
+  looksLikeZswarmBinary,
+  isZellijVersionOutput,
   resolveZellijBinary,
+  resetZellijIdentityCache,
   sanitizeZellijEnv,
+  validateSshDestination,
+  validateSshMode,
   type ZellijExecFn,
   type ZellijExecResult,
 } from "./zellij/binary.js";
@@ -30,8 +35,10 @@ export {
   type ZellijPane,
 } from "./zellij/panes.js";
 export {
+  liveSessionNames,
   parseSessionList,
   resolveSelfPaneId,
+  type ZellijSession,
   type ZellijSessionResolve,
 } from "./zellij/session.js";
 export {
@@ -85,6 +92,7 @@ export {
   createZellijClient,
   type ZellijClient,
   type ZellijClientOptions,
+  type ZellijTransport,
 } from "./zellij/client.js";
 export {
   createStateStore,
@@ -94,7 +102,7 @@ export {
   type StateStore,
   type StateStoreOptions,
 } from "./state.js";
-export { dispatchZswarm } from "./ops/dispatch.js";
+export { dispatchZswarm, resolveInvocationEnv } from "./ops/dispatch.js";
 export {
   assertOpAllowed,
   assertPaneAllowed,
@@ -107,6 +115,8 @@ export {
   createSshExec,
   quoteRemoteArg,
   shellQuote,
+  type IpcDiscoveryState,
+  type SshExecFn,
   type SshTarget,
 } from "./exec.js";
 export { resolveSshTarget } from "./zellij/binary.js";
@@ -145,7 +155,15 @@ export {
 export { parseTabList, resolveTab, type ZellijTab } from "./zellij/tabs.js";
 export { selectTargets } from "./ops/broadcast.js";
 export { diffScreens, cursorKey } from "./ops/tail.js";
-export { classify, lastLine, type PeerState } from "./ops/status.js";
+export {
+  classify,
+  lastLine,
+  mapPool,
+  peerStatus,
+  DEFAULT_STATUS_TIMEOUT_MS,
+  STATUS_DUMP_CONCURRENCY,
+  type PeerState,
+} from "./ops/status.js";
 export {
   normalizeScreen,
   truncateDumpText,

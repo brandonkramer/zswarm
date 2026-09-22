@@ -204,3 +204,19 @@ test("prompt detection tolerates CRLF and trailing blank lines", () => {
   ].join("\n");
   assert.equal(classify({ exited: false, before: screen, after: screen, profile: gemini }), "waiting");
 });
+
+test("mapPool respects concurrency and preserves order", async () => {
+  const { mapPool } = await import("../dist/ops/status.js");
+  let inflight = 0;
+  let peak = 0;
+  const out = await mapPool([1, 2, 3, 4, 5], 2, async (n) => {
+    inflight += 1;
+    peak = Math.max(peak, inflight);
+    await new Promise((r) => setTimeout(r, 20));
+    inflight -= 1;
+    return n * 10;
+  });
+  assert.deepEqual(out, [10, 20, 30, 40, 50]);
+  assert.ok(peak <= 2);
+  assert.ok(peak >= 2);
+});

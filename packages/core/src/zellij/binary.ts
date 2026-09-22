@@ -1,6 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
+import { ZellijError } from "../errors.js";
 import {
   createExec,
   createSshExec,
@@ -31,6 +32,218 @@ export function expandHomePath(
   return join(home, trimmed.slice(2));
 }
 
+/**
+ * True when a path (or basename) is the zswarm CLI rather than Zellij.
+ * Setting ZSWARM_BIN to zswarm makes `list-sessions --short` fail with
+ * "unknown arg: --short" because zswarm re-parses argv as its own CLI.
+ */
+export function looksLikeZswarmBinary(path: string): boolean {
+  const trimmed = path.trim();
+  const base = basename(trimmed).toLowerCase();
+  // Windows paths on a Linux host still use backslashes in env values.
+  const winBase =
+    trimmed.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? base;
+  const name = winBase || base;
+  if (/^zswarm(\.(exe|cmd|js|mjs|cjs))?$/.test(name)) return true;
+  // Native binaries are never the Node CLI wrapper.
+  if (/\.(exe|dll|so|dylib)$/i.test(name)) return false;
+  if (name === "zellij") return false;
+  // Shebang wrappers may keep another basename; sniff a short readable prefix.
+  try {
+    if (!existsSync(trimmed)) return false;
+    const head = readFileSync(trimmed, { encoding: "utf8" }).slice(0, 400);
+    if (head.includes("\0")) return false;
+    return /@zswarm\/cli/.test(head) || /usage:\s*zswarm/i.test(head);
+  } catch {
+    return false;
+  }
+}
+
+export function assertZellijBinaryPath(path: string): void {
+  if (!looksLikeZswarmBinary(path)) return;
+  throw new ZellijError(
+    "zellij_wrong_bin",
+    `ZSWARM_BIN/ZSWARM_PATH points at zswarm (${path}), not Zellij. Set it to the zellij binary (e.g. ~/.local/bin/zellij)`,
+  );
+}
+
+/**
+ * ZSWARM_SSH is a destination, not a full ssh argv.
+ * Accept `user@host` or an SSH config alias; put flags in ZSWARM_SSH_OPTS.
+ */
+export function validateSshDestination(raw: string): string {
+  const host = raw.trim();
+  if (!host) {
+    throw new ZellijError("bad_ssh", "ZSWARM_SSH is empty");
+  }
+  if (/^ssh(\s|$)/i.test(host)) {
+    throw new ZellijError(
+      "bad_ssh",
+      `ZSWARM_SSH should be user@host or an SSH alias, not a full ssh command. Put flags in ZSWARM_SSH_OPTS. Got: ${JSON.stringify(host)}`,
+    );
+  }
+  // Leading dashes are SSH options (`-V`, `-F…`, `-o…`), not destinations.
+  if (host.startsWith("-")) {
+    throw new ZellijError(
+      "bad_ssh",
+      `ZSWARM_SSH looks like an SSH option (${JSON.stringify(host)}); put flags in ZSWARM_SSH_OPTS and set ZSWARM_SSH to user@host or an alias`,
+    );
+  }
+  if (/\s/.test(host)) {
+    throw new ZellijError(
+      "bad_ssh",
+      `ZSWARM_SSH must be a single destination (user@host or alias); put options in ZSWARM_SSH_OPTS. Got: ${JSON.stringify(host)}`,
+    );
+  }
+  if (/[;|&$<>()]/.test(host)) {
+    throw new ZellijError(
+      "bad_ssh",
+      `ZSWARM_SSH contains shell metacharacters; expected user@host or an SSH alias. Got: ${JSON.stringify(host)}`,
+    );
+  }
+  return host;
+}
+
+export function validateSshMode(raw: string): "ssh" | "interactive" {
+  const mode = raw.trim().toLowerCase();
+  if (!mode || mode === "ssh") return "ssh";
+  if (mode === "interactive") return "interactive";
+  throw new ZellijError(
+    "bad_ssh_mode",
+    `ZSWARM_SSH_MODE must be "interactive" or "ssh" (or unset); got ${JSON.stringify(raw.trim())}`,
+  );
+}
+
+/** Cache of verified `zellij --version` probes keyed by target identity. */
+const identityCache = new Set<string>();
+
+/** True when `--version` output is positively Zellij. */
+export function isZellijVersionOutput(stdout: string, stderr = ""): boolean {
+  const text = `${stdout}\n${stderr}`;
+  return /\bzellij\s+\d+\.\d+/i.test(text) || /^\s*zellij\b/im.test(stdout);
+}
+
+/**
+ * Cache key covering the resolved binary and SSH routing that can change the
+ * actual remote executable (opts, mode, remote bin).
+ */
+export function identityCacheKey(
+  zellijPath: string,
+  ssh?: {
+    host: string;
+    options: string[];
+    mode?: string;
+    remoteBin?: string;
+  } | null,
+): string {
+  if (!ssh) return zellijPath;
+  return [
+    zellijPath,
+    ssh.host,
+    ssh.remoteBin ?? "",
+    ssh.mode ?? "ssh",
+    ssh.options.join("\0"),
+  ].join("|");
+}
+
+/**
+ * Confirm the resolved binary is Zellij. Only verified identities are cached.
+ * Transport timeouts leave the cache empty so a later call can retry.
+ * Returns false when verification is unresolved; only true is cached.
+ */
+export async function ensureZellijIdentity(
+  exec: ExecFn,
+  zellijPath: string,
+  timeoutMs = 3_000,
+  cacheKey = zellijPath,
+): Promise<boolean> {
+  if (identityCache.has(cacheKey)) return true;
+  assertZellijBinaryPath(zellijPath);
+  const result = await exec(["--version"], {
+    timeoutMs: Math.min(timeoutMs, 5_000),
+  });
+  const text = `${result.stdout}\n${result.stderr}`;
+  if (/usage:\s*zswarm/i.test(text) || /unknown arg:/i.test(text)) {
+    throw new ZellijError(
+      "zellij_wrong_bin",
+      `resolved binary is zswarm, not Zellij (${zellijPath}). Set ZSWARM_BIN to the zellij executable`,
+    );
+  }
+  if (result.code === NOT_FOUND_EXIT) {
+    throw new ZellijError(
+      "zellij_missing",
+      `zellij binary not found (${zellijPath}); install Zellij ≥ 0.42, add it to PATH, or set ZSWARM_BIN / ZSWARM_PATH`,
+    );
+  }
+  if (result.code === 0) {
+    if (isZellijVersionOutput(result.stdout, result.stderr)) {
+      identityCache.add(cacheKey);
+      return true;
+    }
+    throw new ZellijError(
+      "zellij_wrong_bin",
+      `resolved binary is not Zellij (${zellijPath}); --version returned: ${result.stdout.trim() || result.stderr.trim() || "empty"}`,
+    );
+  }
+  // Timeout / transport failure: leave unresolved so a later call retries.
+  return false;
+}
+
+/**
+ * Probe that the target understands the session-list flags we rely on.
+ * Cached with the same key as identity once verified.
+ * Returns false when the transport cannot verify support.
+ */
+const capabilityCache = new Set<string>();
+
+export async function ensureZellijCapabilities(
+  exec: ExecFn,
+  zellijPath: string,
+  timeoutMs = 3_000,
+  cacheKey = zellijPath,
+): Promise<boolean> {
+  if (capabilityCache.has(cacheKey)) return true;
+  const result = await exec(["list-sessions", "--help"], {
+    timeoutMs: Math.min(timeoutMs, 5_000),
+  });
+  const text = `${result.stdout}\n${result.stderr}`;
+  if (/usage:\s*zswarm/i.test(text)) {
+    throw new ZellijError(
+      "zellij_wrong_bin",
+      `resolved binary is zswarm, not Zellij (${zellijPath})`,
+    );
+  }
+  if (result.code === NOT_FOUND_EXIT) {
+    throw new ZellijError(
+      "zellij_missing",
+      `zellij binary not found (${zellijPath})`,
+    );
+  }
+  // Require the flags this client always passes.
+  if (
+    result.code === 0 &&
+    /--no-formatting/i.test(text) &&
+    /list-sessions/i.test(text)
+  ) {
+    capabilityCache.add(cacheKey);
+    return true;
+  }
+  if (result.code === 0) {
+    throw new ZellijError(
+      "zellij_incompatible",
+      `Zellij at ${zellijPath} does not advertise list-sessions --no-formatting; upgrade Zellij (≥ 0.42) or zswarm`,
+    );
+  }
+  // Soft: leave unresolved on transport failure.
+  return false;
+}
+
+/** Test helper: drop cached identity/capability probes. */
+export function resetZellijIdentityCache(): void {
+  identityCache.clear();
+  capabilityCache.clear();
+}
+
 export function resolveZellijBinary(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
@@ -41,9 +254,13 @@ export function resolveZellijBinary(
     env,
   );
   if (fromEnv && existsSync(fromEnv)) {
+    assertZellijBinaryPath(fromEnv);
     if (/\.cmd$/i.test(fromEnv)) {
       const exe = fromEnv.replace(/\.cmd$/i, ".exe");
-      if (existsSync(exe)) return exe;
+      if (existsSync(exe)) {
+        assertZellijBinaryPath(exe);
+        return exe;
+      }
       const wingetExe = join(
         env.LOCALAPPDATA ||
           join(env.USERPROFILE || env.HOME || homedir(), "AppData", "Local"),
@@ -135,16 +352,17 @@ export function parseSshOpts(raw: string): string[] {
 export function resolveSshTarget(
   env: NodeJS.ProcessEnv = process.env,
 ): SshTarget | null {
-  const host = env.ZSWARM_SSH?.trim();
-  if (!host) return null;
+  const raw = env.ZSWARM_SSH?.trim();
+  if (!raw) return null;
+  const host = validateSshDestination(raw);
   const options = parseSshOpts(env.ZSWARM_SSH_OPTS ?? "");
   if (!options.some((o) => o.startsWith("BatchMode"))) {
     options.unshift("-o", "BatchMode=yes");
   }
   const shellRaw = (env.ZSWARM_REMOTE_SHELL ?? "").trim().toLowerCase();
-  const modeRaw = (env.ZSWARM_SSH_MODE ?? "").trim().toLowerCase();
+  const mode = validateSshMode(env.ZSWARM_SSH_MODE ?? "");
   const tmpRaw = env.ZSWARM_TMP?.trim();
-  const interactive = modeRaw === "interactive";
+  const interactive = mode === "interactive";
   return {
     ssh: env.ZSWARM_SSH_BIN?.trim() || "ssh",
     host,
@@ -152,7 +370,7 @@ export function resolveSshTarget(
     options,
     // Interactive tasks do not inherit the desktop TEMP; discover it unless set.
     tmp: tmpRaw || (interactive ? "auto" : undefined),
-    mode: interactive ? "interactive" : "ssh",
+    mode,
     remoteShell: shellRaw === "cmd" || shellRaw === "sh" ? shellRaw : undefined,
   };
 }

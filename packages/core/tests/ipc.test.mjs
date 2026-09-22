@@ -261,3 +261,40 @@ test("resolveSshTarget keeps quoted ZSWARM_SSH_OPTS as one arg", () => {
     "/home/jane doe/.ssh/id",
   ]);
 });
+
+test("resolveSshTarget rejects command-shaped destinations and bad modes", () => {
+  assert.throws(
+    () => resolveSshTarget({ ZSWARM_SSH: "ssh user@host" }),
+    /ZSWARM_SSH should be user@host/,
+  );
+  assert.throws(
+    () => resolveSshTarget({ ZSWARM_SSH: "user@host -p 22" }),
+    /single destination/,
+  );
+  assert.throws(
+    () => resolveSshTarget({ ZSWARM_SSH: "user@host;rm" }),
+    /metacharacters/,
+  );
+  assert.throws(
+    () => resolveSshTarget({ ZSWARM_SSH: "-V" }),
+    /SSH option/,
+  );
+  assert.throws(
+    () => resolveSshTarget({ ZSWARM_SSH: "-F/tmp/config" }),
+    /SSH option/,
+  );
+  assert.throws(
+    () => resolveSshTarget({ ZSWARM_SSH: "-oProxyCommand=id" }),
+    /SSH option/,
+  );
+  assert.throws(
+    () =>
+      resolveSshTarget({
+        ZSWARM_SSH: "user@host",
+        ZSWARM_SSH_MODE: "desktop",
+      }),
+    /ZSWARM_SSH_MODE must be/,
+  );
+  // Bare host / alias is fine.
+  assert.equal(resolveSshTarget({ ZSWARM_SSH: "myserver" }).host, "myserver");
+});

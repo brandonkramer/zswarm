@@ -84,7 +84,29 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "all",
     type: "boolean",
     flags: ["--all", "-a"],
-    description: "broadcast: every terminal pane in the session",
+    description:
+      "broadcast: every terminal pane in the session; sessions: include EXITED resurrectable sessions",
+  },
+  {
+    name: "live",
+    type: "boolean",
+    flags: ["--live", "--active"],
+    description:
+      "sessions: only live (non-EXITED) sessions — this is the default; use --all to include EXITED",
+  },
+  {
+    name: "local",
+    type: "boolean",
+    flags: ["--local"],
+    description:
+      "route this call to the local machine only — clears ZSWARM_SSH, ZSWARM_SERVE, and remote ZSWARM_TMP for the invocation",
+  },
+  {
+    name: "ssh",
+    type: "string",
+    flags: ["--ssh"],
+    description:
+      "route this call over SSH to user@host (or an alias) for the invocation; clears ZSWARM_SERVE; put flags in ZSWARM_SSH_OPTS",
   },
   {
     name: "group",
@@ -251,7 +273,8 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "timeoutMs",
     type: "number",
     flags: ["--timeout-ms"],
-    description: "wait: give up after this long (default 60000)",
+    description:
+      "wait: give up after this long (default 60000); status: overall deadline for IPC discovery and screen samples (default 30000)",
   },
   {
     name: "keys",
