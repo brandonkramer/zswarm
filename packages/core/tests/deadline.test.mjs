@@ -139,7 +139,7 @@ test("IPC discovery shares one remaining budget across probes", async () => {
 import { appendFileSync } from 'node:fs';
 const cmd = process.argv.at(-1);
 appendFileSync(process.env.PR1_CALL_LOG, JSON.stringify({at:Date.now(),cmd}) + '\\n');
-await new Promise(() => {});
+await new Promise((resolve) => setTimeout(resolve, 10_000));
 `,
     { mode: 0o700 },
   );

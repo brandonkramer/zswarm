@@ -115,7 +115,7 @@ export function validateSshMode(raw: string): "ssh" | "interactive" {
 }
 
 /** Cache of verified `zellij --version` probes keyed by target identity. */
-const identityCache = new Map<string, Promise<void>>();
+const identityCache = new Set<string>();
 
 /** True when `--version` output is positively Zellij. */
 export function isZellijVersionOutput(stdout: string, stderr = ""): boolean {
@@ -149,123 +149,93 @@ export function identityCacheKey(
 /**
  * Confirm the resolved binary is Zellij. Only verified identities are cached.
  * Transport timeouts leave the cache empty so a later call can retry.
+ * Returns false when verification is unresolved; only true is cached.
  */
-export function ensureZellijIdentity(
+export async function ensureZellijIdentity(
   exec: ExecFn,
   zellijPath: string,
   timeoutMs = 3_000,
   cacheKey = zellijPath,
-): Promise<void> {
-  const cached = identityCache.get(cacheKey);
-  if (cached) return cached;
-  const probe = (async () => {
-    assertZellijBinaryPath(zellijPath);
-    const result = await exec(["--version"], {
-      timeoutMs: Math.min(timeoutMs, 5_000),
-    });
-    const text = `${result.stdout}\n${result.stderr}`;
-    if (/usage:\s*zswarm/i.test(text) || /unknown arg:/i.test(text)) {
-      throw new ZellijError(
-        "zellij_wrong_bin",
-        `resolved binary is zswarm, not Zellij (${zellijPath}). Set ZSWARM_BIN to the zellij executable`,
-      );
-    }
-    if (result.code === NOT_FOUND_EXIT) {
-      throw new ZellijError(
-        "zellij_missing",
-        `zellij binary not found (${zellijPath}); install Zellij ≥ 0.42, add it to PATH, or set ZSWARM_BIN / ZSWARM_PATH`,
-      );
-    }
-    if (result.code === 0) {
-      if (isZellijVersionOutput(result.stdout, result.stderr)) return;
-      throw new ZellijError(
-        "zellij_wrong_bin",
-        `resolved binary is not Zellij (${zellijPath}); --version returned: ${result.stdout.trim() || result.stderr.trim() || "empty"}`,
-      );
-    }
-    // Timeout / transport failure: leave unresolved so a later call retries.
-    throw new ZellijError(
-      "zellij_identity_unresolved",
-      `could not verify Zellij identity for ${zellijPath} (exit ${result.code})`,
-    );
-  })();
-  identityCache.set(cacheKey, probe);
-  return probe.catch((err) => {
-    identityCache.delete(cacheKey);
-    // Soft-fail transport so the real operation can still run once; wrong-bin
-    // and missing stay hard errors.
-    if (
-      err instanceof ZellijError &&
-      err.code === "zellij_identity_unresolved"
-    ) {
-      return;
-    }
-    throw err;
+): Promise<boolean> {
+  if (identityCache.has(cacheKey)) return true;
+  assertZellijBinaryPath(zellijPath);
+  const result = await exec(["--version"], {
+    timeoutMs: Math.min(timeoutMs, 5_000),
   });
+  const text = `${result.stdout}\n${result.stderr}`;
+  if (/usage:\s*zswarm/i.test(text) || /unknown arg:/i.test(text)) {
+    throw new ZellijError(
+      "zellij_wrong_bin",
+      `resolved binary is zswarm, not Zellij (${zellijPath}). Set ZSWARM_BIN to the zellij executable`,
+    );
+  }
+  if (result.code === NOT_FOUND_EXIT) {
+    throw new ZellijError(
+      "zellij_missing",
+      `zellij binary not found (${zellijPath}); install Zellij ≥ 0.42, add it to PATH, or set ZSWARM_BIN / ZSWARM_PATH`,
+    );
+  }
+  if (result.code === 0) {
+    if (isZellijVersionOutput(result.stdout, result.stderr)) {
+      identityCache.add(cacheKey);
+      return true;
+    }
+    throw new ZellijError(
+      "zellij_wrong_bin",
+      `resolved binary is not Zellij (${zellijPath}); --version returned: ${result.stdout.trim() || result.stderr.trim() || "empty"}`,
+    );
+  }
+  // Timeout / transport failure: leave unresolved so a later call retries.
+  return false;
 }
 
 /**
  * Probe that the target understands the session-list flags we rely on.
  * Cached with the same key as identity once verified.
+ * Returns false when the transport cannot verify support.
  */
-const capabilityCache = new Map<string, Promise<void>>();
+const capabilityCache = new Set<string>();
 
-export function ensureZellijCapabilities(
+export async function ensureZellijCapabilities(
   exec: ExecFn,
   zellijPath: string,
   timeoutMs = 3_000,
   cacheKey = zellijPath,
-): Promise<void> {
-  const cached = capabilityCache.get(cacheKey);
-  if (cached) return cached;
-  const probe = (async () => {
-    const result = await exec(["list-sessions", "--help"], {
-      timeoutMs: Math.min(timeoutMs, 5_000),
-    });
-    const text = `${result.stdout}\n${result.stderr}`;
-    if (/usage:\s*zswarm/i.test(text)) {
-      throw new ZellijError(
-        "zellij_wrong_bin",
-        `resolved binary is zswarm, not Zellij (${zellijPath})`,
-      );
-    }
-    if (result.code === NOT_FOUND_EXIT) {
-      throw new ZellijError(
-        "zellij_missing",
-        `zellij binary not found (${zellijPath})`,
-      );
-    }
-    // Require the flags this client always passes.
-    if (
-      result.code === 0 &&
-      /--no-formatting/i.test(text) &&
-      /list-sessions/i.test(text)
-    ) {
-      return;
-    }
-    if (result.code === 0) {
-      throw new ZellijError(
-        "zellij_incompatible",
-        `Zellij at ${zellijPath} does not advertise list-sessions --no-formatting; upgrade Zellij (≥ 0.42) or zswarm`,
-      );
-    }
-    // Soft: leave unresolved on transport failure.
-    throw new ZellijError(
-      "zellij_identity_unresolved",
-      `could not probe Zellij capabilities for ${zellijPath}`,
-    );
-  })();
-  capabilityCache.set(cacheKey, probe);
-  return probe.catch((err) => {
-    capabilityCache.delete(cacheKey);
-    if (
-      err instanceof ZellijError &&
-      err.code === "zellij_identity_unresolved"
-    ) {
-      return;
-    }
-    throw err;
+): Promise<boolean> {
+  if (capabilityCache.has(cacheKey)) return true;
+  const result = await exec(["list-sessions", "--help"], {
+    timeoutMs: Math.min(timeoutMs, 5_000),
   });
+  const text = `${result.stdout}\n${result.stderr}`;
+  if (/usage:\s*zswarm/i.test(text)) {
+    throw new ZellijError(
+      "zellij_wrong_bin",
+      `resolved binary is zswarm, not Zellij (${zellijPath})`,
+    );
+  }
+  if (result.code === NOT_FOUND_EXIT) {
+    throw new ZellijError(
+      "zellij_missing",
+      `zellij binary not found (${zellijPath})`,
+    );
+  }
+  // Require the flags this client always passes.
+  if (
+    result.code === 0 &&
+    /--no-formatting/i.test(text) &&
+    /list-sessions/i.test(text)
+  ) {
+    capabilityCache.add(cacheKey);
+    return true;
+  }
+  if (result.code === 0) {
+    throw new ZellijError(
+      "zellij_incompatible",
+      `Zellij at ${zellijPath} does not advertise list-sessions --no-formatting; upgrade Zellij (≥ 0.42) or zswarm`,
+    );
+  }
+  // Soft: leave unresolved on transport failure.
+  return false;
 }
 
 /** Test helper: drop cached identity/capability probes. */

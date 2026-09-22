@@ -183,7 +183,6 @@ export async function dispatchZswarm(
   const op = String(args.op ?? "");
   const verbose = isVerbose(args);
   const signal = deps.signal;
-  throwIfAborted(signal);
   const clock: Clock = {
     now: deps.now ?? (() => Date.now()),
     sleep:
@@ -207,9 +206,10 @@ export async function dispatchZswarm(
   const git = () => (gitClient ??= createGitClient());
   let stateStore: StateStore | null = deps.state ?? null;
   const state = () => (stateStore ??= createStateStore());
-  const env = resolveInvocationEnv(args, deps.env ?? process.env);
-  const policy = deps.policy ?? loadPolicy(env);
   try {
+    throwIfAborted(signal);
+    const env = resolveInvocationEnv(args, deps.env ?? process.env);
+    const policy = deps.policy ?? loadPolicy(env);
     // Policy gates the op before anything touches the session.
     assertOpAllowed(policy, op);
     assertSshGitAllowed(env, op, args);
@@ -494,24 +494,35 @@ export async function dispatchZswarm(
         );
         const deadlineAt = clock.now() + statusBudget;
         const remaining = (): number => Math.max(0, deadlineAt - clock.now());
+        const setupBudget = (): number => {
+          throwIfAborted(signal);
+          const left = remaining();
+          if (left <= 0) {
+            throw new ZellijError("zellij_failed", "status timed out during setup");
+          }
+          return left;
+        };
         throwIfAborted(signal);
 
         const { session } = await client.resolveSession(
           typeof args.session === "string" ? args.session : undefined,
-          remaining() || 1,
+          setupBudget(),
         );
         throwIfAborted(signal);
         // Verbose reports cwd and command, which the plugin manifest lacks.
         const bus =
           verbose || remaining() <= 0
             ? null
-            : await busSnapshot(client, state(), session, clock, env);
+            : await busSnapshot(client, state(), session, clock, env, "status", {
+                deadlineAt,
+                signal,
+              });
         throwIfAborted(signal);
         // Always hand peerStatus the resolved session (and panes) so it does
         // not spend the overall budget resolving again.
         const panes = bus
           ? busToPanes(bus.snapshot)
-          : await client.listPanes(session, remaining() || 1);
+          : await client.listPanes(session, setupBudget());
         throwIfAborted(signal);
         let supplied: {
           session: string;
@@ -571,7 +582,7 @@ export async function dispatchZswarm(
             client.resolvePane(supplied.panes, only);
           } catch {
             // Command-shaped `to` needs the polled list; re-fetch without bus.
-            const polled = await client.listPanes(session, remaining() || 1);
+            const polled = await client.listPanes(session, setupBudget());
             supplied = { session, panes: polled, source: "zellij" };
           }
         }

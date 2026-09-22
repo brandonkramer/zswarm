@@ -131,19 +131,29 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     };
   }
 
-  let identityReady: Promise<void> | null = null;
-  function ensureIdentity(budget = timeoutMs): Promise<void> {
-    if (options.skipIdentityProbe || options.exec) return Promise.resolve();
-    if (!identityReady) {
-      identityReady = (async () => {
-        await ensureZellijIdentity(exec, zellijPath, budget, probeKey);
-        await ensureZellijCapabilities(exec, zellijPath, budget, probeKey);
-      })().catch((err) => {
-        identityReady = null;
-        throw err;
-      });
-    }
-    return identityReady;
+  function operationBudget(budget: number, label: string): () => number {
+    const deadline = Date.now() + budget;
+    return () => {
+      if (options.signal?.aborted) {
+        throw new ZellijError("cancelled", "operation cancelled");
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        throw new ZellijError(
+          "zellij_failed",
+          `${label} timed out after ${budget}ms`,
+        );
+      }
+      return left;
+    };
+  }
+
+  async function ensureIdentity(remaining: () => number): Promise<void> {
+    if (options.skipIdentityProbe || options.exec) return;
+    // Only the helpers' positively verified results are cached. In-flight or
+    // unresolved probes must not tie this call to another operation's budget.
+    await ensureZellijIdentity(exec, zellijPath, remaining(), probeKey);
+    await ensureZellijCapabilities(exec, zellijPath, remaining(), probeKey);
   }
 
   async function run(
@@ -151,8 +161,9 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     label: string,
     callTimeoutMs = timeoutMs,
   ) {
-    await ensureIdentity(callTimeoutMs);
-    const result = await exec(args, { timeoutMs: callTimeoutMs });
+    const remaining = operationBudget(callTimeoutMs, label);
+    await ensureIdentity(remaining);
+    const result = await exec(args, { timeoutMs: remaining() });
     if (result.code === NOT_FOUND_EXIT) {
       throw new ZellijError(
         "zellij_missing",
@@ -179,10 +190,11 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
   async function listSessions(
     callTimeoutMs = timeoutMs,
   ): Promise<ZellijSession[]> {
-    await ensureIdentity(callTimeoutMs);
+    const remaining = operationBudget(callTimeoutMs, "zellij list-sessions");
+    await ensureIdentity(remaining);
     // Keep annotations (EXITED / current); --short drops them.
     const result = await exec(["list-sessions", "--no-formatting"], {
-      timeoutMs: callTimeoutMs,
+      timeoutMs: remaining(),
     });
     if (result.code === NOT_FOUND_EXIT) {
       throw new ZellijError(
@@ -301,6 +313,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     session: string;
     paneId: string;
     name: string;
+    timeoutMs?: number;
   }): Promise<{ paneId: string; session: string; name: string }> {
     const paneId = normalizePaneId(input.paneId);
     if (!input.name.trim()) {
@@ -309,6 +322,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     await run(
       buildRenamePaneArgs(input.session, paneId, input.name),
       "zellij action rename-pane",
+      input.timeoutMs ?? timeoutMs,
     );
     return { paneId, session: input.session, name: input.name };
   }

@@ -181,6 +181,14 @@ export async function peerStatus(
   });
   const deadline = opts.deadlineAt ?? clock.now() + budget;
   const remaining = (): number => Math.max(0, deadline - clock.now());
+  const setupBudget = (): number => {
+    throwIfAborted(signal);
+    const left = remaining();
+    if (left <= 0) {
+      throw new ZellijError("zellij_failed", "status timed out during setup");
+    }
+    return left;
+  };
 
   // Prefer the caller's already-resolved session/panes so dispatch's setup
   // budget is not spent twice.
@@ -189,12 +197,12 @@ export async function peerStatus(
     (
       await client.resolveSession(
         typeof args.session === "string" ? args.session : undefined,
-        remaining() || 1,
+        setupBudget(),
       )
     ).session;
   throwIfAborted(signal);
   const panes =
-    supplied?.panes ?? (await client.listPanes(session, remaining() || 1));
+    supplied?.panes ?? (await client.listPanes(session, setupBudget()));
   throwIfAborted(signal);
   const source = supplied?.source ?? "zellij";
   const only = optionalString(args.to);
@@ -301,11 +309,12 @@ export async function peerStatus(
       // Bus declined — fall through to per-pane dumps.
       before = new Map();
     } else {
-      const gap = Math.min(sampleMs, remaining());
-      if (gap > 0) await clock.sleep(gap);
-      throwIfAborted(signal);
-      const after =
-        remaining() > 0 ? await sampleRound() : new Map<string, string | null>();
+      let after = new Map<string, string | null>();
+      if (remaining() > sampleMs) {
+        await clock.sleep(sampleMs);
+        throwIfAborted(signal);
+        after = await sampleRound();
+      }
       for (const pane of live) {
         samples.set(pane.id, {
           before: before.get(pane.id) ?? null,
@@ -317,7 +326,6 @@ export async function peerStatus(
 
   if (samples.size === 0) {
     // Per-pane sample pairs under bounded concurrency.
-    const roundStart = clock.now();
     await mapPool(live, STATUS_DUMP_CONCURRENCY, async (pane) => {
       throwIfAborted(signal);
       const dumpOne = async (): Promise<string | null> => {
@@ -340,11 +348,15 @@ export async function peerStatus(
       };
       const before = await dumpOne();
       throwIfAborted(signal);
-      const waited = clock.now() - roundStart;
-      const gap = Math.min(sampleMs - waited, remaining());
-      if (gap > 0) await clock.sleep(gap);
-      throwIfAborted(signal);
-      const after = await dumpOne();
+      let after: string | null = null;
+      // This pane's interval starts when its first screen is available. Queue
+      // time and a slow first read cannot replace time between observations.
+      // Without room for the whole interval, keep it unknown rather than idle.
+      if (before !== null && remaining() > sampleMs) {
+        await clock.sleep(sampleMs);
+        throwIfAborted(signal);
+        after = await dumpOne();
+      }
       samples.set(pane.id, { before, after });
     });
   }
