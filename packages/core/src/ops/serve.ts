@@ -11,8 +11,20 @@ export const DEFAULT_SERVE_LISTEN = "127.0.0.1:9419";
 export const SERVE_TASK_NAME = "zswarm-serve";
 /** One JSONL request; a client that never sends newline cannot grow forever. */
 export const SERVE_MAX_REQUEST_BYTES = 1024 * 1024;
-/** One JSONL reply; a truncated flood cannot grow forever on the client. */
-export const SERVE_MAX_REPLY_BYTES = SERVE_MAX_REQUEST_BYTES;
+/**
+ * Zellij `execFile` capture budget (`maxBuffer`). `dump --max 0` can return
+ * that much pane text; serve JSONL is UTF-8 and may expand (newlines → `\n`).
+ */
+export const SERVE_CAPTURE_BUDGET_BYTES = 8 * 1024 * 1024;
+/**
+ * Ordinary JSONL reply cap, UTF-8 bytes of the complete frame including the
+ * terminating newline. Sized for an 8MiB capture with newline escaping (2×)
+ * plus envelope slack. Not a silent truncate: over-cap fails with
+ * `serve_protocol`. Override with `ZSWARM_SERVE_MAX_REPLY_BYTES`.
+ */
+export const SERVE_MAX_REPLY_BYTES = SERVE_CAPTURE_BUDGET_BYTES * 2 + 256 * 1024;
+/** Hello is a small control reply; keep it independent of dump-sized ops. */
+export const SERVE_MAX_HELLO_BYTES = 16 * 1024;
 /** Drop a socket that never finishes a JSONL line. */
 export const SERVE_IDLE_TIMEOUT_MS = 30_000;
 /** Concurrent TCP clients, including in-flight wait ops. */
@@ -422,11 +434,34 @@ function remedyFor(code: string, phase: ServePhase, delivery: ServeDelivery): st
 function asOpsResult(value: unknown): OpsResult | null {
   if (!value || typeof value !== "object") return null;
   const v = value as { ok?: unknown; error?: unknown };
-  if (v.ok === true) return value as OpsResult;
+  if (v.ok === true) {
+    if (!Object.prototype.hasOwnProperty.call(v, "data")) return null;
+    return value as OpsResult;
+  }
   if (v.ok !== false || !v.error || typeof v.error !== "object") return null;
   const error = v.error as { code?: unknown; message?: unknown };
   if (typeof error.code !== "string" || typeof error.message !== "string") return null;
   return value as OpsResult;
+}
+
+/** CLI/MCP inherit `process.env`; a positive integer overrides the default reply cap. */
+export function serveMaxReplyBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.ZSWARM_SERVE_MAX_REPLY_BYTES?.trim();
+  if (!raw) return SERVE_MAX_REPLY_BYTES;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return SERVE_MAX_REPLY_BYTES;
+  return Math.floor(n);
+}
+
+function replyByteLimit(
+  phase: Exclude<ServePhase, "connect">,
+  override: number | undefined,
+): number {
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+    return Math.floor(override);
+  }
+  if (phase === "hello") return SERVE_MAX_HELLO_BYTES;
+  return serveMaxReplyBytes();
 }
 
 function isServeHelloData(data: unknown): data is ServeHelloData {
@@ -468,14 +503,14 @@ function exchangeServe(input: {
   const endpoint = formatListenLabel(host, port);
   const timeoutMs = Math.max(1, input.timeoutMs);
   const deadline = Date.now() + timeoutMs;
-  const maxReplyBytes = input.maxReplyBytes ?? SERVE_MAX_REPLY_BYTES;
+  const maxReplyBytes = replyByteLimit(input.phase, input.maxReplyBytes);
   const remaining = () => Math.max(0, deadline - Date.now());
 
   return new Promise((resolve) => {
     let phase: ServePhase = "connect";
     let sent = false;
     let settled = false;
-    let buf = "";
+    let pending = Buffer.alloc(0);
     let connectTimer: ReturnType<typeof setTimeout> | undefined;
     let waitTimer: ReturnType<typeof setTimeout> | undefined;
     let overallTimer: ReturnType<typeof setTimeout> | undefined;
@@ -497,8 +532,7 @@ function exchangeServe(input: {
       resolve(result);
     };
 
-    const fail = (code: string, message: string) => {
-      const state = delivery();
+    const fail = (code: string, message: string, state: ServeDelivery = delivery()) => {
       finish(serveFail(code, message, {
         phase,
         endpoint,
@@ -522,7 +556,6 @@ function exchangeServe(input: {
     }
 
     socket = connect({ host, port });
-    socket.setEncoding("utf8");
     input.signal?.addEventListener("abort", onAbort, { once: true });
 
     overallTimer = setTimeout(() => {
@@ -567,28 +600,38 @@ function exchangeServe(input: {
       }
     });
 
-    socket.on("data", (chunk: string) => {
+    socket.on("data", (chunk: Buffer | string) => {
       if (settled) return;
-      buf += chunk;
-      if (buf.length > maxReplyBytes) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+      pending = Buffer.concat([pending, bytes]);
+      // Cap counts the complete JSONL frame in UTF-8, including the newline.
+      if (pending.length > maxReplyBytes) {
         fail("serve_protocol", `serve reply exceeded ${maxReplyBytes} bytes`);
         return;
       }
       while (!settled) {
-        const nl = buf.indexOf("\n");
+        const nl = pending.indexOf(0x0a);
         if (nl === -1) return;
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
+        const line = pending.subarray(0, nl).toString("utf8").trim();
+        pending = pending.subarray(nl + 1);
         if (!line) continue;
         try {
           const parsed = asOpsResult(JSON.parse(line) as unknown);
           if (!parsed) {
-            fail("serve_protocol", `zswarm serve at ${endpoint} returned an invalid reply`);
+            fail(
+              "serve_protocol",
+              `zswarm serve at ${endpoint} returned an invalid reply`,
+              "replied",
+            );
             return;
           }
           finish(parsed);
         } catch {
-          fail("serve_protocol", `zswarm serve at ${endpoint} returned non-JSON`);
+          fail(
+            "serve_protocol",
+            `zswarm serve at ${endpoint} returned non-JSON`,
+            "replied",
+          );
         }
         return;
       }
@@ -596,7 +639,7 @@ function exchangeServe(input: {
 
     const onClosed = () => {
       if (settled) return;
-      if (buf.trim()) {
+      if (pending.length > 0) {
         fail("serve_protocol", `zswarm serve at ${endpoint} returned a truncated reply`);
         return;
       }

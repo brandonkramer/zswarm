@@ -16,14 +16,17 @@ import {
   parseListenAddress,
   probeServe,
   SERVE_CALL_TIMEOUT_CAP_MS,
+  SERVE_CAPTURE_BUDGET_BYTES,
   SERVE_CAPABILITY_HELLO,
   SERVE_CONTROL_FIELD,
   SERVE_HELLO_CONTROL,
+  SERVE_MAX_HELLO_BYTES,
   SERVE_MAX_REPLY_BYTES,
   SERVE_PROTOCOL,
   serveCallTimeout,
   serveChildEnv,
   serveLogonCommand,
+  serveMaxReplyBytes,
   redactServeSecret,
   SERVE_TASK_NAME,
   startServe,
@@ -658,9 +661,125 @@ test("oversized replies are bounded and do not echo the body", async () => {
     assert.equal(result.error.code, "serve_protocol");
     assert.match(result.error.message, /exceeded/);
     assert.equal(result.error.message.includes("xxxx"), false);
-    assert.equal(SERVE_MAX_REPLY_BYTES, 1024 * 1024);
+    assert.equal(SERVE_CAPTURE_BUDGET_BYTES, 8 * 1024 * 1024);
+    assert.equal(SERVE_MAX_REPLY_BYTES, SERVE_CAPTURE_BUDGET_BYTES * 2 + 256 * 1024);
+    assert.equal(SERVE_MAX_HELLO_BYTES, 16 * 1024);
+    assert.equal(serveMaxReplyBytes({}), SERVE_MAX_REPLY_BYTES);
+    assert.equal(serveMaxReplyBytes({ ZSWARM_SERVE_MAX_REPLY_BYTES: "80" }), 80);
+    assert.equal(serveMaxReplyBytes({ ZSWARM_SERVE_MAX_REPLY_BYTES: "nope" }), SERVE_MAX_REPLY_BYTES);
   } finally {
     await close();
+  }
+});
+
+test("reply cap counts UTF-8 frame bytes including the newline", async () => {
+  const frame = `${JSON.stringify({ ok: true, data: "é".repeat(40) })}\n`;
+  assert.equal(frame.length, 62);
+  assert.equal(Buffer.byteLength(frame, "utf8"), 102);
+  const marker = "é".repeat(40);
+  const { label, close } = await listenRaw((socket) => {
+    socket.on("data", () => socket.end(frame));
+  });
+  try {
+    const denied = await callServe(label, { op: "ping" }, {
+      timeoutMs: 2_000,
+      token: "secret",
+      maxReplyBytes: 80,
+    });
+    assert.equal(denied.ok, false);
+    assert.equal(denied.error.code, "serve_protocol");
+    assert.match(denied.error.message, /exceeded 80 bytes/);
+    assert.equal(denied.error.message.includes(marker), false);
+    assert.equal(JSON.stringify(denied).includes(marker), false);
+  } finally {
+    await close();
+  }
+});
+
+test("multibyte replies under the UTF-8 cap succeed even when split across chunks", async () => {
+  const frame = Buffer.from(`${JSON.stringify({ ok: true, data: "é".repeat(10) })}\n`, "utf8");
+  assert.ok(frame.length < 80);
+  const splitAt = frame.indexOf(Buffer.from("é", "utf8")) + 1;
+  assert.equal(frame[splitAt - 1], 0xc3);
+  const { label, close } = await listenRaw((socket) => {
+    socket.on("data", () => {
+      socket.write(frame.subarray(0, splitAt));
+      socket.write(frame.subarray(splitAt));
+    });
+  });
+  try {
+    const result = await callServe(label, { op: "ping" }, {
+      timeoutMs: 2_000,
+      token: "secret",
+      maxReplyBytes: 80,
+    });
+    assert.deepEqual(result, { ok: true, data: "é".repeat(10) });
+  } finally {
+    await close();
+  }
+});
+
+test("dump-sized serve replies succeed through dispatch without an SDK override", async () => {
+  const text = "x".repeat(Math.ceil(1.2 * 1024 * 1024));
+  const { label, close } = await startServe(
+    "127.0.0.1:0",
+    async (args) => {
+      assert.equal(args.op, "dump");
+      return {
+        ok: true,
+        data: {
+          session: "crew",
+          to: "1",
+          text,
+          truncated: false,
+          chars: text.length,
+          max: 0,
+        },
+      };
+    },
+    { token: "secret" },
+  );
+  try {
+    const result = await dispatchZswarm(
+      { op: "dump", to: "1", max: 0 },
+      undefined,
+      { env: { ZSWARM_SERVE: label, ZSWARM_SERVE_TOKEN: "secret" } },
+    );
+    assert.equal(result.ok, true, result.ok ? "" : result.error.message);
+    assert.equal(result.data.text.length, text.length);
+    assert.equal(result.data.max, 0);
+    assert.ok(Buffer.byteLength(JSON.stringify(result.data.text), "utf8") > 1024 * 1024);
+  } finally {
+    await close();
+  }
+});
+
+test("success envelopes require a data field; null data is valid", async () => {
+  const replies = [
+    { body: `${JSON.stringify({ ok: true })}\n`, valid: false },
+    { body: `${JSON.stringify({ ok: true, error: { code: "failed", message: "nope" } })}\n`, valid: false },
+    { body: `${JSON.stringify({ ok: true, data: null })}\n`, valid: true },
+    { body: `${JSON.stringify({ ok: true, data: { text: "ok" } })}\n`, valid: true },
+  ];
+  for (const { body, valid } of replies) {
+    const { label, close } = await listenRaw((socket) => {
+      socket.on("data", () => socket.end(body));
+    });
+    try {
+      const result = await callServe(label, { op: "dump" }, 2_000, "secret");
+      if (valid) {
+        assert.equal(result.ok, true, body);
+        assert.equal(Object.hasOwn(result, "data"), true);
+      } else {
+        assert.equal(result.ok, false, body);
+        assert.equal(result.error.code, "serve_protocol");
+        assert.equal(result.error.details.phase, "request");
+        assert.equal(result.error.details.delivery, "replied");
+        assert.equal(JSON.stringify(result).includes(body.trim()), false);
+      }
+    } finally {
+      await close();
+    }
   }
 });
 

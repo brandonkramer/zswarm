@@ -87,6 +87,31 @@ truncated JSONL settles promptly. Serve failures never fall back to SSH.
 Authorization and application errors keep `serve_unauthorized` / their app
 codes and are not labeled as a dead tunnel.
 
+Success JSONL replies must include an own `data` field (`null` is valid).
+`{ "ok": true }` and a success envelope that only carries `error` are
+`serve_protocol` (complete frame, `delivery: "replied"`). Incomplete frames
+stay `uncertain`.
+
+### Reply size
+
+Limits are **UTF-8 bytes of the complete JSONL frame, including the
+terminating newline**. Split multibyte sequences are reassembled before
+decode. The cap is not a silent truncate.
+
+| Limit | Default | Meaning |
+| --- | --- | --- |
+| Zellij capture | 8MiB (`maxBuffer`) | `dump --max 0` / `--full` can return this much pane text |
+| Ordinary serve reply | 16MiB + 256KiB | 8MiB capture with JSON newline escaping (2×) plus envelope slack |
+| Hello reply | 16KiB | Independent of dump-sized ops |
+| Serve request | 1MiB | Unchanged JSONL request bound |
+
+`ZSWARM_SERVE_MAX_REPLY_BYTES` on the **caller** (CLI or MCP environment)
+overrides the ordinary reply cap. Hello stays on its own 16KiB cap. A frame
+over the cap fails promptly with `serve_protocol` and does not echo the
+body. Control-heavy dumps that JSON-escape beyond the default (for example
+`\uXXXX`) can raise that env var; they still fail closed rather than
+truncate.
+
 Protocol codes:
 
 | Code | Meaning |
