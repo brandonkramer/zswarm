@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -230,20 +230,19 @@ export function createStateStore(options: StateStoreOptions = {}) {
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
-        const fd = openSync(lockPath, "wx");
+        // One wx write, not open+write across a JS turn. Empty leftovers are
+        // stolen after LOCK_WAIT_MS; 80 children plus sibling test files on
+        // a few-core macOS runner can sit that long between openSync("wx")
+        // and writing the pid, so a waiter unlinks the empty file, recreates
+        // it, and two processes enter fn() — last-rename drops cursor keys.
+        writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: Date.now() }), {
+          encoding: "utf8",
+          flag: "wx",
+        });
         try {
-          writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
           return fn();
         } finally {
-          // Windows cannot unlink while this handle is open (EPERM). Unix must
-          // unlink *before* close: once the fd is gone, a retry unlink can
-          // land on a successor's wx file.
-          try {
-            if (process.platform !== "win32") unlinkOwnedLock(lockPath);
-          } finally {
-            closeSync(fd);
-            if (process.platform === "win32") unlinkOwnedLock(lockPath);
-          }
+          unlinkOwnedLock(lockPath);
         }
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
