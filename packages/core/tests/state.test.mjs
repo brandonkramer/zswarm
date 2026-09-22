@@ -110,30 +110,22 @@ store.writeCursor(process.argv[3], process.argv[3]);
 `,
   );
   const workers = 80;
+  await Promise.all(
+    Array.from({ length: workers }, (_, i) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [worker, dir, `k${i}`], {
+          stdio: "inherit",
+        });
+        child.on("exit", (code) =>
+          code === 0 ? resolve() : reject(new Error(`worker exit ${code}`)),
+        );
+      }),
+    ),
+  );
   const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
-  const runWave = () =>
-    Promise.all(
-      Array.from({ length: workers }, (_, i) =>
-        new Promise((resolve, reject) => {
-          const child = spawn(process.execPath, [worker, dir, `k${i}`], {
-            stdio: "inherit",
-          });
-          child.on("exit", (code) =>
-            code === 0 ? resolve() : reject(new Error(`worker exit ${code}`)),
-          );
-        }),
-      ),
-    );
-  const missing = () =>
-    Array.from({ length: workers }, (_, i) => `k${i}`).filter(
-      (key) => store.readCursor(key) !== key,
-    );
-  await runWave();
-  // One retry: macOS CI lost a key under concurrent node --test load (null !== k8)
-  // after every worker exited 0. A second wave still has to serialize into the
-  // same lock file.
-  if (missing().length) await runWave();
-  assert.deepEqual(missing(), []);
+  for (let i = 0; i < workers; i++) {
+    assert.equal(store.readCursor(`k${i}`), `k${i}`);
+  }
 });
 
 test("bus markers are per session and inherit a legacy flat file", () => {

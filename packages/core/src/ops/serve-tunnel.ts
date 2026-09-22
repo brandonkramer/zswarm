@@ -138,6 +138,7 @@ type AcquireWaiter = {
   resolve: (result: ServeTunnelAcquireSuccess | OpsResult) => void;
   settled: boolean;
   timer?: ReturnType<typeof setTimeout>;
+  dispose?: () => void;
 };
 
 export function isSshServeTarget(raw: string): boolean {
@@ -484,16 +485,30 @@ export function assertSafeSshTunnelOpts(opts: string[]): void {
       continue;
     }
     // Combined short flags, e.g. -fn / -NTf, or attached-arg forms like -iKEY.
+    // Argument-taking flags consume the rest of the cluster or the next argv
+    // token and validate -o keywords (so -voLocalForward=… cannot skip the guard).
     let j = 1;
     while (j < arg.length) {
       const flag = arg[j]!;
       rejectFlagLetter(flag);
       if (SSH_FLAGS_WITH_ARG.has(flag)) {
-        if (j + 1 < arg.length) break;
-        if (opts[i + 1] === undefined) {
+        let value: string;
+        if (j + 1 < arg.length) {
+          value = arg.slice(j + 1);
+        } else if (opts[i + 1] === undefined) {
           throw new ZellijError("bad_ssh", `ZSWARM_SSH_OPTS -${flag} is missing an argument`);
+        } else {
+          value = opts[++i]!;
         }
-        i += 1;
+        if (flag === "o") {
+          const parsed = parseOptionKeyword(value);
+          rejectForbiddenKeyword(parsed.name, parsed.value);
+        } else if (flag === "S" && value.trim().toLowerCase() !== "none") {
+          throw new ZellijError(
+            "bad_ssh",
+            "ZSWARM_SSH_OPTS must not set ControlPath; zswarm uses -S none",
+          );
+        }
         break;
       }
       j += 1;
@@ -729,18 +744,28 @@ function asHello(data: unknown): ServeHelloData | undefined {
   };
 }
 
-function mergeSignals(...signals: Array<AbortSignal | undefined>): AbortSignal {
+function mergeSignals(...signals: Array<AbortSignal | undefined>): {
+  signal: AbortSignal;
+  dispose: () => void;
+} {
   const ac = new AbortController();
   const abort = () => ac.abort();
+  const attached: AbortSignal[] = [];
+  const dispose = () => {
+    for (const signal of attached) signal.removeEventListener("abort", abort);
+    attached.length = 0;
+  };
   for (const signal of signals) {
     if (!signal) continue;
     if (signal.aborted) {
       ac.abort();
-      return ac.signal;
+      dispose();
+      return { signal: ac.signal, dispose: () => undefined };
     }
     signal.addEventListener("abort", abort, { once: true });
+    attached.push(signal);
   }
-  return ac.signal;
+  return { signal: ac.signal, dispose };
 }
 
 const defaultSpawn: SshTunnelSpawn = (bin, args, options) => {
@@ -799,6 +824,7 @@ export function createServeTunnelManager(
   const queues = new Map<string, AcquireWaiter[]>();
   const running = new Set<string>();
   const pending = new Set<Promise<unknown>>();
+  const inflight = new Set<Promise<unknown>>();
   const closeAbort = new AbortController();
   let closed = false;
 
@@ -1119,15 +1145,52 @@ export function createServeTunnelManager(
     }
   };
 
+  const pruneQueue = (key: string): void => {
+    const remainingWaiters = (queues.get(key) ?? []).filter((waiter) => !waiter.settled);
+    if (remainingWaiters.length === 0) queues.delete(key);
+    else queues.set(key, remainingWaiters);
+  };
+
+  const detachWaiter = (waiter: AcquireWaiter): void => {
+    if (waiter.timer) {
+      clearTimeout(waiter.timer);
+      waiter.timer = undefined;
+    }
+    waiter.dispose?.();
+    waiter.dispose = undefined;
+  };
+
+  const publishWaiter = (
+    waiter: AcquireWaiter,
+    result: ServeTunnelAcquireSuccess | OpsResult,
+  ): boolean => {
+    if (waiter.settled) {
+      if (isAcquireSuccess(result)) void result.handle.release();
+      return false;
+    }
+    waiter.settled = true;
+    if (waiter.timer) {
+      clearTimeout(waiter.timer);
+      waiter.timer = undefined;
+    }
+    waiter.resolve(result);
+    return true;
+  };
+
+  const settleWaiter = (
+    waiter: AcquireWaiter,
+    result: ServeTunnelAcquireSuccess | OpsResult,
+  ): void => {
+    if (!publishWaiter(waiter, result)) return;
+    detachWaiter(waiter);
+  };
+
   const pump = (key: string): void => {
     if (running.has(key)) return;
     const queue = queues.get(key) ?? [];
     const next = queue.find((waiter) => !waiter.settled);
     if (!next) {
-      queues.set(
-        key,
-        queue.filter((waiter) => !waiter.settled),
-      );
+      pruneQueue(key);
       return;
     }
     running.add(key);
@@ -1135,7 +1198,7 @@ export function createServeTunnelManager(
       clearTimeout(next.timer);
       next.timer = undefined;
     }
-    void (async () => {
+    const job = (async () => {
       try {
         if (next.settled) return;
         if (closed) {
@@ -1154,26 +1217,21 @@ export function createServeTunnelManager(
           return;
         }
         const result = await next.run();
+        if (next.settled) {
+          if (isAcquireSuccess(result)) await result.handle.release();
+          return;
+        }
         settleWaiter(next, result);
       } catch (err) {
         settleWaiter(next, fail(err));
       } finally {
         running.delete(key);
-        const remainingWaiters = (queues.get(key) ?? []).filter((waiter) => !waiter.settled);
-        queues.set(key, remainingWaiters);
+        pruneQueue(key);
         pump(key);
       }
     })();
-  };
-
-  const settleWaiter = (
-    waiter: AcquireWaiter,
-    result: ServeTunnelAcquireSuccess | OpsResult,
-  ): void => {
-    if (waiter.settled) return;
-    waiter.settled = true;
-    if (waiter.timer) clearTimeout(waiter.timer);
-    waiter.resolve(result);
+    inflight.add(job);
+    void job.finally(() => inflight.delete(job));
   };
 
   const enqueue = (
@@ -1188,8 +1246,13 @@ export function createServeTunnelManager(
     queue.push(waiter);
     queues.set(key, queue);
     const finishEarly = (result: OpsResult) => {
-      settleWaiter(waiter, result);
+      // Publish the public result first so a forwarded abort cannot overwrite
+      // timeout with cancelled. Abort in-flight work while merge listeners are
+      // still attached, then detach so caller signals do not retain waiters.
+      if (!publishWaiter(waiter, result)) return;
       deadlineAbort.abort();
+      detachWaiter(waiter);
+      pruneQueue(key);
       if (!running.has(key)) pump(key);
     };
     const onCallerAbort = () => {
@@ -1217,6 +1280,11 @@ export function createServeTunnelManager(
       return promise;
     }
     waiter.signal.addEventListener("abort", onCallerAbort, { once: true });
+    const previousDispose = waiter.dispose;
+    waiter.dispose = () => {
+      waiter.signal.removeEventListener("abort", onCallerAbort);
+      previousDispose?.();
+    };
     waiter.timer = setTimeout(onTimeout, Math.max(1, remaining(waiter.deadline)));
     pump(key);
     return promise;
@@ -1228,16 +1296,20 @@ export function createServeTunnelManager(
     const key = serveTunnelCacheKey(target, env);
     const deadline = now() + Math.max(1, opts.timeoutMs);
     const deadlineAbort = new AbortController();
-    const signal = mergeSignals(opts.signal, closeAbort.signal, deadlineAbort.signal);
+    const merged = mergeSignals(opts.signal, closeAbort.signal, deadlineAbort.signal);
     const work = (): Promise<ServeTunnelAcquireSuccess | OpsResult> =>
-      acquireOne(target, env, opts.token, deadline, signal);
-    if (closed) return Promise.resolve(closedResult());
+      acquireOne(target, env, opts.token, deadline, merged.signal);
+    if (closed) {
+      merged.dispose();
+      return Promise.resolve(closedResult());
+    }
     const waiter: AcquireWaiter = {
-      signal,
+      signal: merged.signal,
       deadline,
       run: work,
       resolve: () => undefined,
       settled: false,
+      dispose: merged.dispose,
     };
     const tracked = enqueue(key, waiter, deadlineAbort);
     pending.add(tracked);
@@ -1261,7 +1333,7 @@ export function createServeTunnelManager(
       const entries = [...owned];
       adoptable.clear();
       await Promise.all(entries.map((entry) => stopEntry(entry)));
-      await Promise.allSettled([...pending]);
+      await Promise.allSettled([...inflight, ...pending]);
     },
     ownedCount: () => {
       let n = 0;

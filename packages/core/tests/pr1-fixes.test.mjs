@@ -72,10 +72,10 @@ else console.log("crew");
 // well past the budget; launch-time assertions below detect fresh child budgets.
 // Windows process kill after execFile timeout routinely exceeds 1s of wall
 // clock, and Date.now() vs spawn-option capture can skew remaining by hundreds
-// of ms under concurrent node --test files.
+// of ms under concurrent node --test files. Unix launch slack stays 50ms.
 const statusTimeoutMs = 3000;
 const elapsedSlackMs = process.platform === "win32" ? 2000 : 1000;
-const launchSlackMs = process.platform === "win32" ? 1000 : 200;
+const launchSlackMs = process.platform === "win32" ? 1000 : 50;
 for (const scenario of [
   { name: "identity", delays: { identity: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },
   { name: "capabilities with sampling", delays: { identity: 100, capabilities: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },

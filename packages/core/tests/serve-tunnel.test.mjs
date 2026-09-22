@@ -4,6 +4,7 @@ process.env.ZSWARM_BUS = "0";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
+import { getEventListeners } from "node:events";
 import { createServer } from "node:net";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -278,8 +279,18 @@ test("assertSafeSshTunnelOpts rejects daemonize, combined flags, and whitespace 
   assert.throws(() => assertSafeSshTunnelOpts(["-o", "BatchMode=no"]), /BatchMode/);
   assert.throws(() => assertSafeSshTunnelOpts(["evil-host"]), /destination or remote command/);
   assert.throws(() => assertSafeSshTunnelOpts(["-S", "/tmp/master.sock"]), /ControlPath|-S none/);
+  assert.throws(
+    () => assertSafeSshTunnelOpts(["-voLocalForward=0.0.0.0:18000:127.0.0.1:9419"]),
+    /localforward|extra forwards/i,
+  );
+  assert.throws(
+    () => assertSafeSshTunnelOpts(["-vo", "LocalForward=0.0.0.0:18000:127.0.0.1:9419"]),
+    /localforward|extra forwards/i,
+  );
   assert.doesNotThrow(() => assertSafeSshTunnelOpts(["-o", "ControlMaster=no", "-i", "key"]));
   assert.doesNotThrow(() => assertSafeSshTunnelOpts(["-F", "/tmp/config", "-o", "ProxyJump=bastion"]));
+  assert.doesNotThrow(() => assertSafeSshTunnelOpts(["-voIdentityFile=/tmp/id", "-v"]));
+  assert.doesNotThrow(() => assertSafeSshTunnelOpts(["-vo", "ProxyJump=bastion"]));
 });
 
 test("serveTunnelCacheKey isolates identity and omits the serve token", () => {
@@ -651,6 +662,21 @@ function gate() {
   return { promise, resolve };
 }
 
+function waitGateOrAbort(finish, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve("aborted");
+      return;
+    }
+    const onAbort = () => resolve("aborted");
+    signal?.addEventListener("abort", onAbort, { once: true });
+    finish.promise.then(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve("released");
+    });
+  });
+}
+
 function pidAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -766,6 +792,56 @@ test("ssh -G honors omitted port and private ControlPath/ForkAfterAuthentication
   assert.equal(lines.get("forkafterauthentication"), "no");
   assert.ok(args.includes("ControlPath=none"));
   assert.equal(args[args.indexOf("-S") + 1], "none");
+});
+
+test("clustered -o extra forwards are rejected; legitimate clustered -o still applies", () => {
+  const extra = "LocalForward=0.0.0.0:18000:127.0.0.1:9419";
+  assert.throws(
+    () => buildSshTunnelArgv(parseSshServeTarget("ssh://review-alias"), 18555, {
+      ZSWARM_SSH_OPTS: `-vo${extra}`,
+    }),
+    /localforward|extra forwards/i,
+  );
+  assert.throws(
+    () => buildSshTunnelArgv(parseSshServeTarget("ssh://review-alias"), 18555, {
+      ZSWARM_SSH_OPTS: `-vo ${extra}`,
+    }),
+    /localforward|extra forwards/i,
+  );
+  const identity = "/tmp/zswarm-review-id";
+  const { args } = buildSshTunnelArgv(parseSshServeTarget("ssh://review-alias"), 18555, {
+    ZSWARM_SSH_OPTS: `-voIdentityFile=${identity}`,
+  });
+  assert.ok(args.some((a) => a.includes("IdentityFile") || a === identity));
+  const dir = mkdtempSync(join(tmpdir(), "zswarm-ssh-g-cluster-"));
+  const config = join(dir, "ssh_config");
+  writeFileSync(config, "Host review-alias\n  HostName 127.0.0.1\n");
+  let effective;
+  try {
+    effective = execFileSync("ssh", ["-G", "-F", config, ...args], {
+      encoding: "utf8",
+      timeout: 8_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    rmSync(dir, { recursive: true, force: true });
+    if (err.code === "ENOENT") {
+      assert.equal(args.includes("-p"), false);
+      return;
+    }
+    throw err;
+  }
+  rmSync(dir, { recursive: true, force: true });
+  const localforwards = effective
+    .split(/\r?\n/)
+    .map((line) => line.trim().toLowerCase())
+    .filter((line) => line.startsWith("localforward "));
+  assert.equal(localforwards.some((line) => line.includes("0.0.0.0:18000")), false);
+  assert.ok(
+    localforwards.some((line) => line.includes("18555") && line.includes("9419")),
+    localforwards.join(" | "),
+  );
+  assert.match(effective, /identityfile .*zswarm-review-id/i);
 });
 
 test("parseSshServeTarget rejects option-injection, NULs, and malformed escapes without echoing secrets", () => {
@@ -911,10 +987,13 @@ test("closeAll reaps in-flight startups and rejects later adoption", async (t) =
   const manager = createServeTunnelManager({
     persistIdle: true,
     spawnSsh: fixture.spawn,
-    probe: async (...args) => {
+    probe: async (target, options) => {
       entered.resolve();
-      await finish.promise;
-      return probeServe(...args);
+      await waitGateOrAbort(finish, options?.signal);
+      if (options?.signal?.aborted) {
+        return { ok: false, error: { code: "cancelled", message: "operation cancelled" } };
+      }
+      return probeServe(target, options);
     },
   });
   t.after(() => manager.closeAll());
@@ -954,10 +1033,13 @@ test("queued callers cancel and expire independently of a gated predecessor", as
     persistIdle: true,
     spawnSsh: fixture.spawn,
     now: () => nowMs,
-    probe: async (...args) => {
+    probe: async (target, options) => {
       entered.resolve();
-      await finish.promise;
-      return probeServe(...args);
+      await waitGateOrAbort(finish, options?.signal);
+      if (options?.signal?.aborted) {
+        return { ok: false, error: { code: "cancelled", message: "operation cancelled" } };
+      }
+      return probeServe(target, options);
     },
   });
   t.after(() => manager.closeAll());
@@ -986,6 +1068,113 @@ test("queued callers cancel and expire independently of a gated predecessor", as
   assert.equal(firstResult.ok, true, JSON.stringify(firstResult));
   assert.deepEqual(ops, []);
   await firstResult.handle.release();
+});
+
+test("cancelled acquire releases a lease adopted after the waiter settled", async (t) => {
+  const fixture = sshFixture(t);
+  const server = await startServe(
+    "127.0.0.1:0",
+    async (args) => ({ ok: true, data: { forwarded: args.op } }),
+    { token: "good" },
+  );
+  t.after(() => server.close());
+  const servePort = parseListenAddress(server.label).port;
+  const uri = `ssh://host?servePort=${servePort}`;
+  const keeperManager = createServeTunnelManager({ persistIdle: false, spawnSsh: fixture.spawn });
+  t.after(() => keeperManager.closeAll());
+  const keeper = await keeperManager.acquire(uri, { token: "good", timeoutMs: 8_000 });
+  assert.equal(keeper.ok, true, JSON.stringify(keeper));
+  const keeperChild = fixture.launches[0].child;
+
+  for (let round = 0; round < 3; round++) {
+    const ac = new AbortController();
+    const manager = createServeTunnelManager({
+      persistIdle: false,
+      spawnSsh: fixture.spawn,
+      probe: async (...args) => {
+        const result = await probeServe(...args);
+        queueMicrotask(() => ac.abort());
+        return result;
+      },
+    });
+    t.after(() => manager.closeAll());
+    const acquired = await manager.acquire(uri, {
+      token: "good",
+      timeoutMs: 8_000,
+      signal: ac.signal,
+    });
+    if (acquired.ok) await acquired.handle.release();
+    else {
+      assert.equal(acquired.error.code, "cancelled");
+    }
+    await new Promise((r) => setImmediate(r));
+    const deadline = Date.now() + 3_000;
+    while (manager.ownedCount() > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(manager.ownedCount(), 0, `round ${round} left owned=${manager.ownedCount()}`);
+    const orphan = fixture.launches.at(-1)?.child;
+    assert.ok(orphan);
+    const childDeadline = Date.now() + 3_000;
+    while (
+      orphan.exitCode === null &&
+      orphan.signalCode === null &&
+      Date.now() < childDeadline
+    ) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.notEqual(orphan.exitCode === null && orphan.signalCode === null, true);
+    await manager.closeAll();
+    assert.equal(manager.ownedCount(), 0);
+  }
+
+  assert.equal(keeperChild.exitCode, null);
+  assert.equal(keeperChild.signalCode, null);
+  assert.equal(keeperManager.ownedCount(), 1);
+  await keeper.handle.release();
+});
+
+test("completed acquires detach abort listeners and do not warn", async (t) => {
+  const fixture = sshFixture(t);
+  const warnings = [];
+  const onWarning = (warning) => {
+    warnings.push(warning.name);
+  };
+  process.on("warning", onWarning);
+  t.after(() => process.off("warning", onWarning));
+  const server = await startServe(
+    "127.0.0.1:0",
+    async (args) => ({ ok: true, data: { forwarded: args.op } }),
+    { token: "good" },
+  );
+  t.after(() => server.close());
+  const servePort = parseListenAddress(server.label).port;
+  const uri = `ssh://host?servePort=${servePort}`;
+  const caller = new AbortController();
+  const baseline = getEventListeners(caller.signal, "abort").length;
+  const manager = createServeTunnelManager({ persistIdle: true, spawnSsh: fixture.spawn });
+  t.after(() => manager.closeAll());
+  for (let i = 0; i < 12; i++) {
+    const acquired = await manager.acquire(uri, {
+      token: "good",
+      timeoutMs: 8_000,
+      signal: caller.signal,
+    });
+    assert.equal(acquired.ok, true, JSON.stringify(acquired));
+    await acquired.handle.release();
+  }
+  const cancelled = new AbortController();
+  cancelled.abort();
+  const early = await manager.acquire(uri, {
+    token: "good",
+    timeoutMs: 8_000,
+    signal: cancelled.signal,
+  });
+  assert.equal(early.ok, false);
+  assert.equal(early.error.code, "cancelled");
+  await new Promise((r) => setImmediate(r));
+  assert.equal(getEventListeners(caller.signal, "abort").length, baseline);
+  assert.equal(warnings.includes("MaxListenersExceededWarning"), false, warnings.join(","));
 });
 
 // Windows node --test runs files concurrently. This LISTEN_ONLY fixture holds a
