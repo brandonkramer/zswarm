@@ -1,5 +1,11 @@
 # @zswarm/pi
 
+## 0.1.7
+
+### Patch Changes
+
+- @zswarm/mcp@0.1.7
+
 ## 0.1.6
 
 ### Patch Changes
