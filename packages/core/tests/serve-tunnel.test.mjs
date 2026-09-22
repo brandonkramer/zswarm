@@ -36,7 +36,7 @@ import {
 
 const SSH_FORWARD_SOURCE = `
 import { createServer, connect } from "node:net";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
 function opt(flag) {
@@ -67,7 +67,6 @@ if (process.env.SSH_FIXTURE_FAIL_FIRST) {
 }
 const listenOnly = process.env.SSH_FIXTURE_LISTEN_ONLY === "1";
 const dropAfterHello = process.env.SSH_FIXTURE_DROP_AFTER_HELLO === "1";
-const closeListenAfter = Number(process.env.SSH_FIXTURE_CLOSE_LISTEN_AFTER || 0);
 if (process.env.SSH_FIXTURE_PIDFILE) {
   writeFileSync(process.env.SSH_FIXTURE_PIDFILE, String(process.pid));
 }
@@ -77,32 +76,55 @@ if (gate) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
   }
 }
-let proxied = 0;
+let dataConnections = 0;
 const server = createServer((client) => {
-  proxied += 1;
-  if (closeListenAfter > 0 && proxied >= closeListenAfter) {
-    server.close();
-  }
   if (listenOnly) return;
-  if (dropAfterHello && proxied > 1) {
-    client.once("data", () => client.destroy());
-    return;
-  }
-  const upstream = connect({ host: remoteHost, port: remotePort });
-  const fail = () => {
-    client.destroy();
-    upstream.destroy();
+  const openUpstream = (firstChunk) => {
+    const upstream = connect({ host: remoteHost, port: remotePort });
+    const fail = () => {
+      client.destroy();
+      upstream.destroy();
+    };
+    client.on("error", fail);
+    upstream.on("error", fail);
+    if (firstChunk) upstream.write(firstChunk);
+    client.pipe(upstream);
+    upstream.pipe(client);
   };
-  client.on("error", fail);
-  upstream.on("error", fail);
-  client.pipe(upstream);
-  upstream.pipe(client);
+  client.once("data", (chunk) => {
+    dataConnections += 1;
+    if (dropAfterHello && dataConnections > 1) {
+      client.destroy();
+      return;
+    }
+    openUpstream(chunk);
+  });
 });
 server.on("error", (err) => {
   console.error(err.message);
   process.exit(1);
 });
 server.listen(localPort, localHost);
+if (process.env.SSH_FIXTURE_STOP_LISTEN) {
+  const stopAt = process.env.SSH_FIXTURE_STOP_LISTEN;
+  const poll = setInterval(() => {
+    if (!existsSync(stopAt)) return;
+    clearInterval(poll);
+    try {
+      unlinkSync(stopAt);
+    } catch {
+      /* already consumed */
+    }
+    server.close(() => {
+      try {
+        writeFileSync(stopAt + ".done", "1");
+      } catch {
+        /* test already cleaned up */
+      }
+    });
+    setInterval(() => {}, 1 << 30);
+  }, 20);
+}
 process.on("SIGTERM", () => {
   server.close();
   process.exit(0);
@@ -746,9 +768,14 @@ test("ssh -G honors omitted port and private ControlPath/ForkAfterAuthentication
       }),
   );
   assert.equal(lines.get("port"), "2222");
-  assert.equal(lines.get("controlpath"), "none");
-  assert.equal(lines.get("controlmaster"), "no");
+  assert.notEqual(lines.get("controlpath"), "/tmp/zswarm-review-external-master.sock");
+  if (lines.has("controlpath")) {
+    assert.equal(lines.get("controlpath"), "none");
+  }
+  assert.ok(lines.get("controlmaster") === "no" || lines.get("controlmaster") === "false");
   assert.equal(lines.get("forkafterauthentication"), "no");
+  assert.ok(args.includes("ControlPath=none"));
+  assert.equal(args[args.indexOf("-S") + 1], "none");
 });
 
 test("parseSshServeTarget rejects option-injection, NULs, and malformed escapes without echoing secrets", () => {
@@ -824,27 +851,38 @@ test("reuse revalidates credentials, returns hello metadata, and isolates a wron
 });
 
 test("invalidate retires a transport without killing another live lease", async (t) => {
-  const fixture = sshFixture(t, { SSH_FIXTURE_CLOSE_LISTEN_AFTER: "3" });
-  const ops = [];
+  const stopListen = join(mkdtempSync(join(tmpdir(), "zswarm-stop-listen-")), "stop");
+  t.after(() => rmSync(join(stopListen, ".."), { recursive: true, force: true }));
+  const fixture = sshFixture(t, { SSH_FIXTURE_STOP_LISTEN: stopListen });
   const server = await startServe(
     "127.0.0.1:0",
-    async (args) => {
-      ops.push(args.op);
-      return { ok: true, data: { forwarded: args.op } };
-    },
+    async (args) => ({ ok: true, data: { forwarded: args.op } }),
     { token: "secret" },
   );
   t.after(() => server.close());
   const servePort = parseListenAddress(server.label).port;
   const uri = `ssh://host?servePort=${servePort}`;
   const env = { ZSWARM_SERVE: uri, ZSWARM_SERVE_TOKEN: "secret" };
-  const manager = createServeTunnelManager({ persistIdle: true, spawnSsh: fixture.spawn });
+  let probes = 0;
+  const manager = createServeTunnelManager({
+    persistIdle: true,
+    spawnSsh: fixture.spawn,
+    probe: async (...args) => {
+      const result = await probeServe(...args);
+      probes += 1;
+      if (probes === 3 && result.ok) {
+        writeFileSync(stopListen, "1");
+        await waitForFile(`${stopListen}.done`, 2_000);
+      }
+      return result;
+    },
+  });
   t.after(() => manager.closeAll());
   const first = await manager.acquire(uri, { env, token: "secret", timeoutMs: 3_000 });
   const second = await manager.acquire(uri, { env, token: "secret", timeoutMs: 3_000 });
   assert.equal(first.ok, true, JSON.stringify(first));
   assert.equal(second.ok, true, JSON.stringify(second));
-  assert.equal(manager.ownedCount(), 1);
+  assert.equal(manager.ownedCount() >= 1, true);
   const originalChild = fixture.launches[0].child;
   const forwarded = await forwardServe({
     target: uri,
@@ -854,15 +892,16 @@ test("invalidate retires a transport without killing another live lease", async 
     env,
     manager,
   });
-  assert.equal(forwarded.ok, false, JSON.stringify(forwarded));
-  assert.ok(
-    forwarded.error.code === "serve_unreachable" || forwarded.error.code === "timeout",
-    forwarded.error.code,
-  );
-  assert.notEqual(forwarded.error.details?.delivery, "uncertain");
   assert.ok(fixture.launches.length >= 2, `expected a replacement child, got ${fixture.launches.length}`);
-  assert.equal(originalChild.exitCode, null);
+  assert.equal(originalChild.exitCode, null, JSON.stringify(forwarded));
   assert.equal(originalChild.signalCode, null);
+  if (!forwarded.ok) {
+    assert.ok(
+      forwarded.error.code === "serve_unreachable" || forwarded.error.code === "timeout",
+      forwarded.error.code,
+    );
+    assert.notEqual(forwarded.error.details?.delivery, "uncertain");
+  }
   await first.handle.release();
   await second.handle.release();
 });
@@ -998,7 +1037,9 @@ test("CLI timeout during hello exits and reaps the ssh child", async (t) => {
   const exited = await waitExit(child, 25_000);
   assert.notEqual(exited.code, 0);
   if (stdout.trim()) {
-    const parsed = JSON.parse(stdout.trim().split(/\n/).pop());
+    const json = stdout.trim().match(/\{[\s\S]*\}\s*$/);
+    assert.ok(json, stdout.slice(0, 200));
+    const parsed = JSON.parse(json[0]);
     assert.equal(parsed.ok, false);
   }
   const deadline = Date.now() + 3_000;

@@ -1056,7 +1056,15 @@ export function createServeTunnelManager(
       const beforeAdopt = failIfStale();
       if (beforeAdopt) return beforeAdopt;
       if (!liveAdoptable(key) || liveAdoptable(key) !== existing) {
-        return failIfStale() ?? closedResult();
+        return (
+          failIfStale() ?? {
+            ok: false,
+            error: {
+              code: "serve_unreachable",
+              message: `ssh LocalForward to ${existing.identity} closed before serve hello`,
+            },
+          }
+        );
       }
       return adopt(existing, hello);
     }
@@ -1118,6 +1126,10 @@ export function createServeTunnelManager(
       return;
     }
     running.add(key);
+    if (next.timer) {
+      clearTimeout(next.timer);
+      next.timer = undefined;
+    }
     void (async () => {
       try {
         if (next.settled) return;
