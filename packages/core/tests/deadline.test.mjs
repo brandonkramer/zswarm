@@ -3,10 +3,10 @@ process.env.ZSWARM_LOG = "0";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { nodeFixture } from "../test-support/node-fixture.mjs";
 import {
   createSshExec,
   createZellijClient,
@@ -128,24 +128,19 @@ test("status cancellation during second sample is not a successful partial", asy
   assert.equal(result.error.code, "cancelled");
 });
 
-test("IPC discovery shares one remaining budget across probes", async () => {
-  const fixtureDir = mkdtempSync(join(tmpdir(), "zswarm-ipc-budget-"));
-  const fixture = join(fixtureDir, "ssh-fixture.mjs");
-  const log = join(fixtureDir, "calls.jsonl");
-  writeFileSync(log, "");
-  writeFileSync(
-    fixture,
-    `#!/usr/bin/env node
-import { appendFileSync } from 'node:fs';
+test("IPC discovery shares one remaining budget across probes", async (t) => {
+  const fixture = nodeFixture(t, `
+import { appendFileSync, readFileSync } from 'node:fs';
 const cmd = process.argv.at(-1);
+const first = readFileSync(process.env.PR1_CALL_LOG, 'utf8') === '';
 appendFileSync(process.env.PR1_CALL_LOG, JSON.stringify({at:Date.now(),cmd}) + '\\n');
-await new Promise((resolve) => setTimeout(resolve, 10_000));
-`,
-    { mode: 0o700 },
-  );
+await new Promise((resolve) => setTimeout(resolve, first ? 100 : 10_000));
+`);
+  const log = join(fixture.dir, "calls.jsonl");
+  writeFileSync(log, "");
   const sshExec = createSshExec(
     {
-      ssh: fixture,
+      ssh: fixture.binary,
       host: "test-host",
       remoteBin: "zellij",
       options: [],
@@ -154,19 +149,27 @@ await new Promise((resolve) => setTimeout(resolve, 10_000));
     },
     { ...process.env, PR1_CALL_LOG: log },
   );
+  const timeoutMs = 3000;
   const start = Date.now();
   const result = await sshExec(["list-sessions", "--no-formatting"], {
-    timeoutMs: 300,
+    timeoutMs,
   });
   const elapsed = Date.now() - start;
   const raw = readFileSync(log, "utf8").trim();
   const calls = raw
     ? raw.split("\n").map((line) => JSON.parse(line))
     : [];
-  assert.ok(elapsed < 900, `elapsed ${elapsed}ms with ${calls.length} calls`);
+  assert.ok(elapsed < timeoutMs + 1000, `elapsed ${elapsed}ms with ${calls.length} calls`);
   assert.equal(result.code, -1);
-  // First probe may consume the whole budget; a second must not restart fresh.
-  assert.ok(calls.length <= 2, `expected ≤2 probes, got ${calls.length}`);
+  // Both discovery probes run, but the second cannot restart a fresh budget.
+  assert.equal(calls.length, 2);
+  assert.equal(fixture.launches.length, 2);
+  for (const call of fixture.launches) {
+    const remaining = timeoutMs - (call.at - start);
+    assert.ok(remaining > 0, "probe started after the deadline");
+    assert.ok(call.timeoutMs > 0 && call.timeoutMs <= remaining + 50,
+      `probe got ${call.timeoutMs}ms with ${remaining}ms remaining`);
+  }
   assert.ok(
     sshExec.ipcState.status === "expired" ||
       sshExec.ipcState.status === "failed",
@@ -174,12 +177,8 @@ await new Promise((resolve) => setTimeout(resolve, 10_000));
   );
 });
 
-test("failed auto IPC discovery refuses empty live sessions", async () => {
-  const fixtureDir = mkdtempSync(join(tmpdir(), "zswarm-ipc-fail-"));
-  const fixture = join(fixtureDir, "ssh-fixture.mjs");
-  writeFileSync(
-    fixture,
-    `#!${process.execPath}
+test("failed auto IPC discovery refuses empty live sessions", async (t) => {
+  const fixture = nodeFixture(t, `
 const cmd = process.argv.at(-1);
 if (cmd === 'ps ax -o args=' || cmd.startsWith('powershell.exe')) {
   process.stderr.write('process discovery unavailable');
@@ -191,16 +190,14 @@ if (cmd === 'ps ax -o args=' || cmd.startsWith('powershell.exe')) {
 } else {
   console.log('desktop-crew [Created 1h ago] (EXITED - attach to resurrect)');
 }
-`,
-    { mode: 0o700 },
-  );
+`);
   const result = await dispatchZswarm(
     { op: "sessions" },
     undefined,
     {
       env: {
         ZSWARM_SSH: "test-host",
-        ZSWARM_SSH_BIN: fixture,
+        ZSWARM_SSH_BIN: fixture.binary,
         ZSWARM_REMOTE_BIN: "C:\\Tools\\zellij.exe",
         ZSWARM_TMP: "auto",
         ZSWARM_BUS: "0",
@@ -208,7 +205,7 @@ if (cmd === 'ps ax -o args=' || cmd.startsWith('powershell.exe')) {
     },
   );
   assert.equal(result.ok, false);
-  assert.equal(result.error.code, "ipc_unreachable");
+  assert.equal(result.error.code, "ipc_unreachable", JSON.stringify(result));
   assert.match(result.error.message, /ZSWARM_TMP=auto/);
 });
 
@@ -222,12 +219,13 @@ test("option-shaped ZSWARM_SSH is rejected before contacting ssh", async () => {
   assert.equal(result.error.code, "bad_ssh");
 });
 
-test("non-Zellij --version is rejected and not cached as success", async () => {
+test("non-Zellij --version is rejected and not cached as success", async (t) => {
   resetZellijIdentityCache();
+  const fixture = nodeFixture(t, 'console.log("unrelated executable 1.0");');
   const result = await dispatchZswarm(
     { op: "sessions" },
     undefined,
-    { env: { ZSWARM_BIN: "/bin/echo", ZSWARM_BUS: "0", PATH: "" } },
+    { env: { ZSWARM_BIN: fixture.binary, ZSWARM_BUS: "0", PATH: "" } },
   );
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "zellij_wrong_bin");

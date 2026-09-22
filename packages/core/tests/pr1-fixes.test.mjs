@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import { nodeFixture } from "../test-support/node-fixture.mjs";
 import {
   createStateStore,
   createZellijClient,
@@ -35,11 +36,7 @@ function tempDir(t) {
 
 /** Real child processes exercise identity, capability, and command timeouts. */
 function binaryFixture(t, body) {
-  const dir = tempDir(t);
-  const binary = join(dir, "fixture.mjs");
-  const log = join(dir, "calls.jsonl");
-  writeFileSync(log, "");
-  writeFileSync(binary, `#!${process.execPath}
+  const { dir, binary, launches } = nodeFixture(t, `
 import { appendFileSync, readFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 const args = process.argv.slice(2);
@@ -48,14 +45,17 @@ const op = args.includes("--version") ? "identity"
   : args.includes("pipe") ? "pipe"
   : args.includes("list-panes") ? "panes"
   : args.includes("list-sessions") ? "sessions" : "dump";
-const log = ${JSON.stringify(log)};
+const log = new URL("./calls.jsonl", import.meta.url);
 const previous = readFileSync(log, "utf8").trim().split("\\n").filter(Boolean).map(JSON.parse);
 const seen = previous.filter((call) => call.op === op).length;
 appendFileSync(log, JSON.stringify({ op, at: Date.now() }) + "\\n");
 ${body}
-`, { mode: 0o700 });
+`);
+  const log = join(dir, "calls.jsonl");
+  writeFileSync(log, "");
   return {
     dir,
+    launches,
     env: { ZSWARM_BIN: binary, ZSWARM_BUS: "0", ZSWARM_LOG: "0" },
     calls: () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse),
   };
@@ -68,12 +68,15 @@ else if (op === "panes") console.log(${JSON.stringify(JSON.stringify(rows(2)))})
 else console.log("crew");
 `;
 
+// Leave room for cold Node startup on loaded CI runners. The final stage stalls
+// well past the budget; launch-time assertions below detect fresh child budgets.
+const statusTimeoutMs = 3000;
 for (const scenario of [
-  { name: "identity", delays: { identity: 1400 }, session: "crew", sampleMs: 50, calls: ["identity"] },
-  { name: "capabilities with sampling", delays: { identity: 100, capabilities: 1000, panes: 600 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },
-  { name: "capabilities without sampling", delays: { identity: 100, capabilities: 1000, panes: 600 }, session: "crew", sampleMs: 0, calls: ["identity", "capabilities"] },
-  { name: "session listing", delays: { identity: 100, capabilities: 100, sessions: 1400 }, sampleMs: 50, calls: ["identity", "capabilities", "sessions"] },
-  { name: "pane listing", delays: { identity: 100, capabilities: 100, panes: 1400 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities", "panes"] },
+  { name: "identity", delays: { identity: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity"] },
+  { name: "capabilities with sampling", delays: { identity: 100, capabilities: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },
+  { name: "capabilities without sampling", delays: { identity: 100, capabilities: 10_000 }, session: "crew", sampleMs: 0, calls: ["identity", "capabilities"] },
+  { name: "session listing", delays: { identity: 100, capabilities: 100, sessions: 10_000 }, sampleMs: 50, calls: ["identity", "capabilities", "sessions"] },
+  { name: "pane listing", delays: { identity: 100, capabilities: 100, panes: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities", "panes"] },
 ]) {
   test(`status shares its deadline through real ${scenario.name}`, async (t) => {
     const fixture = binaryFixture(t, `
@@ -82,15 +85,20 @@ ${standardReplies}
 `);
     const start = Date.now();
     const result = await dispatchZswarm({
-      op: "status", session: scenario.session, sampleMs: scenario.sampleMs, timeoutMs: 1000,
+      op: "status", session: scenario.session, sampleMs: scenario.sampleMs, timeoutMs: statusTimeoutMs,
     }, undefined, { env: fixture.env });
     const elapsed = Date.now() - start;
-    assert.ok(elapsed < 1400, `elapsed ${elapsed}ms`);
+    assert.ok(elapsed < statusTimeoutMs + 1000, `elapsed ${elapsed}ms`);
     assert.equal(result.ok, false);
-    assert.equal(result.error.code, "zellij_failed");
+    assert.equal(result.error.code, "zellij_failed", JSON.stringify(result));
     assert.match(result.error.message, /timed out/);
     assert.deepEqual(fixture.calls().map((c) => c.op), scenario.calls);
-    assert.ok(fixture.calls().every((c) => c.at - start < 1000));
+    for (const call of fixture.launches) {
+      const remaining = statusTimeoutMs - (call.at - start);
+      assert.ok(remaining > 0, "child started after the deadline");
+      assert.ok(call.timeoutMs > 0 && call.timeoutMs <= remaining + 50,
+        `${call.args.join(" ")} got ${call.timeoutMs}ms with ${remaining}ms remaining`);
+    }
   });
 }
 
@@ -99,19 +107,21 @@ test("status bounds an enabled slow bus snapshot and skips polling after expiry"
   t.after(resetBusCache);
   const fixture = binaryFixture(t, `
 if (op === "pipe") {
-  await delay(1400);
+  await delay(10_000);
   console.log(${JSON.stringify(busReply(true))});
 } else { ${standardReplies} }
 `);
+  // Stay below the bus's 2500ms per-call cap so the pipe exhausts status itself.
+  const timeoutMs = 2000;
   const start = Date.now();
   const result = await dispatchZswarm({
-    op: "status", session: "crew", sampleMs: 50, timeoutMs: 1000,
+    op: "status", session: "crew", sampleMs: 50, timeoutMs,
   }, undefined, {
     env: { ...fixture.env, ZSWARM_BUS: "1", ZSWARM_BUS_PLUGIN: fixture.env.ZSWARM_BIN },
     state: createStateStore({ dir: join(fixture.dir, "state"), env: {} }),
   });
   const elapsed = Date.now() - start;
-  assert.ok(elapsed < 1300, `elapsed ${elapsed}ms`);
+  assert.ok(elapsed < timeoutMs + 1000, `elapsed ${elapsed}ms`);
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "zellij_failed");
   assert.deepEqual(fixture.calls().map((c) => c.op), ["pipe"]);
@@ -215,12 +225,12 @@ if (op === ${JSON.stringify(probe)}) {
 ${standardReplies}
 `);
       const client = createZellijClient({ env: fixture.env });
-      await assert.rejects(client.listSessions(400), /timed out/);
+      await assert.rejects(client.listSessions(2000), /timed out/);
       if (valid) {
-        assert.equal((await client.listSessions(1500))[0].name, "crew");
-        assert.equal((await client.listSessions(1500))[0].name, "crew");
+        assert.equal((await client.listSessions(5000))[0].name, "crew");
+        assert.equal((await client.listSessions(5000))[0].name, "crew");
       } else {
-        await assert.rejects(client.listSessions(1500), {
+        await assert.rejects(client.listSessions(5000), {
           code: probe === "identity" ? "zellij_wrong_bin" : "zellij_incompatible",
         });
       }
@@ -232,15 +242,21 @@ ${standardReplies}
 
 test("concurrent clients do not inherit an in-flight identity probe's deadline", async (t) => {
   const fixture = binaryFixture(t, `
-if (op === "identity") await delay(800);
+if (op === "identity") await delay(1500);
 ${standardReplies}
 `);
-  const first = createZellijClient({ env: fixture.env }).listSessions(2000);
+  const first = createZellijClient({ env: fixture.env }).listSessions(5000);
+  // Observe failure immediately, including while waiting for the child to log.
+  void first.catch(() => {});
   try {
-    while (fixture.calls().length === 0) await delay(10);
+    const readyDeadline = Date.now() + 3000;
+    while (fixture.calls().length === 0) {
+      assert.ok(Date.now() < readyDeadline, "identity fixture did not start");
+      await delay(10);
+    }
     const start = Date.now();
     await assert.rejects(createZellijClient({ env: fixture.env }).listSessions(150), /timed out/);
-    assert.ok(Date.now() - start < 450);
+    assert.ok(Date.now() - start < 1000);
   } finally {
     assert.equal((await first)[0].name, "crew");
   }
