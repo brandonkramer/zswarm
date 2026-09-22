@@ -9,8 +9,8 @@ MCP: `zswarm({ op, ... })`. CLI: `zswarm <op>`. Same surface.
 | `dump` | Full-screen read; capped at 8000 chars (tail) — expensive vs `tail` |
 | `tail` | Incremental read since last cursor; `reset: true` returns the whole screen |
 | `wait` | Block until quiet or `match`; returns `reason` + a 2000-char tail. Bus holds one pipe for the wait |
-| `status` | busy / waiting / idle / exited; `free[]` = idle ids. `sampleMs: 0` skips sampling. `sinceLast: true` skips the 400ms gap |
-| `keys` | Key specs (`keys: ["Ctrl c"]`) or literal `chars` (+ `enter`) |
+| `status` | busy / waiting / idle / exited / unknown, with tab names/IDs, tab summary and waiting evidence; `free[]` = idle ids. `sampleMs: 0` skips sampling. `sinceLast: true` skips the 400ms gap |
+| `keys` | `expect` is checked before any input. Key specs (`keys: ["Ctrl c"]`) or literal `chars` (+ `enter`) |
 | `interrupt` | `Esc`; `hard: true` sends `Ctrl c` |
 | `spawn` | New pane (`newTab: true` for a fresh tab) with `command`, `cwd`, `name`, `direction`, `floating`; `tab` = tab name; `worktree` isolates on a branch |
 | `close` | Close a pane |
@@ -62,3 +62,26 @@ open; closing it unloads the bus.
 The manifest has no pane command or cwd, so a bus-served `list` omits `command`,
 and `list` with `verbose` / `status --to <command>` keep polling. `status`
 sampling and `wait` use the plugin; `dump` / `tail` stay on the CLI.
+
+## Reliable spawn and handoffs
+
+Keep the returned session + pane ID. Spawn creates once and observes for up to
+`observeMs` (default 3000), within one `timeoutMs` budget (default 30000).
+`created` is the creation acknowledgment; `observed`, `exited`, `observation`,
+`alias.observed`, and `ready` describe what was actually seen. `live` means
+observed and not exited; it does not establish application readiness. An
+observation timeout can accompany `ok: true`: retry reads before spawning again.
+New-tab correlation stays within the returned tab and ambiguous layouts remain
+unresolved. `newTab` + `name` also establishes the terminal alias when observed.
+Pane lookups retry absence for 1000ms; `observeMs: 0` disables retries.
+
+CLI: `send --body-file PATH` reads a local UTF-8 file before remote forwarding;
+`--body-file -` reads stdin. Do not combine with `--body`/`--text`/a positional
+body. Newlines are preserved. MCP uses `body`, never its protocol stdin. Paste
+still uses argv, so reference a shared file for very large handoffs.
+
+For menus: wait for a match and check `reason`, perform one
+`keys --expect TEXT --key Enter`, then wait for the resulting state. `expect`
+also applies to `chars` and `interrupt`. It is a fresh case-insensitive screen
+check, not an atomic transaction. Serialize input per pane and avoid blind
+retries. Waiting evidence is a screen heuristic, not authorization to approve.

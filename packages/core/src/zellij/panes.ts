@@ -82,6 +82,9 @@ export function resolvePane(panes: ZellijPane[], to: string): ZellijPane {
 
   const byTypedId = panes.find((p) => p.id === key.toLowerCase());
   if (byTypedId) return byTypedId;
+  if (/^(terminal|plugin)_\d+$/i.test(key)) {
+    throw new ZellijError("peer_not_found", `pane ${key} is not in the current listing`);
+  }
 
   if (/^\d+$/.test(key)) {
     const terminals = panes.filter(

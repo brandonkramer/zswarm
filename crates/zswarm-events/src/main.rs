@@ -22,6 +22,7 @@ register_plugin!(State);
 struct State {
     panes: Vec<PaneRow>,
     tabs: Vec<String>,
+    tab_ids: Vec<usize>,
     /// How many pushes Zellij has sent us — proof this is event driven.
     pane_updates: u64,
     tab_updates: u64,
@@ -163,7 +164,7 @@ impl State {
         // `ready` is false until Zellij has pushed at least one manifest, so a
         // caller can tell a cold instance from a genuinely empty session.
         format!(
-            "{{\"ok\":true,\"source\":\"plugin\",\"ready\":{},\"paneUpdates\":{},\"tabUpdates\":{},\"tabs\":[{}],\"panes\":[{}]}}",
+            "{{\"ok\":true,\"source\":\"plugin\",\"ready\":{},\"paneUpdates\":{},\"tabUpdates\":{},\"tabs\":[{}],\"tabIds\":[{}],\"panes\":[{}]}}",
             self.pane_updates > 0,
             self.pane_updates,
             self.tab_updates,
@@ -172,6 +173,7 @@ impl State {
                 .map(|t| format!("\"{}\"", escape(t)))
                 .collect::<Vec<_>>()
                 .join(","),
+            self.tab_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","),
             rows.join(",")
         )
     }
@@ -472,8 +474,10 @@ impl ZellijPlugin for State {
                 self.panes = rows;
                 !was_ready
             }
-            Event::TabUpdate(tabs) => {
+            Event::TabUpdate(mut tabs) => {
                 self.tab_updates += 1;
+                tabs.sort_by_key(|t| t.position);
+                self.tab_ids = tabs.iter().map(|t| t.tab_id).collect();
                 self.tabs = tabs.iter().map(|t| t.name.clone()).collect();
                 false
             }

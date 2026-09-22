@@ -1,0 +1,9 @@
+Run this command?
+
+pnpm test
+
+› 1. Allow once
+  2. Allow for this session
+  3. Cancel
+
+Enter to select · Esc to cancel

@@ -360,6 +360,8 @@ test("spawn passes cwd/name/command and reads the new pane id", async () => {
     "reviewer",
     "--direction",
     "right",
+    "--tab-id",
+    "0",
     "--",
     "claude",
     "--model",
@@ -401,7 +403,7 @@ test("spawn tab falls back to diffing the pane list", async () => {
   assert.equal(res.ok, true);
   assert.equal(res.data.tabId, 2);
   assert.equal(res.data.paneId, "terminal_4");
-  assert.equal(res.data.resolvedBy, "diff");
+  assert.equal(res.data.resolvedBy, "tab");
 });
 
 test("spawn rejects a bad direction", async () => {

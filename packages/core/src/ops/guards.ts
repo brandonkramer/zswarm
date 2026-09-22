@@ -1,7 +1,7 @@
 import { ZellijError } from "../errors.js";
 import type { ZellijClient } from "../zellij/client.js";
 import type { ZellijPane } from "../zellij/panes.js";
-import { isTrue } from "./util.js";
+import { isTrue, optionalString, throwIfAborted } from "./util.js";
 
 export function assertNotPlugin(pane: ZellijPane, action: string): void {
   if (pane.isPlugin) {
@@ -63,4 +63,20 @@ export function assertPaneExpects(
     "expect_missing",
     `${paneId} screen does not contain ${JSON.stringify(expect)}`,
   );
+}
+
+/** Check immediately before input. A failed read or mismatch must not write. */
+export async function assertExpectedScreen(
+  client: ZellijClient,
+  session: string,
+  paneId: string,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal);
+  const expect = optionalString(args.expect);
+  if (!expect) return;
+  const screen = await client.dumpPane({ session, paneId });
+  throwIfAborted(signal);
+  assertPaneExpects(screen.text, expect, paneId);
 }

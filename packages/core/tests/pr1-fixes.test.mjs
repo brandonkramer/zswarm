@@ -318,16 +318,10 @@ test("conflicting routing flags return a structured dispatch usage error", async
 });
 
 test("CLI prints structured usage JSON for conflicting routing flags", async () => {
-  // Compile the actual entrypoint in memory so core tests also work on a fresh
-  // checkout without a prebuilt CLI package.
-  const ts = (await import("typescript")).default;
-  const source = readFileSync(new URL("../../cli/src/cli.ts", import.meta.url), "utf8");
-  const { outputText } = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-  });
+  // The root test command builds all packages, including CLI helper modules.
   for (const flags of [["sessions", "--local", "--ssh", "host"], ["--local", "sessions", "--ssh", "host"]]) {
     const result = spawnSync(process.execPath, [
-      "--input-type=module", "--eval", outputText, "--", "zswarm", ...flags,
+      fileURLToPath(new URL("../../cli/dist/cli.js", import.meta.url)), ...flags,
     ], { cwd: new URL("../../cli", import.meta.url), encoding: "utf8", timeout: 5000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 1);

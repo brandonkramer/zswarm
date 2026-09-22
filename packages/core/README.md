@@ -27,7 +27,10 @@ const result = await dispatchZswarm({ op: "list" });
 ```
 
 `dispatchZswarm` builds a Zellij client unless you pass one. The result is
-`{ ok, data }` or `{ ok: false, error }`.
+`{ ok, data }` or `{ ok: false, error }`, with routing `context` once the
+invocation's destination is known.
+
+Spawn lifecycle, body files, guarded keys, status tabs and routing context: [crew operations](../../docs/crew-operations.md).
 
 Ops, env, and the event bus: the [zswarm README](../../README.md).
 

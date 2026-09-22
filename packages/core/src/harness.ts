@@ -52,15 +52,20 @@ const GENERIC_WAITING: readonly RegExp[] = [
 ];
 
 /**
- * Per-harness approval UI observed in this live session. Only gemini and
- * opencode showed full-screen prompts worth naming; codex, cursor, and pi
- * show only the generic shapes so far, and unknown panes get the generic set
- * and nothing else. Mislabelling a working pane as waiting makes a dispatcher
- * type into it, so unobserved prompts stay undetected.
+ * Named approval questions complement structural menu detection in status.
+ * Keep patterns anchored: quoting a prompt in ordinary output is not a menu.
  */
 const WAITING: Record<HarnessName, readonly RegExp[]> = {
-  codex: GENERIC_WAITING,
-  cursor: GENERIC_WAITING,
+  codex: [
+    ...GENERIC_WAITING,
+    /^(?:[›❯>]\s*)?Would you like to run the following command\?/i,
+    /^(?:[›❯>]\s*)?Do you want to (?:run|allow|approve) (?:this|the) (?:command|operation|action)\?/i,
+  ],
+  cursor: [
+    ...GENERIC_WAITING,
+    /^(?:[›❯>]\s*)?(?:Run this command|Allow this command|Do you want to run this command)\?/i,
+    /^(?:[›❯>]\s*)?(?:Allow|Approve) (?:this|the) (?:tool|command|operation)(?: call)?\?/i,
+  ],
   opencode: [...GENERIC_WAITING, /Permission required/i, /Allow once/i],
   gemini: [
     ...GENERIC_WAITING,

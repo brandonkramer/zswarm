@@ -1,6 +1,9 @@
-export type OpsResult =
+import type { RoutingContext } from "./routing.js";
+
+export type OpsResult = (
   | { ok: true; data: unknown }
-  | { ok: false; error: { code: string; message: string } };
+  | { ok: false; error: { code: string; message: string; details?: Record<string, unknown> } }
+) & { context?: RoutingContext };
 
 import type { GitClient } from "../git.js";
 import type { Policy } from "../policy.js";

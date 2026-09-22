@@ -55,7 +55,7 @@ pane's title when `ZELLIJ_PANE_ID` / `ZSWARM_SELF_PANE` is visible, else
 ## Rules
 
 1. Target **pane ids or names** from `list` — do not invent transports.
-2. `rename` right after `spawn`, then target by name.
+2. Keep the session + pane ID returned by `spawn`. Use names once `alias.observed` is true; retry observation before creating a duplicate.
 3. Prefer `send` + `wait` over polling. Prefer `tail` over repeated `dump`.
 4. Check `submitted` on `send`; `false` means the peer never got it.
 5. Prefer `diff` / `checkpoint` over reading a worktree by hand.

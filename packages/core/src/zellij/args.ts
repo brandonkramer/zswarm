@@ -6,6 +6,7 @@ export type PaneDirection = "right" | "left" | "up" | "down";
 
 export type NewPaneInput = {
   session: string;
+  timeoutMs?: number;
   command?: string[];
   cwd?: string | null;
   name?: string | null;
@@ -19,6 +20,7 @@ export type NewPaneInput = {
 
 export type NewTabInput = {
   session: string;
+  timeoutMs?: number;
   command?: string[];
   cwd?: string | null;
   name?: string | null;
