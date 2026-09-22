@@ -79,6 +79,11 @@ test("parseCliArgv maps flags onto dispatch args", () => {
     op: "status",
     timeoutMs: 5000,
   });
+  assert.deepEqual(parseCliArgv(["doctor", "--session", "crew", "--timeout-ms", "10000"]), {
+    op: "doctor",
+    session: "crew",
+    timeoutMs: 10000,
+  });
   assert.deepEqual(parseCliArgv(["list", "--local"]), {
     op: "list",
     local: true,

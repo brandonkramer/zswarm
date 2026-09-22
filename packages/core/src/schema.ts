@@ -33,6 +33,7 @@ export const OP_NAMES = [
   "checkpoint",
   "bus",
   "serve",
+  "doctor",
 ] as const;
 
 export type OpName = (typeof OP_NAMES)[number];
@@ -296,7 +297,7 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "number",
     flags: ["--timeout-ms"],
     description:
-      "wait: timeout (default 60000); status/spawn: overall deadline (default 30000), including setup and observation",
+      "wait: timeout (default 60000); status/spawn: overall deadline (default 30000); doctor: overall deadline (default 10000), including Tailscale/SSH/hello/host checks",
   },
   {
     name: "keys",
@@ -558,6 +559,7 @@ export function cliUsage(): string {
     "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force). --expect requires the screen to contain a substring first.",
     "Bus: `zswarm bus --install` once per Zellij session. `--force` closes orphan bus panes and reloads; do not use it as a retry.",
     "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE / --serve (host:port, tcp://, or ssh://user@host?servePort=9419) plus ZSWARM_SERVE_TOKEN. Serve binds loopback only and always requires a token. ssh:// does not start remote serve.",
+    "Doctor: `zswarm doctor --session crew` inspects local, --ssh, and --serve routes without installs, pane changes, or plugin launch. See docs/doctor.md.",
     "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZSWARM_FROM, ZELLIJ_PANE_ID, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_SSH_BIN, ZSWARM_SSH_OPTS, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN, ZSWARM_CACHE_TTL_MS",
     "",
   );

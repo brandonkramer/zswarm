@@ -60,6 +60,7 @@ import {
   serveCallTimeout,
   uninstallServeLogon,
 } from "./serve.js";
+import { doctorOp } from "./doctor.js";
 import { forwardServe } from "./serve-tunnel.js";
 
 /**
@@ -238,6 +239,11 @@ async function dispatchOperation(
     // Policy gates the op before anything touches the session.
     assertOpAllowed(policy, op);
     assertSshGitAllowed(env, op, args);
+    if (op === "doctor") {
+      // Before serve forwarding and session resolution so a dead tunnel still
+      // yields controller findings. Policy already ran.
+      return await doctorOp(args, injected, deps, context, env, clock);
+    }
     if (op === "serve") {
       if (isTrue(args.clear)) {
         const cleared = await uninstallServeLogon({

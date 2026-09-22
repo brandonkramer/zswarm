@@ -121,6 +121,7 @@ zswarm await --channel tests --count 3          # Wait for 3 worker signals
 | `rename` / `focus` | Retitle pane/tab or focus pane | `to`, `tab`, `name` |
 | `tabs` / `layout` / `stack` | Inspect tabs, layout KDL, or stack panes | `to`, `max` |
 | `bus` / `log` | Event bus plugin management & delivery log | `install`, `clear`, `failed`, `limit` |
+| `doctor` | Inspect-only route/SSH/serve/Zellij/bus diagnostics | `session`, `timeoutMs` (default 10000) |
 
 ---
 
@@ -220,6 +221,8 @@ zswarm --serve 'ssh://Administrator@host:22?servePort=9419' status --session cre
 ---
 
 For spawn lifecycle fields, file/stdin handoffs, guarded menu input, tab summaries, and routing diagnostics, see [Reliable crew operations](docs/crew-operations.md).
+
+For layered inspect-only diagnostics (`zswarm doctor`), see [Doctor](docs/doctor.md).
 
 For repeated status calls, see [polling performance and serve/tunnel setup](docs/performance.md).
 

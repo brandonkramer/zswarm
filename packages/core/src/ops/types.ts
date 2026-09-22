@@ -22,6 +22,15 @@ export type DispatchDeps = {
   signal?: AbortSignal;
   /** Process-owned ssh:// LocalForward manager. CLI disposes; MCP reuses. */
   serveTunnels?: ServeTunnelManager;
+  /**
+   * Test seam for optional Tailscale `status --json`. Default runs the
+   * `tailscale` CLI with a bounded timeout and output cap.
+   */
+  tailscaleStatus?: (input: {
+    timeoutMs: number;
+    signal?: AbortSignal;
+    env: NodeJS.ProcessEnv;
+  }) => Promise<{ code: number; stdout: string; stderr: string }>;
 };
 
 export type Clock = {

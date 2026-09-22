@@ -216,6 +216,21 @@ export {
 } from "./ops/util.js";
 export type { RoutingContext } from "./ops/routing.js";
 export type { DispatchDeps, OpsResult } from "./ops/types.js";
+export {
+  DEFAULT_DOCTOR_TIMEOUT_MS,
+  DOCTOR_FAILED_CODE,
+  DOCTOR_SCOPE_FIELD,
+  DOCTOR_SCOPE_HOST,
+  DOCTOR_TAILSCALE_MAX_MS,
+  doctorOp,
+  inspectDoctorHost,
+  type DoctorCheck,
+  type DoctorCheckScope,
+  type DoctorCheckState,
+  type DoctorReport,
+  type DoctorRoute,
+  type HostInspectInput,
+} from "./ops/doctor.js";
 export { normalizeKey, normalizeKeys, tokenizeCommand } from "./keys.js";
 export {
   cliUsage,
