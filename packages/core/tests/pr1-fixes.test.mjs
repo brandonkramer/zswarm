@@ -70,7 +70,12 @@ else console.log("crew");
 
 // Leave room for cold Node startup on loaded CI runners. The final stage stalls
 // well past the budget; launch-time assertions below detect fresh child budgets.
+// Windows process kill after execFile timeout routinely exceeds 1s of wall
+// clock, and Date.now() vs spawn-option capture can skew remaining by hundreds
+// of ms under concurrent node --test files.
 const statusTimeoutMs = 3000;
+const elapsedSlackMs = process.platform === "win32" ? 2000 : 1000;
+const launchSlackMs = process.platform === "win32" ? 1000 : 200;
 for (const scenario of [
   { name: "identity", delays: { identity: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },
   { name: "capabilities with sampling", delays: { identity: 100, capabilities: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },
@@ -88,7 +93,7 @@ ${standardReplies}
       op: "status", session: scenario.session, sampleMs: scenario.sampleMs, timeoutMs: statusTimeoutMs,
     }, undefined, { env: fixture.env });
     const elapsed = Date.now() - start;
-    assert.ok(elapsed < statusTimeoutMs + 1000, `elapsed ${elapsed}ms`);
+    assert.ok(elapsed < statusTimeoutMs + elapsedSlackMs, `elapsed ${elapsed}ms`);
     assert.equal(result.ok, false);
     assert.equal(result.error.code, "zellij_failed", JSON.stringify(result));
     assert.match(result.error.message, /timed out/);
@@ -98,7 +103,7 @@ ${standardReplies}
     for (const call of fixture.launches) {
       const remaining = statusTimeoutMs - (call.at - start);
       assert.ok(remaining > 0, "child started after the deadline");
-      assert.ok(call.timeoutMs > 0 && call.timeoutMs <= remaining + 200,
+      assert.ok(call.timeoutMs > 0 && call.timeoutMs <= remaining + launchSlackMs,
         `${call.args.join(" ")} got ${call.timeoutMs}ms with ${remaining}ms remaining`);
     }
   });
