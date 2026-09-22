@@ -3,7 +3,6 @@ process.env.ZSWARM_BUS = "0";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +21,7 @@ import {
   mcpInputSchema,
   OP_NAMES,
   parseCliArgv,
+  parseSshServeTarget,
   probeServe,
   serveChildEnv,
   startServe,
@@ -42,38 +42,6 @@ const MUTATION_NEEDLES = [
   "write-chars",
   "schtasks",
 ];
-
-const SSH_FORWARD_SOURCE = `
-import { createServer, connect } from "node:net";
-import { existsSync } from "node:fs";
-const args = process.argv.slice(2);
-function opt(flag) {
-  const i = args.indexOf(flag);
-  return i === -1 ? undefined : args[i + 1];
-}
-const forward = opt("-L");
-const parts = forward.split(":");
-const localHost = parts[0];
-const localPort = Number(parts[1]);
-const remoteHost = parts[2];
-const remotePort = Number(parts[3]);
-const gate = process.env.SSH_FIXTURE_GATE;
-if (gate) {
-  while (!existsSync(gate)) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
-  }
-}
-const server = createServer((client) => {
-  const upstream = connect({ host: remoteHost, port: remotePort });
-  const fail = () => { client.destroy(); upstream.destroy(); };
-  client.on("error", fail);
-  upstream.on("error", fail);
-  client.pipe(upstream);
-  upstream.pipe(client);
-});
-server.listen(localPort, localHost);
-process.on("SIGTERM", () => { server.close(); process.exit(0); });
-`;
 
 function tempDir(t) {
   const dir = mkdtempSync(join(tmpdir(), "zswarm-doctor-"));
@@ -220,23 +188,74 @@ function listenLegacy(handler) {
   });
 }
 
-function sshFixture(t, extraEnv = {}) {
-  const dir = tempDir(t);
-  const file = join(dir, "ssh-fixture.mjs");
-  writeFileSync(file, SSH_FORWARD_SOURCE);
-  const launches = [];
-  return {
-    file,
-    launches,
-    spawn(bin, args, opts) {
-      const child = spawn(process.execPath, [file, ...args], {
-        ...opts,
-        env: { ...process.env, ...extraEnv, ...(opts?.env ?? {}) },
+function spawnSshMustNotRun(bin, args) {
+  throw new Error(`doctor invented an SSH spawn (${bin} ${(args ?? []).join(" ")})`);
+}
+
+/**
+ * Lease-tracking manager that acquire()s against a real startServe TCP endpoint.
+ * Avoids extra Node SSH-forward children that contend with writeCursor's 80-worker wave.
+ * acquire/release/ownedCount remain real side effects under review.
+ */
+function trackingManager(t, opts = {}) {
+  let owned = 0;
+  let closed = false;
+  let closeAllCalls = 0;
+  const acquires = [];
+  const manager = {
+    acquires,
+    get closeAllCalls() {
+      return closeAllCalls;
+    },
+    async acquire(raw, options) {
+      acquires.push(raw);
+      if (closed) {
+        return { ok: false, error: { code: "cancelled", message: "serve tunnel manager is closed" } };
+      }
+      const parsed = parseSshServeTarget(raw);
+      const localTarget = opts.localTarget ?? `127.0.0.1:${parsed.servePort}`;
+      const probed = await probeServe(localTarget, {
+        token: options.token,
+        timeoutMs: options.timeoutMs,
+        signal: options.signal,
       });
-      launches.push({ bin, args, child });
-      return child;
+      if (!probed.ok) return probed;
+      owned += 1;
+      let released = false;
+      const hello = probed.data;
+      return {
+        ok: true,
+        localTarget,
+        hello,
+        handle: {
+          localTarget,
+          identity: `ssh://${parsed.destination}?servePort=${parsed.servePort}`,
+          hello,
+          release: async () => {
+            if (released) return;
+            released = true;
+            owned = Math.max(0, owned - 1);
+          },
+          invalidate: async () => {
+            if (!released) {
+              released = true;
+              owned = Math.max(0, owned - 1);
+            }
+          },
+        },
+      };
+    },
+    async closeAll() {
+      closeAllCalls += 1;
+      closed = true;
+      owned = 0;
+    },
+    ownedCount() {
+      return owned;
     },
   };
+  t.after(() => manager.closeAll());
+  return manager;
 }
 
 test("schema and CLI parse doctor with the shared surface", () => {
@@ -689,9 +708,8 @@ test("peer-online Tailscale evidence cannot override a missing session", async (
 });
 
 test("doctor does not invent an SSH destination for host:port serve", async (t) => {
-  const fixture = sshFixture(t);
   const { server } = await serveDoctor(t);
-  const manager = createServeTunnelManager({ persistIdle: true, spawnSsh: fixture.spawn });
+  const manager = createServeTunnelManager({ persistIdle: true, spawnSsh: spawnSshMustNotRun });
   t.after(() => manager.closeAll());
   const result = await dispatchZswarm(
     { op: "doctor", timeoutMs: 4000 },
@@ -703,17 +721,15 @@ test("doctor does not invent an SSH destination for host:port serve", async (t) 
     },
   );
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(fixture.launches.length, 0);
+  assert.equal(manager.ownedCount(), 0);
   assert.equal(checkById(result.data, "ssh").code, "ssh_not_applicable");
 });
 
 test("managed ssh:// doctor reuses the tunnel manager, probes hello, and releases the lease", async (t) => {
-  const fixture = sshFixture(t);
   const { server, store } = await serveDoctor(t);
   const env = { ZSWARM_SERVE_TOKEN: "secret" };
   const uri = `ssh://netcup?servePort=${Number(server.label.split(":")[1])}`;
-  const manager = createServeTunnelManager({ persistIdle: true, spawnSsh: fixture.spawn });
-  t.after(() => manager.closeAll());
+  const manager = trackingManager(t, { persistIdle: true, localTarget: server.label });
   const keeper = await manager.acquire(uri, {
     env,
     token: "secret",
@@ -740,6 +756,8 @@ test("managed ssh:// doctor reuses the tunnel manager, probes hello, and release
   assert.equal(checkById(result.data, "serve").code, "serve_hello_ok");
   assert.equal(checkById(result.data, "session").code, "session_present");
   assert.equal(manager.ownedCount(), ownedBefore);
+  assert.equal(manager.closeAllCalls, 0);
+  assert.equal(manager.acquires.length, 2);
   const still = await probeServe(keeper.handle.localTarget, { token: "secret", timeoutMs: 2000 });
   assert.equal(still.ok, true, JSON.stringify(still));
   await keeper.handle.release();
@@ -747,7 +765,6 @@ test("managed ssh:// doctor reuses the tunnel manager, probes hello, and release
 });
 
 test("cancelled doctor at host stage preserves partial results and releases the ssh lease", async (t) => {
-  const fixture = sshFixture(t);
   let releaseHost;
   const hostGate = new Promise((resolve) => {
     releaseHost = resolve;
@@ -764,8 +781,7 @@ test("cancelled doctor at host stage preserves partial results and releases the 
     { token: "secret" },
   );
   t.after(() => server.close());
-  const manager = createServeTunnelManager({ persistIdle: false, spawnSsh: fixture.spawn });
-  t.after(() => manager.closeAll());
+  const manager = trackingManager(t, { persistIdle: false, localTarget: server.label });
   const ac = new AbortController();
   const port = Number(server.label.split(":")[1]);
   const pending = dispatchZswarm(
@@ -782,6 +798,7 @@ test("cancelled doctor at host stage preserves partial results and releases the 
   while (manager.ownedCount() < 1 && Date.now() < waitUntil) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+  assert.equal(manager.ownedCount(), 1);
   ac.abort();
   releaseHost();
   const result = await pending;
@@ -791,6 +808,7 @@ test("cancelled doctor at host stage preserves partial results and releases the 
   assert.equal(checkById(report, "route").state, "ok");
   assert.ok(checkById(report, "serve"));
   assert.equal(manager.ownedCount(), 0);
+  assert.equal(manager.closeAllCalls, 0);
 });
 
 test("short doctor timeout is not inflated to serveCallTimeout's 15s minimum", async (t) => {
