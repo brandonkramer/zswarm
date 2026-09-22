@@ -1,5 +1,12 @@
 # @zswarm/mcp
 
+## 0.1.6
+
+### Patch Changes
+
+- Updated dependencies [55cec73]
+  - @zswarm/core@0.1.6
+
 ## 0.1.5
 
 ### Patch Changes
