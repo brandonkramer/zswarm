@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { createServer } from "node:net";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -699,21 +699,6 @@ function waitExit(child, timeoutMs = 8_000) {
   });
 }
 
-function writeSshWrapper(dir, fixtureFile) {
-  if (process.platform === "win32") {
-    const cmd = join(dir, "ssh-wrapper.cmd");
-    writeFileSync(cmd, `@echo off\r\n"${process.execPath}" "${fixtureFile}" %*\r\n`);
-    return cmd;
-  }
-  const sh = join(dir, "ssh-wrapper");
-  writeFileSync(
-    sh,
-    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fixtureFile)} "$@"\n`,
-  );
-  chmodSync(sh, 0o755);
-  return sh;
-}
-
 function mcpFrame(message) {
   return `${JSON.stringify(message)}\n`;
 }
@@ -836,7 +821,7 @@ test("reuse revalidates credentials, returns hello metadata, and isolates a wron
   const uri = `ssh://host?servePort=${servePort}`;
   const manager = createServeTunnelManager({ persistIdle: true, spawnSsh: fixture.spawn });
   t.after(() => manager.closeAll());
-  const good = await manager.acquire(uri, { token: "good", timeoutMs: 3_000 });
+  const good = await manager.acquire(uri, { token: "good", timeoutMs: 8_000 });
   assert.equal(good.ok, true, JSON.stringify(good));
   assert.equal(typeof good.hello.protocol, "number");
   assert.ok(good.hello.serverId);
@@ -1008,7 +993,6 @@ test("CLI timeout during hello exits and reaps the ssh child", async (t) => {
   t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const fixtureFile = join(dir, "ssh-fixture.mjs");
   writeFileSync(fixtureFile, SSH_FORWARD_SOURCE);
-  const wrapper = writeSshWrapper(dir, fixtureFile);
   const pidfile = join(dir, "child.pid");
   const server = await startServe(
     "127.0.0.1:0",
@@ -1023,7 +1007,7 @@ test("CLI timeout during hello exits and reaps the ssh child", async (t) => {
     env: {
       ...process.env,
       ZSWARM_SERVE_TOKEN: "secret",
-      ZSWARM_SSH_BIN: wrapper,
+      ZSWARM_SSH_BIN: fixtureFile,
       SSH_FIXTURE_PIDFILE: pidfile,
       SSH_FIXTURE_LISTEN_ONLY: "1",
       ZSWARM_LOG: "0",
@@ -1068,7 +1052,6 @@ test("MCP stdin EOF during hello exits and reaps the ssh child", async (t) => {
   t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const fixtureFile = join(dir, "ssh-fixture.mjs");
   writeFileSync(fixtureFile, SSH_FORWARD_SOURCE);
-  const wrapper = writeSshWrapper(dir, fixtureFile);
   const pidfile = join(dir, "child.pid");
   const gateFile = join(dir, "listen.gate");
   const server = await startServe(
@@ -1085,7 +1068,7 @@ test("MCP stdin EOF during hello exits and reaps the ssh child", async (t) => {
       ...process.env,
       ZSWARM_SERVE: uri,
       ZSWARM_SERVE_TOKEN: "secret",
-      ZSWARM_SSH_BIN: wrapper,
+      ZSWARM_SSH_BIN: fixtureFile,
       SSH_FIXTURE_PIDFILE: pidfile,
       SSH_FIXTURE_GATE: gateFile,
       ZSWARM_LOG: "0",

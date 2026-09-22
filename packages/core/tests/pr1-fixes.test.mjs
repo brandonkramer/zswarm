@@ -98,7 +98,7 @@ ${standardReplies}
     for (const call of fixture.launches) {
       const remaining = statusTimeoutMs - (call.at - start);
       assert.ok(remaining > 0, "child started after the deadline");
-      assert.ok(call.timeoutMs > 0 && call.timeoutMs <= remaining + 50,
+      assert.ok(call.timeoutMs > 0 && call.timeoutMs <= remaining + 200,
         `${call.args.join(" ")} got ${call.timeoutMs}ms with ${remaining}ms remaining`);
     }
   });

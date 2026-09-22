@@ -743,8 +743,13 @@ function mergeSignals(...signals: Array<AbortSignal | undefined>): AbortSignal {
   return ac.signal;
 }
 
-const defaultSpawn: SshTunnelSpawn = (bin, args, options) =>
-  spawn(bin, args, options);
+const defaultSpawn: SshTunnelSpawn = (bin, args, options) => {
+  const trimmed = bin.trim() || "ssh";
+  if (/\.(mjs|cjs|js)$/i.test(trimmed)) {
+    return spawn(process.execPath, [trimmed, ...args], options);
+  }
+  return spawn(trimmed, args, options);
+};
 
 function stopChild(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
