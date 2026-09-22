@@ -384,6 +384,11 @@ export async function closeBusPluginPanes(
   return closed;
 }
 
+/** Effective SSH transport — not controller OS, not leftover ZSWARM_SSH in env. */
+function isDirectSshClient(client: ZellijClient): boolean {
+  return client.remote || client.transport.kind === "ssh";
+}
+
 /** Report on the bus, install it, or forget it. */
 export async function busOp(
   client: ZellijClient,
@@ -393,6 +398,13 @@ export async function busOp(
   env: NodeJS.ProcessEnv = process.env,
   policy?: Policy,
 ): Promise<OpsResult> {
+  if ((isTrue(args.install) || isTrue(args.clear)) && isDirectSshClient(client)) {
+    throw new ZellijError(
+      "bus_remote_unsupported",
+      "run on Zellij host or use --serve through a tunnel; direct SSH cannot install/clear the bus",
+    );
+  }
+
   const sessionArg =
     typeof args.session === "string" ? args.session : undefined;
 
