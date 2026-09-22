@@ -56,9 +56,12 @@ import {
 import { waitForPane, type WaitBusTiming } from "./wait.js";
 import { listPeerWorktrees, removePeerWorktree } from "./worktree.js";
 import {
+  DEFAULT_SERVE_INSTALL_TIMEOUT_MS,
   installServeLogon,
-  serveCallTimeout,
   uninstallServeLogon,
+} from "./serve-install.js";
+import {
+  serveCallTimeout,
 } from "./serve.js";
 import { doctorOp } from "./doctor.js";
 import { forwardServe } from "./serve-tunnel.js";
@@ -245,17 +248,34 @@ async function dispatchOperation(
       return await doctorOp(args, injected, deps, context, env, clock);
     }
     if (op === "serve") {
+      const timeoutMs = numberArg(args, "timeoutMs", DEFAULT_SERVE_INSTALL_TIMEOUT_MS, {
+        min: 1,
+        max: 900_000,
+      });
       if (isTrue(args.clear)) {
         const cleared = await uninstallServeLogon({
-          platform: process.platform,
+          platform: deps.serveInstall?.platform ?? process.platform,
+          timeoutMs,
+          signal,
+          env,
+          token: env.ZSWARM_SERVE_TOKEN,
+          ...deps.serveInstall,
         });
         return { ok: true, data: cleared };
       }
       if (isTrue(args.install)) {
         const installed = await installServeLogon({
           listen: typeof args.listen === "string" ? args.listen : undefined,
+          session: optionalString(args.session),
+          timeoutMs,
+          signal,
+          env,
+          token: env.ZSWARM_SERVE_TOKEN,
+          now: clock.now,
+          sleep: clock.sleep,
+          ...deps.serveInstall,
         });
-        return { ok: true, data: { ...installed, running: true } };
+        return { ok: true, data: installed };
       }
       throw new ZellijError(
         "usage",

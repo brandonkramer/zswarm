@@ -165,7 +165,7 @@ zswarm await --channel tests --count 3          # Wait for 3 worker signals
 
 ### Remote crews
 
-Linux/macOS SSH works when it is the same user and `$TMPDIR`. Windows OpenSSH is session 0; live Zellij is usually the interactive desktop session. `ZSWARM_TMP=auto` points at that TEMP (enough to list sessions). Pane attach on Windows uses named pipes in the desktop session, so use `ZSWARM_SSH_MODE=interactive` or run `zswarm serve` next to Zellij.
+Linux/macOS SSH works when it is the same user and `$TMPDIR`. Windows OpenSSH is session 0; live Zellij is usually the interactive desktop session. `ZSWARM_TMP=auto` points at that TEMP (enough to list sessions). Pane attach on Windows uses named pipes in the desktop session, so use `ZSWARM_SSH_MODE=interactive` for occasional commands or, for the **default Tailscale crew**, [`zswarm serve --install`](docs/tailscale.md) on the logged-in desktop plus OpenSSH over Tailscale from the controller.
 
 ```bash
 # Linux/macOS, same user:
@@ -177,15 +177,12 @@ ZSWARM_SSH=user@host ZSWARM_TMP=auto zswarm sessions
 # Windows: run the CLI inside the desktop session. Discovers TEMP unless ZSWARM_TMP is set.
 ZSWARM_SSH=user@host ZSWARM_SSH_MODE=interactive zswarm list
 
-# Any OS: run zswarm next to Zellij; another machine talks over a tunnel to 127.0.0.1
-# On the host, in the session that owns Zellij (loopback only; a token is not a bind substitute):
-ZSWARM_SERVE_TOKEN=secret zswarm serve --listen 127.0.0.1:9419
-# Windows, once (bakes ZSWARM_SERVE_TOKEN into the logon task env): zswarm serve --install
-# On the client, existing tunnel:
-ssh -fN -L 9419:127.0.0.1:9419 user@host
-ZSWARM_SERVE=127.0.0.1:9419 ZSWARM_SERVE_TOKEN=secret zswarm list
-# Or one-shot attach (does not remotely install/start serve):
-zswarm --serve 'ssh://Administrator@host:22?servePort=9419' status --session crew
+# Tailscale crew (native Windows desktop + controller). Full recipe: docs/tailscale.md
+# Host (logged-in desktop, token already in this process):
+zswarm serve --install --listen 127.0.0.1:9419 --session crew --timeout-ms 30000
+# Controller (same private token; ssh:// authority port is SSH, servePort is remote loopback):
+zswarm --serve 'ssh://user@crew-host?servePort=9419' doctor --session crew --timeout-ms 10000
+zswarm --serve 'ssh://user@crew-host?servePort=9419' status --session crew
 ```
 
 `file:` plugin URLs stay on the machine that owns Zellij. A client with `ZSWARM_SERVE` never sends a local wasm path across the tunnel.
@@ -221,6 +218,8 @@ zswarm --serve 'ssh://Administrator@host:22?servePort=9419' status --session cre
 ---
 
 For spawn lifecycle fields, file/stdin handoffs, guarded menu input, tab summaries, and routing diagnostics, see [Reliable crew operations](docs/crew-operations.md).
+
+For the Windows + Tailscale crew recipe (`serve --install`, OpenSSH over Tailscale, token, doctor/status), see [Tailscale crew](docs/tailscale.md).
 
 For layered inspect-only diagnostics (`zswarm doctor`), see [Doctor](docs/doctor.md).
 

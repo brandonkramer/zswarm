@@ -127,6 +127,20 @@ test("serveLogonCommand persists ZSWARM_SERVE_TOKEN in the logon command", () =>
   );
 });
 
+test("serveLogonCommand quotes paths with spaces and persists extra host env", () => {
+  const command = serveLogonCommand(
+    String.raw`C:\Program Files\nodejs\node.exe`,
+    String.raw`C:\Program Files\zswarm\cli.js`,
+    "127.0.0.1:9419",
+    "s3cret",
+    { ZSWARM_BIN: String.raw`C:\Program Files\zellij\zellij.exe`, ZSWARM_SERVE_LAUNCH_ID: "launch-1" },
+  );
+  assert.equal(
+    command,
+    `set "ZSWARM_BIN=C:\\Program Files\\zellij\\zellij.exe"&& set "ZSWARM_SERVE_LAUNCH_ID=launch-1"&& set "ZSWARM_SERVE_TOKEN=s3cret"&& "C:\\Program Files\\nodejs\\node.exe" "C:\\Program Files\\zswarm\\cli.js" serve --listen 127.0.0.1:9419`,
+  );
+});
+
 test("redactServeSecret strips the token from install output", () => {
   const command = serveLogonCommand(
     String.raw`C:\node.exe`,
@@ -188,6 +202,16 @@ test("parseCliArgv maps serve --listen", () => {
     op: "serve",
     install: true,
   });
+  assert.deepEqual(
+    parseCliArgv(["serve", "--install", "--listen", "127.0.0.1:9419", "--session", "crew", "--timeout-ms", "30000"]),
+    {
+      op: "serve",
+      install: true,
+      listen: "127.0.0.1:9419",
+      session: "crew",
+      timeoutMs: 30000,
+    },
+  );
 });
 
 test("dispatch serve --listen is CLI-only", async () => {
@@ -202,6 +226,20 @@ test("dispatch serve --clear on Unix fails without touching Zellij", {
   const result = await dispatchZswarm({ op: "serve", clear: true });
   assert.equal(result.ok, false);
   assert.match(result.error.message, /Windows-only/);
+});
+
+test("dispatch serve --install on Unix fails without a running:true claim", {
+  skip: process.platform === "win32",
+}, async () => {
+  const result = await dispatchZswarm({
+    op: "serve",
+    install: true,
+    listen: "127.0.0.1:9419",
+  }, undefined, { env: { ZSWARM_SERVE_TOKEN: "secret" } });
+  assert.equal(result.ok, false);
+  assert.match(result.error.message, /Windows logon task/);
+  assert.equal(result.data, undefined);
+  assert.equal(JSON.stringify(result).includes('"running":true'), false);
 });
 
 test("startServe + callServe round-trip JSONL", async () => {
@@ -424,6 +462,7 @@ test("authenticated hello returns protocol identity and never dispatches", async
     const compatible = await callServe(label, { op: "hello" }, 2_000, "secret");
     assert.equal(compatible.ok, true);
     assert.equal(compatible.data.serverId, preferred.data.serverId);
+    assert.equal(preferred.data.launchId, undefined);
     assert.equal(dispatched, 0);
   } finally {
     await close();
@@ -431,7 +470,6 @@ test("authenticated hello returns protocol identity and never dispatches", async
 });
 
 test("probeServe validates hello and stays distinct across startServe instances", async () => {
-  const first = await startServe("127.0.0.1:0", async () => ({ ok: true, data: {} }), {
     token: "secret",
   });
   const second = await startServe("127.0.0.1:0", async () => ({ ok: true, data: {} }), {
@@ -448,6 +486,23 @@ test("probeServe validates hello and stays distinct across startServe instances"
   } finally {
     await first.close();
     await second.close();
+  }
+});
+
+test("hello launchId is additive and does not change protocol-1 capabilities", async () => {
+  const { label, close } = await startServe(
+    "127.0.0.1:0",
+    async () => ({ ok: true, data: {} }),
+    { token: "secret", launchId: "install-launch" },
+  );
+  try {
+    const probed = await probeServe(label, { token: "secret", timeoutMs: 2_000 });
+    assert.equal(probed.ok, true);
+    assert.equal(probed.data.protocol, SERVE_PROTOCOL);
+    assert.equal(probed.data.launchId, "install-launch");
+    assert.deepEqual(probed.data.capabilities, [SERVE_CAPABILITY_HELLO]);
+  } finally {
+    await close();
   }
 });
 

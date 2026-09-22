@@ -74,7 +74,7 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "string",
     flags: ["--session", "-s"],
     description:
-      "Zellij session name (optional if sole live session or ZSWARM_SESSION / ZELLIJ_SESSION_NAME)",
+      "Zellij session name (optional if sole live session or ZSWARM_SESSION / ZELLIJ_SESSION_NAME). serve --install: readiness target only — does not change the task's default routing",
   },
   {
     name: "to",
@@ -141,14 +141,14 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "boolean",
     flags: ["--clear"],
     description:
-      "signal: reset the channel (all channels when none is given); bus: forget the installed plugin; serve: unregister the Windows logon task",
+      "signal: reset the channel (all channels when none is given); bus: forget the installed plugin; serve: stop and unregister the owned Windows zswarm-serve logon task if present",
   },
   {
     name: "install",
     type: "boolean",
     flags: ["--install"],
     description:
-      "bus: load the event-bus plugin in a pane so its permission prompt can be answered, then remember it; serve: register a Windows logon task that listens for remote zswarm",
+      "bus: load the event-bus plugin in a pane so its permission prompt can be answered, then remember it; serve: register the current-user Windows Interactive logon task and wait for authenticated hello plus host session visibility",
   },
   {
     name: "reset",
@@ -297,7 +297,7 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "number",
     flags: ["--timeout-ms"],
     description:
-      "wait: timeout (default 60000); status/spawn: overall deadline (default 30000); doctor: overall deadline (default 10000), including Tailscale/SSH/hello/host checks",
+      "wait: timeout (default 60000); status/spawn: overall deadline (default 30000); doctor: overall deadline (default 10000), including Tailscale/SSH/hello/host checks; serve --install: overall install/readiness deadline (default 30000)",
   },
   {
     name: "keys",
@@ -558,8 +558,8 @@ export function cliUsage(): string {
     "",
     "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force). --expect requires the screen to contain a substring first.",
     "Bus: `zswarm bus --install` once per Zellij session. `--force` closes orphan bus panes and reloads; do not use it as a retry.",
-    "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE / --serve (host:port, tcp://, or ssh://user@host?servePort=9419) plus ZSWARM_SERVE_TOKEN. Serve binds loopback only and always requires a token. ssh:// does not start remote serve.",
-    "Doctor: `zswarm doctor --session crew` inspects local, --ssh, and --serve routes without installs, pane changes, or plugin launch. See docs/doctor.md.",
+    "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE / --serve (host:port, tcp://, or ssh://user@host?servePort=9419) plus ZSWARM_SERVE_TOKEN. Serve binds loopback only and always requires a token. ssh:// does not start remote serve. Windows default recipe: `zswarm serve --install` (verified readiness) — see docs/tailscale.md.",
+    "Doctor: `zswarm doctor --session crew` inspects local, --ssh, and --serve routes without installs, pane changes, or plugin launch. See docs/doctor.md and docs/tailscale.md.",
     "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZSWARM_FROM, ZELLIJ_PANE_ID, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_SSH_BIN, ZSWARM_SSH_OPTS, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN, ZSWARM_CACHE_TTL_MS",
     "",
   );

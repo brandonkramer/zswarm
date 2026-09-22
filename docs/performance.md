@@ -6,12 +6,18 @@ listing caches and the event bus beside the crew. Windows interactive SSH still
 works for occasional commands, but each uncached Zellij action requires a
 scheduled desktop task.
 
+**Windows + Tailscale default:** verified `zswarm serve --install` on the
+logged-in desktop, then controller `ssh://` attach. See
+[Tailscale crew](tailscale.md) (native Windows uses OpenSSH over Tailscale, not
+the integrated Tailscale SSH server).
+
 Set `ZSWARM_SERVE_TOKEN` to the same private value on the server and controller.
-On Windows, start the server from the logged-in desktop (PowerShell):
+On Windows, the documented install path waits for authenticated hello and host
+visibility (`Start-ScheduledTask` is asynchronous and is not readiness):
 
 ```powershell
 $env:ZSWARM_SERVE_TOKEN = '<shared token>'
-zswarm serve --listen 127.0.0.1:9419
+zswarm serve --install --listen 127.0.0.1:9419 --session crew --timeout-ms 30000
 ```
 
 On a Unix host, the equivalent server command is:
@@ -89,6 +95,7 @@ A successful hello `data` object is:
 | `platform` | `process.platform` |
 | `version` | `@zswarm/core` package version |
 | `capabilities` | Currently `["hello"]` only |
+| `launchId` | Optional. Present when the process was started with `ZSWARM_SERVE_LAUNCH_ID` (Windows `--install` uses this to distinguish a fresh task from a stale listener). Protocol 1 without `launchId` is unchanged. |
 
 `probeServe(target, { token, timeoutMs, signal })` sends that hello and validates
 protocol 1 plus the hello capability. A legacy serve, a malformed hello, or

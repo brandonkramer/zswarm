@@ -5,7 +5,8 @@ routes. Doctor identifies the failing layer and the actual host/session. It
 does not install, repair, or mutate a crew.
 
 Native Windows is **OpenSSH over Tailscale**. Tailscale's integrated SSH server
-is not required.
+is not required. The Windows desktop recipe (`serve --install`, token, `ssh://`
+attach) is in [Tailscale crew](tailscale.md).
 
 ## CLI and MCP
 
@@ -225,7 +226,7 @@ manager, so another in-flight caller keeps its tunnel.
 
 | Symptom | What to do |
 | --- | --- |
-| `serve_connect` / dead tunnel | Start `zswarm serve --listen 127.0.0.1:9419` on the crew host; check the SSH LocalForward |
+| `serve_connect` / dead tunnel | Start `zswarm serve --listen 127.0.0.1:9419` on the crew host, or `zswarm serve --install` on Windows ([Tailscale crew](tailscale.md)); check the SSH LocalForward |
 | `serve_unauthorized` | Same `ZSWARM_SERVE_TOKEN` on host and controller |
 | `serve_hello_unsupported` | Upgrade zswarm serve (protocol 1 hello) |
 | `doctor_unsupported` | Upgrade zswarm serve so it implements `op=doctor` |

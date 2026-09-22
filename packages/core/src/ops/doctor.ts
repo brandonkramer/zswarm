@@ -1170,7 +1170,7 @@ export async function inspectDoctorHost(input: HostInspectInput): Promise<HostIn
   return { checks, session, sessionOrigin, cancelled, timedOut };
 }
 
-function hostDoctorRequest(
+export function hostDoctorRequest(
   remainingMs: number,
   explicitSession: string | null,
 ): Record<string, unknown> {
@@ -1319,7 +1319,7 @@ function appendHostRequestFailure(
   return extra;
 }
 
-function coverHostReport(
+export function coverHostReport(
   checks: DoctorCheck[],
   explicit: string | null,
 ): DoctorCheck[] {
@@ -1384,7 +1384,7 @@ function coverHostReport(
   return out;
 }
 
-function mergeHostReply(result: OpsResult): {
+export function mergeHostReply(result: OpsResult): {
   checks: DoctorCheck[];
   session?: string | null;
   sessionOrigin?: string;

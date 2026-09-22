@@ -1,10 +1,8 @@
 import { createServer, connect, type Socket } from "node:net";
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { hostname } from "node:os";
 import { ZellijError } from "../errors.js";
-import { encodePowerShellCommand } from "../zellij/ipc.js";
 import type { OpsResult } from "./types.js";
 
 export const DEFAULT_SERVE_LISTEN = "127.0.0.1:9419";
@@ -40,6 +38,8 @@ export const SERVE_PROTOCOL = 1;
 export const SERVE_CONTROL_FIELD = "serveControl";
 export const SERVE_HELLO_CONTROL = "hello";
 export const SERVE_CAPABILITY_HELLO = "hello";
+/** Per-launch identity for Windows install verification. Additive hello field. */
+export const SERVE_LAUNCH_ID_ENV = "ZSWARM_SERVE_LAUNCH_ID";
 const SERVE_TOKEN_FIELD = "serveToken";
 
 const CORE_VERSION = readCoreVersion();
@@ -71,6 +71,8 @@ export type ServeHelloData = {
   platform: string;
   version: string;
   capabilities: string[];
+  /** Present when the process was started with `ZSWARM_SERVE_LAUNCH_ID`. */
+  launchId?: string;
 };
 export type ProbeServeOptions = {
   token?: string;
@@ -180,6 +182,8 @@ export type StartServeOptions = {
   maxRequestBytes?: number;
   idleTimeoutMs?: number;
   maxConnections?: number;
+  /** Additive hello field; omitted on ordinary foreground `serve --listen`. */
+  launchId?: string;
 };
 
 function unauthorized(): OpsResult {
@@ -214,8 +218,8 @@ function takeServeToken(
   return { token, request };
 }
 
-function helloData(serverId: string): ServeHelloData {
-  return {
+function helloData(serverId: string, launchId?: string): ServeHelloData {
+  const data: ServeHelloData = {
     protocol: SERVE_PROTOCOL,
     serverId,
     hostname: hostname() || "unknown",
@@ -223,6 +227,9 @@ function helloData(serverId: string): ServeHelloData {
     version: CORE_VERSION,
     capabilities: [SERVE_CAPABILITY_HELLO],
   };
+  const id = launchId?.trim();
+  if (id) data.launchId = id;
+  return data;
 }
 
 function isHelloOp(op: unknown): boolean {
@@ -297,7 +304,7 @@ export function startServe(
   const maxRequestBytes = options.maxRequestBytes ?? SERVE_MAX_REQUEST_BYTES;
   const idleTimeoutMs = options.idleTimeoutMs ?? SERVE_IDLE_TIMEOUT_MS;
   const maxConnections = options.maxConnections ?? SERVE_MAX_CONNECTIONS;
-  const hello = helloData(randomUUID());
+  const hello = helloData(randomUUID(), options.launchId);
   return new Promise((resolve, reject) => {
     const sockets = new Set<Socket>();
     const server = createServer((socket) => {
@@ -767,136 +774,36 @@ export function serveLogonCommand(
   scriptPath: string,
   listen: string,
   token?: string,
+  extraEnv: Record<string, string> = {},
 ): string {
+  for (const path of [execPath, scriptPath]) {
+    if (/[\0\r\n"]/.test(path)) {
+      throw new ZellijError(
+        "bad_arg",
+        "serve executable/script path must not contain quotes or newlines",
+      );
+    }
+  }
   const launch = `"${execPath}" "${scriptPath}" serve --listen ${listen}`;
+  const env: Record<string, string> = { ...extraEnv };
   const secret = token?.trim();
-  if (!secret) return launch;
-  if (/[\0\r\n"%]/.test(secret)) {
-    throw new ZellijError(
-      "bad_arg",
-      "ZSWARM_SERVE_TOKEN must not contain quotes, newlines, or %",
-    );
+  if (secret) env.ZSWARM_SERVE_TOKEN = secret;
+  const assignments: string[] = [];
+  for (const [key, value] of Object.entries(env)) {
+    if (!value) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new ZellijError("bad_arg", `cannot persist environment key ${key} in the logon task`);
+    }
+    if (/[\0\r\n"%]/.test(value)) {
+      throw new ZellijError(
+        "bad_arg",
+        key === "ZSWARM_SERVE_TOKEN"
+          ? "ZSWARM_SERVE_TOKEN must not contain quotes, newlines, or %"
+          : `${key} must not contain quotes, newlines, or %`,
+      );
+    }
+    assignments.push(`set "${key}=${value}"`);
   }
-  return `set "ZSWARM_SERVE_TOKEN=${secret}"&& ${launch}`;
-}
-
-function serveInstallToken(input: {
-  token?: string;
-  env?: NodeJS.ProcessEnv;
-}): string {
-  const raw =
-    input.token ??
-    (input.env ? input.env.ZSWARM_SERVE_TOKEN : process.env.ZSWARM_SERVE_TOKEN);
-  const secret = raw?.trim() ?? "";
-  if (!secret) {
-    throw new ZellijError(
-      "serve_auth",
-      "zswarm serve requires ZSWARM_SERVE_TOKEN; another local OS user can connect to 127.0.0.1",
-    );
-  }
-  return secret;
-}
-
-function runPowerShell(script: string): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    execFile(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-EncodedCommand",
-        encodePowerShellCommand(script),
-      ],
-      { windowsHide: true, timeout: 20_000 },
-      (error, stdout, stderr) => {
-        const code =
-          error && typeof (error as { code?: unknown }).code === "number"
-            ? (error as { code: number }).code
-            : error
-              ? 1
-              : 0;
-        resolve({
-          code,
-          stdout: String(stdout ?? ""),
-          stderr: String(stderr ?? ""),
-        });
-      },
-    );
-  });
-}
-
-export async function installServeLogon(input: {
-  listen?: string;
-  execPath?: string;
-  scriptPath?: string;
-  platform?: NodeJS.Platform;
-  token?: string;
-  env?: NodeJS.ProcessEnv;
-}): Promise<{ task: string; listen: string; command: string }> {
-  if ((input.platform ?? process.platform) !== "win32") {
-    throw new ZellijError(
-      "usage",
-      "serve --install registers a Windows logon task; on Unix start `zswarm serve --listen` in the session that owns Zellij",
-    );
-  }
-  const { host, label } = parseListenAddress(input.listen);
-  if (!isLoopbackHost(host)) {
-    throw new ZellijError(
-      "serve_auth",
-      `zswarm serve only listens on loopback (127.0.0.1 / ::1); off-machine access is an SSH tunnel to 127.0.0.1 (${host} refused)`,
-    );
-  }
-  const token = serveInstallToken(input);
-  const execPath = input.execPath ?? process.execPath;
-  const scriptPath = input.scriptPath ?? process.argv[1];
-  if (!scriptPath) {
-    throw new ZellijError("usage", "cannot resolve the zswarm script path for the logon task");
-  }
-  const command = serveLogonCommand(execPath, scriptPath, label, token);
-  const commandB64 = Buffer.from(command, "utf8").toString("base64");
-  const script = [
-    "$cmd = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" +
-      commandB64 +
-      "'))",
-    "$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument \"/c $cmd\"",
-    "$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited",
-    "$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME",
-    `Register-ScheduledTask -TaskName '${SERVE_TASK_NAME}' -Action $action -Principal $principal -Trigger $trigger -Force | Out-Null`,
-    `Start-ScheduledTask -TaskName '${SERVE_TASK_NAME}'`,
-  ].join("\n");
-  const result = await runPowerShell(script);
-  if (result.code !== 0) {
-    throw new ZellijError(
-      "zellij_failed",
-      `serve --install failed: ${(result.stderr || result.stdout).trim() || "no output"}`,
-    );
-  }
-  return { task: SERVE_TASK_NAME, listen: label, command: redactServeSecret(command, token) };
-}
-
-export async function uninstallServeLogon(input: {
-  platform?: NodeJS.Platform;
-} = {}): Promise<{ task: string; cleared: true }> {
-  if ((input.platform ?? process.platform) !== "win32") {
-    throw new ZellijError("usage", "serve --clear is Windows-only");
-  }
-  const script = [
-    "$ProgressPreference = 'SilentlyContinue'",
-    "try {",
-    `  Unregister-ScheduledTask -TaskName '${SERVE_TASK_NAME}' -Confirm:$false`,
-    "} catch {",
-    "  if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { exit 0 }",
-    "  [Console]::Error.Write(($_ | Out-String).Trim())",
-    "  exit 1",
-    "}",
-  ].join("\n");
-  const result = await runPowerShell(script);
-  if (result.code !== 0) {
-    throw new ZellijError(
-      "zellij_failed",
-      `serve --clear failed: ${(result.stderr || result.stdout).trim() || "no output"}`,
-    );
-  }
-  return { task: SERVE_TASK_NAME, cleared: true };
+  if (assignments.length === 0) return launch;
+  return `${assignments.join("&& ")}&& ${launch}`;
 }

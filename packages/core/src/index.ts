@@ -140,7 +140,6 @@ export {
 export {
   callServe,
   DEFAULT_SERVE_LISTEN,
-  installServeLogon,
   isLoopbackHost,
   parseListenAddress,
   probeServe,
@@ -151,6 +150,7 @@ export {
   SERVE_CONTROL_FIELD,
   SERVE_HELLO_CONTROL,
   SERVE_HELLO_TIMEOUT_MS,
+  SERVE_LAUNCH_ID_ENV,
   SERVE_MAX_HELLO_BYTES,
   SERVE_MAX_REPLY_BYTES,
   SERVE_MAX_REQUEST_BYTES,
@@ -163,7 +163,6 @@ export {
   serveLogonCommand,
   serveMaxReplyBytes,
   startServe,
-  uninstallServeLogon,
   type CallServeOptions,
   type ProbeServeOptions,
   type ServeCapability,
@@ -172,6 +171,23 @@ export {
   type ServeHelloData,
   type ServePhase,
 } from "./ops/serve.js";
+export {
+  buildServeTaskScript,
+  DEFAULT_SERVE_INSTALL_TIMEOUT_MS,
+  installServeLogon,
+  looksLikeCliEntrypoint,
+  looksLikeMcpEntrypoint,
+  resolveServeCliLaunch,
+  sameWindowsAccount,
+  SERVE_NOT_READY_CODE,
+  SERVE_TASK_OWNED_CODE,
+  serveTaskChildEnv,
+  uninstallServeLogon,
+  type ServeCliLaunch,
+  type ServeInstallInput,
+  type ServeInstallSuccess,
+  type ServeTaskAction,
+} from "./ops/serve-install.js";
 export {
   allocateLoopbackPort,
   assertSafeSshTunnelOpts,
@@ -215,7 +231,7 @@ export {
   DEFAULT_WAIT_MAX_CHARS,
 } from "./ops/util.js";
 export type { RoutingContext } from "./ops/routing.js";
-export type { DispatchDeps, OpsResult } from "./ops/types.js";
+export type { DispatchDeps, OpsResult, ServeInstallDeps } from "./ops/types.js";
 export {
   DEFAULT_DOCTOR_TIMEOUT_MS,
   DOCTOR_FAILED_CODE,
@@ -226,6 +242,8 @@ export {
   HOST_REPORT_INVALID_CODE,
   doctorOp,
   inspectDoctorHost,
+  hostDoctorRequest,
+  mergeHostReply,
   type DoctorCheck,
   type DoctorCheckScope,
   type DoctorCheckState,
