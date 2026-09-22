@@ -27,6 +27,7 @@ import {
   probeServe,
   serveChildEnv,
   startServe,
+  ZellijError,
 } from "../dist/index.js";
 
 const MUTATION_NEEDLES = [
@@ -158,6 +159,18 @@ function hostClient(t, opts = {}) {
 function checkById(report, id) {
   const checks = report?.checks ?? report;
   return (Array.isArray(checks) ? checks : []).find((row) => row.id === id);
+}
+
+function inspectClient({
+  transport = { kind: "local", mode: "local" },
+  sessions = async () => [{ name: "crew", exited: false }],
+  panes = async () => [],
+} = {}) {
+  return { zellijPath: "zellij", transport, listSessions: sessions, listPanes: panes };
+}
+
+function doctorReportOf(result) {
+  return result.ok ? result.data : result.error.details;
 }
 
 async function listenRaw(onSocket) {
@@ -1129,6 +1142,167 @@ test("expired budget during host inspection does not return ok:true and keeps co
   assert.equal(checkById(result.error.details, "zellij_binary").code, "zellij_ok");
   assert.equal(checkById(result.error.details, "session").code, "session_present");
   assert.notEqual(checkById(result.error.details, "bus_instance")?.state, "ok");
+});
+
+for (const hostOnly of [false, true]) {
+  for (const variant of ["late-success", "late-error", "cancel-late-success"]) {
+    test(`${hostOnly ? "host-only" : "local"}: ${variant} at final host stage cannot publish success`, async () => {
+      let now = 1000;
+      const ac = new AbortController();
+      const host = inspectClient({
+        panes: async () => {
+          if (variant === "cancel-late-success") ac.abort();
+          else now += 200;
+          if (variant === "late-error") throw new ZellijError("zellij_failed", "list-panes timed out");
+          return [];
+        },
+      });
+      const result = await dispatchZswarm(
+        { op: "doctor", session: "crew", timeoutMs: 100, ...(hostOnly ? { doctorScope: "host" } : {}) },
+        host,
+        {
+          env: { ZSWARM_BUS: "1", ZSWARM_LOG: "0" },
+          state: { readBus: () => null },
+          now: () => now,
+          signal: ac.signal,
+          tailscaleStatus: missingTailscale(),
+        },
+      );
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.error.code, variant === "cancel-late-success" ? "cancelled" : "timeout");
+      assert.equal(checkById(doctorReportOf(result), "zellij_binary").state, "ok");
+      assert.equal(checkById(doctorReportOf(result), "session").state, "ok");
+    });
+  }
+}
+
+test("disabled bus still times out after the last host read", async () => {
+  let now = 1000;
+  let panes = 0;
+  const host = inspectClient({
+    sessions: async () => {
+      now += 200;
+      return [{ name: "crew", exited: false }];
+    },
+    panes: async () => {
+      panes += 1;
+      return [];
+    },
+  });
+  const result = await dispatchZswarm(
+    { op: "doctor", session: "crew", timeoutMs: 100 },
+    host,
+    {
+      env: { ZSWARM_BUS: "0", ZSWARM_LOG: "0" },
+      state: { readBus: () => null },
+      now: () => now,
+      tailscaleStatus: missingTailscale(),
+    },
+  );
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.error.code, "timeout");
+  assert.equal(panes, 0);
+  assert.equal(checkById(doctorReportOf(result), "zellij_binary").state, "ok");
+  assert.equal(checkById(doctorReportOf(result), "session").state, "ok");
+  assert.equal(checkById(doctorReportOf(result), "bus_instance").code, "bus_disabled");
+});
+
+for (const ipcStatus of ["failed", "expired"]) {
+  test(`direct SSH ${ipcStatus} IPC is required without --session`, async () => {
+    const host = inspectClient({
+      transport: { kind: "ssh", mode: "ssh", host: "crew-host", ipc: { requested: "auto", status: ipcStatus } },
+      sessions: async () => [],
+    });
+    const result = await dispatchZswarm(
+      { op: "doctor", ssh: "user@crew-host", timeoutMs: 1000 },
+      host,
+      { env: {}, state: { readBus: () => null }, tailscaleStatus: missingTailscale() },
+    );
+    assert.equal(checkById(doctorReportOf(result), "zellij_ipc").state, "fail");
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.error.code, DOCTOR_FAILED_CODE);
+  });
+}
+
+for (const message of [
+  "ssh: connect to host crew-host port 22: No route to host",
+  "ssh: connect to host crew-host port 22: Connection timed out",
+  "spawn ssh ENOENT",
+]) {
+  test(`no positive SSH readiness for ${message}`, async () => {
+    const host = inspectClient({
+      transport: { kind: "ssh", mode: "ssh", host: "crew-host" },
+      sessions: async () => {
+        throw new ZellijError("zellij_failed", message);
+      },
+    });
+    const result = await dispatchZswarm(
+      { op: "doctor", ssh: "user@crew-host", timeoutMs: 1000 },
+      host,
+      { env: {}, state: { readBus: () => null }, tailscaleStatus: missingTailscale() },
+    );
+    assert.notEqual(checkById(doctorReportOf(result), "ssh").state, "ok", JSON.stringify(result));
+  });
+}
+
+test("direct SSH carries the sole live session into route", async () => {
+  const host = inspectClient({ transport: { kind: "ssh", mode: "ssh", host: "crew-host" } });
+  const result = await dispatchZswarm(
+    { op: "doctor", ssh: "user@crew-host", timeoutMs: 1000 },
+    host,
+    { env: {}, state: { readBus: () => null }, tailscaleStatus: missingTailscale() },
+  );
+  assert.equal(checkById(doctorReportOf(result), "session").state, "ok");
+  assert.equal(doctorReportOf(result).route.session, "crew", JSON.stringify(result));
+  assert.notEqual(doctorReportOf(result).route.sessionOrigin, "unresolved");
+});
+
+const requiredHostIds = ["zellij_binary", "zellij_ipc", "zellij_sessions", "session", "bus_artifact", "bus_marker", "bus_instance"];
+for (const envelope of ["missing-required-layers", "doctor_failed", "serve_unauthorized"]) {
+  test(`host report cannot erase failure or omit required coverage: ${envelope}`, async (t) => {
+    const details = hostDoctorReply(
+      (envelope === "missing-required-layers" ? ["zellij_binary", "session"] : requiredHostIds).map((id) =>
+        hostScopedCheck(id, { detail: id === "session" ? { session: "crew" } : {} }),
+      ),
+      { session: "crew", sessionOrigin: "host_default" },
+    );
+    const response =
+      envelope === "missing-required-layers"
+        ? { ok: true, data: details }
+        : { ok: false, error: { code: envelope, message: "host rejected doctor", details } };
+    const server = await serveAfterHello(t, response);
+    const result = await dispatchZswarm(
+      { op: "doctor", session: "crew", serveAddress: server.label, timeoutMs: 2000 },
+      undefined,
+      { env: { ZSWARM_SERVE_TOKEN: "secret" }, tailscaleStatus: missingTailscale() },
+    );
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.error.code, DOCTOR_FAILED_CODE);
+  });
+}
+
+test("late serve host reply after overall deadline cannot publish success", async (t) => {
+  let now = 1000;
+  const details = hostDoctorReply(
+    requiredHostIds.map((id) => hostScopedCheck(id, { detail: id === "session" ? { session: "crew" } : {} })),
+    { session: "crew", sessionOrigin: "explicit" },
+  );
+  const server = await serveAfterHello(t, async (request) => {
+    if (request.op === "doctor") now += 200;
+    return { ok: true, data: details };
+  });
+  const result = await dispatchZswarm(
+    { op: "doctor", session: "crew", timeoutMs: 100 },
+    undefined,
+    {
+      env: { ZSWARM_SERVE: server.label, ZSWARM_SERVE_TOKEN: "secret" },
+      now: () => now,
+      tailscaleStatus: missingTailscale(),
+    },
+  );
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.error.code, "timeout");
+  assert.equal(checkById(doctorReportOf(result), "serve").code, "serve_hello_ok");
 });
 }
 

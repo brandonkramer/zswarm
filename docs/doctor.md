@@ -90,8 +90,8 @@ Check `state` is `ok` | `warn` | `fail` | `skipped`. Stable **ids** and
 | `zellij_binary` | yes when inspected and `fail` | Missing/wrong/incompatible binary |
 | `session` | yes when explicit, inherited, or host-default | Missing requested/default session fails. No selected session + no live sessions is a **warning** |
 | `tailscale` | advisory | Optional peer/online evidence |
-| `zellij_ipc` | advisory unless `fail` on resolved SSH IPC | Wrong/inaccessible IPC |
-| `zellij_sessions` | advisory | Visible sessions vs none |
+| `zellij_ipc` | yes when `fail` (established IPC) | Failed/expired SSH IPC is required even without `--session`. Unresolved/optional IPC stays advisory |
+| `zellij_sessions` | advisory at runtime; **required coverage on serve success reports** | Visible sessions vs none. A success host report that omits this layer is `host_report_incomplete` |
 | `bus_artifact` / `bus_marker` / `bus_instance` | advisory | Degraded performance, not an unusable crew |
 
 Skipped host checks after a failed upstream stage use
@@ -103,9 +103,20 @@ request are `host_request_*` on the host layer (serve hello stays
 `serve_hello_ok`). Doctor never claims an unperformed host/session check
 passed and never falls back to another route.
 
-`--timeout-ms` is enforced through host inspection. An expired budget
-returns `timeout` (not `ok: true`), including when host listing overruns
-an injected clock. Cancellation and timeout keep any completed host
+`--timeout-ms` is enforced through host inspection, including after the last
+host read and before publishing success. An expired budget or cancellation
+returns `timeout` / `cancelled` (not `ok: true`) even when `listPanes`
+resolves late, throws a non-timeout `zellij_failed`, or the bus is disabled
+so no further async stage runs. Completed host findings stay in
+`error.details`; only unperformed dependents are skipped. After authenticated
+hello, a failed host doctor envelope (`serve_unauthorized`, `doctor_failed`,
+protocol/transport) stays a required failure even if it carries all-ok host
+rows. A success host report must cover binary, IPC, session listing, and
+session selection — skipped placeholders do not certify those layers. Direct
+SSH requires positive remote evidence before `ssh_ready` and copies an inferred
+host session into `report.route`.
+
+Cancellation and timeout keep any completed host
 findings in `error.details`.
 
 ## Sample reports

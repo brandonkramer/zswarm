@@ -203,10 +203,9 @@ export function createStateStore(options: StateStoreOptions = {}) {
   }
 
   /**
-   * Drop this process's lock file only. A close-then-retry unlink of whatever
-   * sits at the path will delete a waiter that already recreated it with wx;
-   * a third process then enters fn() and last-rename drops cursor keys
-   * (macOS 80-child writeCursor wave under parallel `node --test` files).
+   * Drop this process's lock file only. Retry-unlink of whatever now sits at
+   * the path can delete a waiter that already recreated it with wx; a third
+   * process then enters fn() and last-rename drops cursor keys.
    */
   function unlinkOwnedLock(lockPath: string): void {
     const until = Date.now() + 500;
@@ -230,11 +229,12 @@ export function createStateStore(options: StateStoreOptions = {}) {
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
-        // One wx write, not open+write across a JS turn. Empty leftovers are
-        // stolen after LOCK_WAIT_MS; 80 children plus sibling test files on
-        // a few-core macOS runner can sit that long between openSync("wx")
-        // and writing the pid, so a waiter unlinks the empty file, recreates
-        // it, and two processes enter fn() — last-rename drops cursor keys.
+        // Exclusive create (`wx`) plus a write of the owner record. That is
+        // not one atomic publish of populated bytes — create and write still
+        // have an interval. The UTF-8 fast path keeps that interval in one
+        // native writeFileSync rather than two JS turns (openSync then write).
+        // Empty leftovers can still be stolen after LOCK_WAIT_MS if a crash
+        // or a still-empty file is old enough. pid-checked unlink remains.
         writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: Date.now() }), {
           encoding: "utf8",
           flag: "wx",

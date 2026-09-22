@@ -105,6 +105,9 @@ const HOST_CHECK_IDS = [
   "bus_instance",
 ] as const;
 
+/** Success reports must include these host layers; skipped placeholders do not count. */
+const REQUIRED_HOST_LAYERS = ["zellij_binary", "zellij_ipc", "zellij_sessions", "session"] as const;
+
 const REMEDY = {
   serve:
     "Run zswarm serve beside Zellij on the crew host and reach it with --serve (ssh:// or an existing tunnel). Direct SSH cannot install or inspect the event bus.",
@@ -206,6 +209,13 @@ function sshFailure(message: string): { code: string; remedy: string } {
         "SSH connected but LocalForward failed. Confirm GatewayPorts/AllowTcpForwarding and that the remote loopback serve port is free.",
     };
   }
+  if (/spawn ssh|\bssh\b.*\benoent\b|\benoent\b.*\bssh\b|ssh:.*(not found|is not recognized)/.test(text)) {
+    return {
+      code: "ssh_unavailable",
+      remedy:
+        "ssh is not available on PATH. Install OpenSSH and retry; doctor does not invent a destination.",
+    };
+  }
   if (
     /could not resolve|name or service not known|no route to host|network is unreachable|connection refused|connection timed out|timed out|connection reset/.test(
       text,
@@ -218,9 +228,9 @@ function sshFailure(message: string): { code: string; remedy: string } {
     };
   }
   return {
-    code: "ssh_connect",
+    code: "ssh_unverified",
     remedy:
-      "SSH did not become ready. Inspect the destination and OpenSSH configuration; doctor does not fall back to another route.",
+      "SSH did not produce remote evidence. Inspect the destination and OpenSSH configuration; doctor does not infer ssh_ready from a missing error match.",
   };
 }
 
@@ -292,6 +302,11 @@ function isRequiredFailure(report: DoctorReport, item: DoctorCheck): boolean {
     if (item.state === "skipped") return false;
     return item.state === "fail";
   }
+  if (item.id === "zellij_ipc") {
+    // Established IPC failure is required even with no selected session.
+    // Unresolved/optional IPC stays warn and advisory.
+    return item.state === "fail";
+  }
   if (item.id === "session") {
     const selected =
       report.route.sessionOrigin === "explicit" ||
@@ -311,7 +326,7 @@ function summarizeFailure(report: DoctorReport): string {
 
 function finishReport(
   report: DoctorReport,
-  status: { cancelled: boolean; timedOut: boolean },
+  status: { cancelled: boolean; timedOut: boolean; requiredFailure?: boolean },
 ): OpsResult {
   if (status.cancelled) {
     return {
@@ -333,7 +348,7 @@ function finishReport(
       },
     };
   }
-  if (report.checks.some((item) => isRequiredFailure(report, item))) {
+  if (status.requiredFailure || report.checks.some((item) => isRequiredFailure(report, item))) {
     return {
       ok: false,
       error: {
@@ -645,6 +660,17 @@ export async function inspectDoctorHost(input: HostInspectInput): Promise<HostIn
       return true;
     }
     return false;
+  };
+
+  /** After a host read resolves/rejects, expiry and cancel stay terminal. */
+  const deadlineOrSignal = (): boolean => {
+    if (cancelled || timedOut) return true;
+    try {
+      budget.require();
+      return false;
+    } catch (err) {
+      return markStop(err);
+    }
   };
 
   const finishHost = (
@@ -1051,11 +1077,25 @@ export async function inspectDoctorHost(input: HostInspectInput): Promise<HostIn
             null,
           ),
         );
+      } else if (deadlineOrSignal()) {
+        checks.push(
+          check(
+            "bus_instance",
+            "host",
+            "skipped",
+            timedOut ? "zellij_timeout" : "zellij_cancelled",
+            elapsedSince(input.clock, instanceStarted),
+            { readiness: "unknown", reason: timedOut ? "deadline_expired" : "cancelled" },
+            timedOut ? "Doctor budget expired during host inspection." : null,
+          ),
+        );
+        return finishHost(session, sessionOrigin);
       } else {
         try {
           const panes = await input.client.listPanes(session, budget.require(), {
             fresh: true,
           });
+          const late = deadlineOrSignal();
           const pluginPath = marker && existsSync(marker.plugin) ? marker.plugin : plugin;
           const live = panes.filter((pane) => isBusPluginPane(pane, pluginPath));
           checks.push(
@@ -1076,8 +1116,10 @@ export async function inspectDoctorHost(input: HostInspectInput): Promise<HostIn
                 : "No live bus plugin pane was observed. Missing/unready bus is degraded performance; doctor will not launch one.",
             ),
           );
+          if (late) return finishHost(session, sessionOrigin);
         } catch (err) {
-          if (markStop(err)) {
+          const late = markStop(err) || deadlineOrSignal();
+          if (late) {
             checks.push(
               check(
                 "bus_instance",
@@ -1110,6 +1152,7 @@ export async function inspectDoctorHost(input: HostInspectInput): Promise<HostIn
     }
   }
 
+  if (deadlineOrSignal()) return finishHost(session, sessionOrigin);
   return { checks, session, sessionOrigin, cancelled, timedOut };
 }
 
@@ -1165,9 +1208,14 @@ function reportFromUnknown(value: unknown): DoctorReport | null {
     return null;
   }
   const checks: DoctorCheck[] = [];
+  const seenRequired = new Set<string>();
   for (const item of checksRaw) {
     const parsed = asDoctorCheck(item);
     if (!parsed) return null;
+    if ((REQUIRED_HOST_LAYERS as readonly string[]).includes(parsed.id) && parsed.scope === "host") {
+      if (seenRequired.has(parsed.id)) return null;
+      seenRequired.add(parsed.id);
+    }
     checks.push(parsed);
   }
   const endpoint = typeof routeRow.endpoint === "string" ? routeRow.endpoint : "";
@@ -1260,6 +1308,34 @@ function coverHostReport(
     if (idx >= 0) out[idx] = replacement;
     else out.push(replacement);
   }
+  for (const id of REQUIRED_HOST_LAYERS) {
+    const idx = out.findIndex((item) => item.id === id);
+    if (idx < 0) {
+      out.push(
+        check(
+          id,
+          "host",
+          "fail",
+          HOST_REPORT_INCOMPLETE_CODE,
+          0,
+          { missing: id },
+          REMEDY.hostReport,
+        ),
+      );
+      continue;
+    }
+    if (out[idx]!.state === "skipped") {
+      out[idx] = check(
+        id,
+        "host",
+        "fail",
+        HOST_REPORT_INCOMPLETE_CODE,
+        out[idx]!.elapsedMs,
+        { ...out[idx]!.detail, missing: id, reason: "skipped_placeholder" },
+        REMEDY.hostReport,
+      );
+    }
+  }
   out.push(...skipHostChecks(out, "skipped_upstream", REMEDY.hostReport));
   return out;
 }
@@ -1348,6 +1424,41 @@ function interactiveSsh(env: NodeJS.ProcessEnv): boolean {
   }
 }
 
+function sshHasPositiveEvidence(inspect: HostInspectResult): boolean {
+  return inspect.checks.some((item) => {
+    if (item.id === "zellij_sessions" && item.state === "ok") return true;
+    if (item.id === "session" && item.state === "ok") return true;
+    if (item.id !== "zellij_binary") return false;
+    if (item.state === "ok") return true;
+    return (
+      item.code === "zellij_missing" ||
+      item.code === "zellij_wrong_bin" ||
+      item.code === "zellij_incompatible"
+    );
+  });
+}
+
+function adoptHostInspectSession(report: DoctorReport, inspect: HostInspectResult): void {
+  const explicit =
+    report.route.sessionOrigin === "explicit" || report.route.sessionOrigin === "inherited";
+  if (explicit) {
+    if (inspect.session && report.route.sessionOrigin === "explicit") {
+      report.route.session = inspect.session;
+    }
+    return;
+  }
+  if (inspect.session) {
+    report.route.session = inspect.session;
+    if (inspect.sessionOrigin && inspect.sessionOrigin !== "unresolved") {
+      report.route.sessionOrigin = inspect.sessionOrigin;
+    }
+    return;
+  }
+  if (inspect.sessionOrigin && report.route.sessionOrigin === "unresolved") {
+    report.route.sessionOrigin = inspect.sessionOrigin;
+  }
+}
+
 async function inspectDirectSsh(input: {
   args: Record<string, unknown>;
   injected: ZellijClient | undefined;
@@ -1357,7 +1468,8 @@ async function inspectDirectSsh(input: {
   remaining: () => number;
   signal?: AbortSignal;
   checks: DoctorCheck[];
-  status: { cancelled: boolean; timedOut: boolean };
+  report: DoctorReport;
+  status: { cancelled: boolean; timedOut: boolean; requiredFailure?: boolean };
 }): Promise<void> {
   const sshStarted = input.clock.now();
   if (interactiveSsh(input.env) && !input.injected) {
@@ -1402,6 +1514,7 @@ async function inspectDirectSsh(input: {
     });
     if (inspect.cancelled) {
       input.status.cancelled = true;
+      adoptHostInspectSession(input.report, inspect);
       input.checks.push(
         check("ssh", "controller", "skipped", "ssh_cancelled", elapsedSince(input.clock, sshStarted), {}, null),
         check("serve", "controller", "skipped", "serve_not_applicable", 0, {}, null),
@@ -1411,6 +1524,7 @@ async function inspectDirectSsh(input: {
     }
     if (inspect.timedOut) {
       input.status.timedOut = true;
+      adoptHostInspectSession(input.report, inspect);
       const binaryOk = inspect.checks.some((item) => item.id === "zellij_binary" && item.state === "ok");
       input.checks.push(
         binaryOk
@@ -1436,14 +1550,10 @@ async function inspectDirectSsh(input: {
       );
       return;
     }
-    const binary = inspect.checks.find((item) => item.id === "zellij_binary");
-    const sshish =
-      binary?.state === "fail" &&
-      /permission denied|host key|authentication|could not resolve|connection refused/.test(
-        String(binary.detail.message ?? "").toLowerCase(),
-      );
-    if (sshish) {
-      const classified = sshFailure(String(binary.detail.message ?? ""));
+    adoptHostInspectSession(input.report, inspect);
+    if (!sshHasPositiveEvidence(inspect)) {
+      const binary = inspect.checks.find((item) => item.id === "zellij_binary");
+      const classified = sshFailure(String(binary?.detail.message ?? ""));
       input.checks.push(
         check(
           "ssh",
@@ -1521,7 +1631,7 @@ async function inspectServeRoute(input: {
   target: string;
   checks: DoctorCheck[];
   report: DoctorReport;
-  status: { cancelled: boolean; timedOut: boolean };
+  status: { cancelled: boolean; timedOut: boolean; requiredFailure?: boolean };
 }): Promise<void> {
   const sshTarget = isSshServeTarget(input.target);
   let manager: ServeTunnelManager | undefined = input.deps.serveTunnels;
@@ -1770,11 +1880,29 @@ async function inspectServeRoute(input: {
           reason: "empty_or_malformed_host_report",
         }),
       );
+      input.status.requiredFailure = true;
       return;
     }
-    if (!hostResult.ok && merged.checks.length === 0) {
+    if (!hostResult.ok) {
       const failed = hostRequestFailure(hostResult);
-      input.checks.push(...failReachedHostLayer(input.checks, failed.code, failed.remedy, failed.detail));
+      const preserved = merged.checks;
+      const contradictory =
+        hostResult.error.code === DOCTOR_FAILED_CODE &&
+        preserved.length > 0 &&
+        preserved.every((item) => item.state !== "fail");
+      const envelope = contradictory
+        ? {
+            code: HOST_REPORT_INVALID_CODE,
+            remedy: REMEDY.hostReport,
+            detail: { ...failed.detail, reason: "contradictory_doctor_failed" },
+          }
+        : failed;
+      input.checks.push(...preserved);
+      input.checks.push(
+        ...failReachedHostLayer(input.checks, envelope.code, envelope.remedy, envelope.detail),
+      );
+      input.status.requiredFailure = true;
+      adoptHostSession();
       return;
     }
     input.checks.push(...coverHostReport(merged.checks, explicit));
@@ -1810,7 +1938,7 @@ export async function doctorOp(
       return 0;
     }
   };
-  const status = { cancelled: false, timedOut: false };
+  const status = { cancelled: false, timedOut: false, requiredFailure: false };
   const hostOnly = args[DOCTOR_SCOPE_FIELD] === DOCTOR_SCOPE_HOST;
   const serveTarget = optionalString(env.ZSWARM_SERVE);
   const sshTarget = optionalString(env.ZSWARM_SSH);
@@ -1850,6 +1978,21 @@ export async function doctorOp(
     return false;
   };
 
+  const applyDeadline = (): void => {
+    if (status.cancelled || status.timedOut) return;
+    try {
+      throwIfAborted(signal);
+    } catch {
+      status.cancelled = true;
+      return;
+    }
+    if (remaining() <= 0) status.timedOut = true;
+  };
+  const done = (): OpsResult => {
+    applyDeadline();
+    return finishReport(report, status);
+  };
+
   try {
     throwIfAborted(signal);
     if (hostOnly) {
@@ -1857,7 +2000,7 @@ export async function doctorOp(
         if (signal?.aborted) status.cancelled = true;
         else if (!status.cancelled) status.timedOut = true;
         report.checks.push(...skipHostChecks(report.checks, "skipped_upstream", REMEDY.zellij));
-        return finishReport(report, status);
+        return done();
       }
       const inspect = await hostDoctorInProcess({
         args,
@@ -1873,7 +2016,7 @@ export async function doctorOp(
       report.route.session = inspect.session;
       report.route.sessionOrigin = inspect.sessionOrigin;
       report.checks.push(...inspect.checks);
-      return finishReport(report, status);
+      return done();
     }
 
     report.checks.push(
@@ -1950,7 +2093,7 @@ export async function doctorOp(
       if (!HOST_CHECK_IDS.every((id) => reportHas(report.checks, id))) {
         report.checks.push(...skipHostChecks(report.checks, "skipped_upstream", REMEDY.serve));
       }
-      return finishReport(report, status);
+      return done();
     }
 
     if (routeTransport === "ssh") {
@@ -1963,9 +2106,10 @@ export async function doctorOp(
         remaining,
         signal,
         checks: report.checks,
+        report,
         status,
       });
-      if (status.cancelled || status.timedOut) return finishReport(report, status);
+      if (status.cancelled || status.timedOut) return done();
     } else if (routeTransport === "serve") {
       const target = env.ZSWARM_SERVE?.trim();
       if (!target) {
@@ -2022,7 +2166,7 @@ export async function doctorOp(
       report.checks.push(...inspect.checks);
     }
 
-    return finishReport(report, status);
+    return done();
   } catch (err) {
     if (err instanceof ZellijError && (err.code === "usage" || err.code === "bad_arg" || err.code === "bad_ssh" || err.code === "bad_ssh_mode" || err.code === "policy_denied")) {
       return { ok: false, error: { code: err.code, message: err.message } };
@@ -2031,7 +2175,7 @@ export async function doctorOp(
       if (!HOST_CHECK_IDS.every((id) => reportHas(report.checks, id))) {
         report.checks.push(...skipHostChecks(report.checks, "skipped_upstream", REMEDY.serve));
       }
-      return finishReport(report, status);
+      return done();
     }
     throw err;
   }
