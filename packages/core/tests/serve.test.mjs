@@ -470,6 +470,7 @@ test("authenticated hello returns protocol identity and never dispatches", async
 });
 
 test("probeServe validates hello and stays distinct across startServe instances", async () => {
+  const first = await startServe("127.0.0.1:0", async () => ({ ok: true, data: {} }), {
     token: "secret",
   });
   const second = await startServe("127.0.0.1:0", async () => ({ ok: true, data: {} }), {

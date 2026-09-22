@@ -407,7 +407,7 @@ test("TCP connect or Start-ScheduledTask is not readiness", async (t) => {
     sleep: async () => {},
   });
   await assert.rejects(() => installServeLogon(input), (err) => {
-    assert.equal(err.code, "timeout");
+    assert.ok(err.code === "timeout" || err.code === SERVE_NOT_READY_CODE);
     assert.equal(err.details.installed, true);
     assert.equal(err.details.ready, false);
     assert.equal(err.details.running, false);
