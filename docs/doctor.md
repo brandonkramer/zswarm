@@ -95,9 +95,18 @@ Check `state` is `ok` | `warn` | `fail` | `skipped`. Stable **ids** and
 | `bus_artifact` / `bus_marker` / `bus_instance` | advisory | Degraded performance, not an unusable crew |
 
 Skipped host checks after a failed upstream stage use
-`skipped_upstream` (or `doctor_unsupported` on older serve peers). Doctor never
-claims an unperformed host/session check passed and never falls back to another
-route.
+`skipped_upstream` (or `doctor_unsupported` on older serve peers). After
+authenticated hello, an empty or malformed host doctor report is
+`host_report_invalid`; missing `zellij_binary` / session coverage is
+`host_report_incomplete`; auth/protocol/transport failures on the host
+request are `host_request_*` on the host layer (serve hello stays
+`serve_hello_ok`). Doctor never claims an unperformed host/session check
+passed and never falls back to another route.
+
+`--timeout-ms` is enforced through host inspection. An expired budget
+returns `timeout` (not `ok: true`), including when host listing overruns
+an injected clock. Cancellation and timeout keep any completed host
+findings in `error.details`.
 
 ## Sample reports
 
@@ -206,6 +215,8 @@ manager, so another in-flight caller keeps its tunnel.
 | `serve_unauthorized` | Same `ZSWARM_SERVE_TOKEN` on host and controller |
 | `serve_hello_unsupported` | Upgrade zswarm serve (protocol 1 hello) |
 | `doctor_unsupported` | Upgrade zswarm serve so it implements `op=doctor` |
+| `host_report_invalid` / `host_report_incomplete` | Hello succeeded but host doctor did not return usable host/session checks. Upgrade zswarm serve |
+| `host_request_unauthorized` / `host_request_protocol` / `host_request_connect` | Host doctor request failed after hello. Same token; check serve framing/reachability; do not treat hello as host inspection |
 | `ssh_auth` / `ssh_host_key` | Fix OpenSSH identity / known_hosts; doctor does not prompt or disable host-key checks |
 | `session_missing` | Start the named Zellij session on the desktop account that owns the crew |
 | `zellij_missing` / `zellij_wrong_bin` | Install Zellij ≥ 0.42; point `ZSWARM_BIN` / `ZSWARM_REMOTE_BIN` at **zellij**, not zswarm |

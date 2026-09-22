@@ -38,6 +38,10 @@ export const DEFAULT_DOCTOR_TIMEOUT_MS = 10_000;
 export const DOCTOR_SCOPE_FIELD = "doctorScope";
 export const DOCTOR_SCOPE_HOST = "host";
 export const DOCTOR_FAILED_CODE = "doctor_failed";
+/** Host doctor reply after hello was empty, malformed, or not a report. */
+export const HOST_REPORT_INVALID_CODE = "host_report_invalid";
+/** Host doctor reply omitted required host/session coverage. */
+export const HOST_REPORT_INCOMPLETE_CODE = "host_report_incomplete";
 /** Cap for optional Tailscale so required SSH/hello/session keep budget. */
 export const DOCTOR_TAILSCALE_MAX_MS = 1_500;
 const DOCTOR_TAILSCALE_RESERVE_MS = 4_000;
@@ -83,6 +87,14 @@ export type HostInspectInput = {
   busRemedy?: string;
 };
 
+export type HostInspectResult = {
+  checks: DoctorCheck[];
+  session: string | null;
+  sessionOrigin: string;
+  cancelled?: boolean;
+  timedOut?: boolean;
+};
+
 const HOST_CHECK_IDS = [
   "zellij_binary",
   "zellij_ipc",
@@ -99,6 +111,8 @@ const REMEDY = {
   token: "Set the same ZSWARM_SERVE_TOKEN on the server and this caller.",
   upgrade:
     "This serve peer does not implement doctor. Upgrade zswarm serve on the crew host, then rerun doctor.",
+  hostReport:
+    "Authenticated hello succeeded, but the host doctor reply was missing, malformed, or did not cover host/session inspection. Upgrade zswarm serve on the crew host and rerun doctor.",
   session:
     "Start the requested Zellij session on the crew host (the account that owns the desktop session), or pass --session for a live session.",
   zellij:
@@ -613,14 +627,61 @@ function busDisabled(env: NodeJS.ProcessEnv): boolean {
  * session listing, pane listing for an existing plugin pane, and StateStore
  * reads. Never pipes, launches, nudges, or writes markers.
  */
-export async function inspectDoctorHost(input: HostInspectInput): Promise<{
-  checks: DoctorCheck[];
-  session: string | null;
-  sessionOrigin: string;
-}> {
+export async function inspectDoctorHost(input: HostInspectInput): Promise<HostInspectResult> {
   const checks: DoctorCheck[] = [];
-  const budget = observationBudget(input.clock, input.timeoutMs, input.signal);
+  const budget = observationBudget(input.clock, Math.max(0, input.timeoutMs), input.signal);
   const started = () => input.clock.now();
+  let cancelled = false;
+  let timedOut = false;
+
+  const markStop = (err: unknown): boolean => {
+    const zerr = err instanceof ZellijError ? err : null;
+    if (zerr?.code === "cancelled") {
+      cancelled = true;
+      return true;
+    }
+    if (zerr?.code === "observation_timeout" || zerr?.code === "timeout") {
+      timedOut = true;
+      return true;
+    }
+    return false;
+  };
+
+  const finishHost = (
+    session: string | null,
+    sessionOrigin: string,
+  ): HostInspectResult => {
+    const reason = cancelled ? "skipped_upstream" : timedOut ? "zellij_timeout" : "skipped_upstream";
+    const remedy = timedOut
+      ? "Doctor budget expired during host inspection."
+      : cancelled
+        ? null
+        : REMEDY.zellij;
+    checks.push(...skipHostChecks(checks, reason, remedy ?? REMEDY.zellij));
+    return { checks, session, sessionOrigin, cancelled, timedOut };
+  };
+
+  try {
+    budget.require();
+  } catch (err) {
+    if (markStop(err)) {
+      const code = timedOut ? "zellij_timeout" : "zellij_cancelled";
+      checks.push(
+        check(
+          "zellij_binary",
+          "host",
+          "skipped",
+          code,
+          0,
+          { reason: timedOut ? "deadline_expired" : "cancelled" },
+          timedOut ? "Doctor budget expired during host inspection." : null,
+        ),
+      );
+      const resolvedEarly = sessionFromEnv(input.env, input.sessionArg);
+      return finishHost(resolvedEarly?.session ?? null, originLabel(resolvedEarly?.source));
+    }
+    throw err;
+  }
 
   if (input.busUnsupported) {
     const remedy = input.busRemedy ?? REMEDY.serve;
@@ -705,7 +766,10 @@ export async function inspectDoctorHost(input: HostInspectInput): Promise<{
         REMEDY.zellij,
       ),
     );
-    if (zerr?.code === "cancelled") throw err;
+    if (markStop(err)) {
+      const resolvedEarly = sessionFromEnv(input.env, input.sessionArg);
+      return finishHost(resolvedEarly?.session ?? null, originLabel(resolvedEarly?.source));
+    }
   }
 
   const ipcStarted = started();
@@ -1013,7 +1077,20 @@ export async function inspectDoctorHost(input: HostInspectInput): Promise<{
             ),
           );
         } catch (err) {
-          if (err instanceof ZellijError && err.code === "cancelled") throw err;
+          if (markStop(err)) {
+            checks.push(
+              check(
+                "bus_instance",
+                "host",
+                "skipped",
+                timedOut ? "zellij_timeout" : "zellij_cancelled",
+                elapsedSince(input.clock, instanceStarted),
+                { readiness: "unknown", reason: timedOut ? "deadline_expired" : "cancelled" },
+                timedOut ? "Doctor budget expired during host inspection." : null,
+              ),
+            );
+            return finishHost(session, sessionOrigin);
+          }
           checks.push(
             check(
               "bus_instance",
@@ -1033,7 +1110,7 @@ export async function inspectDoctorHost(input: HostInspectInput): Promise<{
     }
   }
 
-  return { checks, session, sessionOrigin };
+  return { checks, session, sessionOrigin, cancelled, timedOut };
 }
 
 function hostDoctorRequest(
@@ -1049,13 +1126,142 @@ function hostDoctorRequest(
   return request;
 }
 
+function asDoctorCheck(value: unknown): DoctorCheck | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.id !== "string" || row.id.trim() === "") return null;
+  if (row.scope !== "controller" && row.scope !== "host") return null;
+  if (row.state !== "ok" && row.state !== "warn" && row.state !== "fail" && row.state !== "skipped") {
+    return null;
+  }
+  if (typeof row.code !== "string" || row.code.trim() === "") return null;
+  const elapsedMs = typeof row.elapsedMs === "number" && Number.isFinite(row.elapsedMs) ? row.elapsedMs : 0;
+  const detail =
+    row.detail && typeof row.detail === "object" && !Array.isArray(row.detail)
+      ? (row.detail as Record<string, unknown>)
+      : {};
+  const remedy = typeof row.remedy === "string" ? row.remedy : row.remedy === null ? null : null;
+  return {
+    id: row.id,
+    scope: row.scope,
+    state: row.state,
+    code: row.code,
+    elapsedMs,
+    detail,
+    remedy,
+  };
+}
+
 function reportFromUnknown(value: unknown): DoctorReport | null {
   if (!value || typeof value !== "object") return null;
   const row = value as Record<string, unknown>;
-  const route = row.route;
-  const checks = row.checks;
-  if (!route || typeof route !== "object" || !Array.isArray(checks)) return null;
-  return value as DoctorReport;
+  const routeRaw = row.route;
+  const checksRaw = row.checks;
+  if (!routeRaw || typeof routeRaw !== "object" || Array.isArray(routeRaw) || !Array.isArray(checksRaw)) {
+    return null;
+  }
+  const routeRow = routeRaw as Record<string, unknown>;
+  if (routeRow.transport !== "local" && routeRow.transport !== "ssh" && routeRow.transport !== "serve") {
+    return null;
+  }
+  const checks: DoctorCheck[] = [];
+  for (const item of checksRaw) {
+    const parsed = asDoctorCheck(item);
+    if (!parsed) return null;
+    checks.push(parsed);
+  }
+  const endpoint = typeof routeRow.endpoint === "string" ? routeRow.endpoint : "";
+  const session = typeof routeRow.session === "string" ? routeRow.session : routeRow.session === null ? null : null;
+  const sessionOrigin = typeof routeRow.sessionOrigin === "string" ? routeRow.sessionOrigin : "unresolved";
+  return {
+    route: {
+      transport: routeRow.transport,
+      endpoint,
+      session,
+      sessionOrigin,
+    },
+    checks,
+  };
+}
+
+function hostChecksFrom(report: DoctorReport): DoctorCheck[] {
+  return report.checks.filter((item) => item.scope === "host");
+}
+
+function hostSessionCovers(checks: DoctorCheck[], explicit: string | null): boolean {
+  const row = checks.find((item) => item.id === "session");
+  if (!row) return false;
+  if (!explicit) return true;
+  const named = [row.detail.session, row.detail.requested].filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+  return named.includes(explicit);
+}
+
+function hostRequestFailure(result: OpsResult): { code: string; remedy: string; detail: Record<string, unknown> } {
+  const failed = serveFailure(result);
+  const mapped =
+    failed.code === "serve_unauthorized"
+      ? "host_request_unauthorized"
+      : failed.code === "serve_connect"
+        ? "host_request_connect"
+        : failed.code === "serve_timeout"
+          ? "host_request_timeout"
+          : failed.code === "serve_cancelled"
+            ? "host_request_cancelled"
+            : "host_request_protocol";
+  return { code: mapped, remedy: failed.remedy, detail: failed.detail };
+}
+
+function failReachedHostLayer(
+  existing: DoctorCheck[],
+  code: string,
+  remedy: string,
+  detail: Record<string, unknown> = {},
+): DoctorCheck[] {
+  const extra: DoctorCheck[] = [];
+  if (!existing.some((item) => item.id === "zellij_binary")) {
+    extra.push(check("zellij_binary", "host", "fail", code, 0, detail, remedy));
+  }
+  extra.push(...skipHostChecks([...existing, ...extra], "skipped_upstream", remedy));
+  return extra;
+}
+
+function coverHostReport(
+  checks: DoctorCheck[],
+  explicit: string | null,
+): DoctorCheck[] {
+  const out = [...checks];
+  if (!out.some((item) => item.id === "zellij_binary")) {
+    out.push(
+      check(
+        "zellij_binary",
+        "host",
+        "fail",
+        HOST_REPORT_INCOMPLETE_CODE,
+        0,
+        { missing: "zellij_binary" },
+        REMEDY.hostReport,
+      ),
+    );
+  }
+  const sessionRow = out.find((item) => item.id === "session");
+  if (!sessionRow || !hostSessionCovers(out, explicit)) {
+    const replacement = check(
+      "session",
+      "host",
+      "fail",
+      HOST_REPORT_INCOMPLETE_CODE,
+      0,
+      { requested: explicit, reason: sessionRow ? "session_not_covered" : "session_missing_from_report" },
+      REMEDY.hostReport,
+    );
+    const idx = out.findIndex((item) => item.id === "session");
+    if (idx >= 0) out[idx] = replacement;
+    else out.push(replacement);
+  }
+  out.push(...skipHostChecks(out, "skipped_upstream", REMEDY.hostReport));
+  return out;
 }
 
 function mergeHostReply(result: OpsResult): {
@@ -1063,29 +1269,41 @@ function mergeHostReply(result: OpsResult): {
   session?: string | null;
   sessionOrigin?: string;
   unsupported?: boolean;
+  invalid?: boolean;
 } {
+  if (!result.ok && (result.error.code === "usage" || /requires op=/.test(result.error.message))) {
+    return { checks: [], unsupported: true };
+  }
+  const raw = result.ok ? result.data : result.error.details;
+  const report = reportFromUnknown(raw);
   if (result.ok) {
-    const report = reportFromUnknown(result.data);
-    if (!report) return { checks: [] };
+    if (!report) return { checks: [], invalid: true };
+    const checks = hostChecksFrom(report);
+    if (checks.length === 0) return { checks: [], invalid: true, session: report.route.session, sessionOrigin: report.route.sessionOrigin };
     return {
-      checks: report.checks.filter((item) => item.scope === "host"),
+      checks,
       session: report.route.session,
       sessionOrigin: report.route.sessionOrigin,
     };
   }
   if (result.error.code === DOCTOR_FAILED_CODE) {
-    const report = reportFromUnknown(result.error.details);
-    if (!report) return { checks: [] };
+    if (!report) return { checks: [], invalid: true };
+    const checks = hostChecksFrom(report);
+    if (checks.length === 0) {
+      return { checks: [], invalid: true, session: report.route.session, sessionOrigin: report.route.sessionOrigin };
+    }
     return {
-      checks: report.checks.filter((item) => item.scope === "host"),
+      checks,
       session: report.route.session,
       sessionOrigin: report.route.sessionOrigin,
     };
   }
-  if (result.error.code === "usage" || /requires op=/.test(result.error.message)) {
-    return { checks: [], unsupported: true };
-  }
-  return { checks: [] };
+  if (!report) return { checks: [] };
+  return {
+    checks: hostChecksFrom(report),
+    session: report.route.session,
+    sessionOrigin: report.route.sessionOrigin,
+  };
 }
 
 async function hostDoctorInProcess(input: {
@@ -1099,11 +1317,7 @@ async function hostDoctorInProcess(input: {
   busUnsupported?: boolean;
   /** Serve workers and local inspect must not recurse into SSH/serve. */
   stripRouting?: boolean;
-}): Promise<{
-  checks: DoctorCheck[];
-  session: string | null;
-  sessionOrigin: string;
-}> {
+}): Promise<HostInspectResult> {
   const hostEnv = input.stripRouting === false ? input.env : serveChildEnv(input.env);
   const client =
     input.injected ??
@@ -1186,6 +1400,42 @@ async function inspectDirectSsh(input: {
       busUnsupported: true,
       stripRouting: false,
     });
+    if (inspect.cancelled) {
+      input.status.cancelled = true;
+      input.checks.push(
+        check("ssh", "controller", "skipped", "ssh_cancelled", elapsedSince(input.clock, sshStarted), {}, null),
+        check("serve", "controller", "skipped", "serve_not_applicable", 0, {}, null),
+        ...(inspect.checks.length ? inspect.checks : skipHostChecks(input.checks, "skipped_upstream", REMEDY.serve)),
+      );
+      return;
+    }
+    if (inspect.timedOut) {
+      input.status.timedOut = true;
+      const binaryOk = inspect.checks.some((item) => item.id === "zellij_binary" && item.state === "ok");
+      input.checks.push(
+        binaryOk
+          ? check(
+              "ssh",
+              "controller",
+              "ok",
+              "ssh_ready",
+              elapsedSince(input.clock, sshStarted),
+              { destination: input.env.ZSWARM_SSH ?? null },
+            )
+          : check(
+              "ssh",
+              "controller",
+              "fail",
+              "ssh_timeout",
+              elapsedSince(input.clock, sshStarted),
+              {},
+              "SSH inspection ran out of doctor budget.",
+            ),
+        check("serve", "controller", "skipped", "serve_not_applicable", 0, {}, null),
+        ...(inspect.checks.length ? inspect.checks : skipHostChecks(input.checks, "skipped_upstream", REMEDY.serve)),
+      );
+      return;
+    }
     const binary = inspect.checks.find((item) => item.id === "zellij_binary");
     const sshish =
       binary?.state === "fail" &&
@@ -1226,6 +1476,15 @@ async function inspectDirectSsh(input: {
       input.status.cancelled = true;
       input.checks.push(
         check("ssh", "controller", "skipped", "ssh_cancelled", elapsedSince(input.clock, sshStarted), {}, null),
+        check("serve", "controller", "skipped", "serve_not_applicable", 0, {}, null),
+        ...skipHostChecks(input.checks, "skipped_upstream", REMEDY.serve),
+      );
+      return;
+    }
+    if (err instanceof ZellijError && (err.code === "timeout" || err.code === "observation_timeout")) {
+      input.status.timedOut = true;
+      input.checks.push(
+        check("ssh", "controller", "fail", "ssh_timeout", elapsedSince(input.clock, sshStarted), {}, "SSH inspection ran out of doctor budget."),
         check("serve", "controller", "skipped", "serve_not_applicable", 0, {}, null),
         ...skipHostChecks(input.checks, "skipped_upstream", REMEDY.serve),
       );
@@ -1470,52 +1729,56 @@ async function inspectServeRoute(input: {
         signal: input.signal,
       },
     );
+    const merged = mergeHostReply(hostResult);
+    const adoptHostSession = () => {
+      if (merged.session && input.report.route.sessionOrigin === "unresolved") {
+        input.report.route.session = merged.session ?? null;
+        if (merged.sessionOrigin) input.report.route.sessionOrigin = merged.sessionOrigin;
+      }
+      if (explicit && merged.sessionOrigin === "explicit") {
+        input.report.route.session = merged.session ?? explicit;
+        input.report.route.sessionOrigin = "explicit";
+      }
+    };
     if (!hostResult.ok && hostResult.error.code === "cancelled") {
       input.status.cancelled = true;
-      const merged = mergeHostReply(hostResult);
       input.checks.push(
         ...(merged.checks.length
-          ? merged.checks
+          ? [...merged.checks, ...skipHostChecks([...input.checks, ...merged.checks], "skipped_upstream", REMEDY.serve)]
           : skipHostChecks(input.checks, "skipped_upstream", REMEDY.serve)),
       );
+      adoptHostSession();
       return;
     }
     if (!hostResult.ok && hostResult.error.code === "timeout") {
       input.status.timedOut = true;
-      const merged = mergeHostReply(hostResult);
       input.checks.push(
         ...(merged.checks.length
-          ? merged.checks
+          ? [...merged.checks, ...skipHostChecks([...input.checks, ...merged.checks], "skipped_upstream", REMEDY.serve)]
           : skipHostChecks(input.checks, "skipped_upstream", REMEDY.serve)),
       );
+      adoptHostSession();
       return;
     }
-    const merged = mergeHostReply(hostResult);
     if (merged.unsupported) {
+      input.checks.push(...skipHostChecks(input.checks, "doctor_unsupported", REMEDY.upgrade));
+      return;
+    }
+    if (merged.invalid) {
       input.checks.push(
-        ...skipHostChecks(input.checks, "doctor_unsupported", REMEDY.upgrade),
+        ...failReachedHostLayer(input.checks, HOST_REPORT_INVALID_CODE, REMEDY.hostReport, {
+          reason: "empty_or_malformed_host_report",
+        }),
       );
       return;
     }
     if (!hostResult.ok && merged.checks.length === 0) {
-      const failed = serveFailure(hostResult);
-      input.checks.push(
-        ...skipHostChecks(input.checks, "skipped_upstream", failed.remedy).map((item) => ({
-          ...item,
-          detail: { ...item.detail, ...failed.detail },
-        })),
-      );
+      const failed = hostRequestFailure(hostResult);
+      input.checks.push(...failReachedHostLayer(input.checks, failed.code, failed.remedy, failed.detail));
       return;
     }
-    input.checks.push(...merged.checks);
-    if (merged.session && input.report.route.sessionOrigin === "unresolved") {
-      input.report.route.session = merged.session ?? null;
-      if (merged.sessionOrigin) input.report.route.sessionOrigin = merged.sessionOrigin;
-    }
-    if (explicit && merged.sessionOrigin === "explicit") {
-      input.report.route.session = merged.session ?? explicit;
-      input.report.route.sessionOrigin = "explicit";
-    }
+    input.checks.push(...coverHostReport(merged.checks, explicit));
+    adoptHostSession();
   } finally {
     await releaseOwned();
   }
@@ -1590,15 +1853,23 @@ export async function doctorOp(
   try {
     throwIfAborted(signal);
     if (hostOnly) {
+      if (remaining() <= 0) {
+        if (signal?.aborted) status.cancelled = true;
+        else if (!status.cancelled) status.timedOut = true;
+        report.checks.push(...skipHostChecks(report.checks, "skipped_upstream", REMEDY.zellij));
+        return finishReport(report, status);
+      }
       const inspect = await hostDoctorInProcess({
         args,
         injected,
         deps,
         env,
         clock,
-        timeoutMs: remaining() || timeoutMs,
+        timeoutMs: remaining(),
         signal,
       });
+      if (inspect.cancelled) status.cancelled = true;
+      if (inspect.timedOut) status.timedOut = true;
       report.route.session = inspect.session;
       report.route.sessionOrigin = inspect.sessionOrigin;
       report.checks.push(...inspect.checks);
@@ -1739,6 +2010,8 @@ export async function doctorOp(
         timeoutMs: remaining(),
         signal,
       });
+      if (inspect.cancelled) status.cancelled = true;
+      if (inspect.timedOut) status.timedOut = true;
       report.route.session = inspect.session ?? report.route.session;
       if (inspect.sessionOrigin !== "unresolved" && report.route.sessionOrigin === "unresolved") {
         report.route.sessionOrigin = inspect.sessionOrigin;

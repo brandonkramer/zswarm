@@ -222,6 +222,8 @@ export {
   DOCTOR_SCOPE_FIELD,
   DOCTOR_SCOPE_HOST,
   DOCTOR_TAILSCALE_MAX_MS,
+  HOST_REPORT_INCOMPLETE_CODE,
+  HOST_REPORT_INVALID_CODE,
   doctorOp,
   inspectDoctorHost,
   type DoctorCheck,
