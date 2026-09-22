@@ -307,6 +307,13 @@ function isRequiredFailure(report: DoctorReport, item: DoctorCheck): boolean {
     // Unresolved/optional IPC stays warn and advisory.
     return item.state === "fail";
   }
+  if (item.id === "zellij_sessions") {
+    // Missing/skipped/failed listing coverage is required; sessions_none stays warn.
+    return item.state === "fail";
+  }
+  if (item.id === "host_request") {
+    return item.state === "fail";
+  }
   if (item.id === "session") {
     const selected =
       report.route.sessionOrigin === "explicit" ||
@@ -781,6 +788,9 @@ export async function inspectDoctorHost(input: HostInspectInput): Promise<HostIn
       /permission denied|host key|could not resolve|connection refused|authentication/.test(
         zerr.message.toLowerCase(),
       );
+    const origin =
+      zerr?.details && typeof zerr.details.origin === "string" ? zerr.details.origin : undefined;
+    const spawn = zerr?.details?.spawn;
     checks.push(
       check(
         "zellij_binary",
@@ -788,7 +798,11 @@ export async function inspectDoctorHost(input: HostInspectInput): Promise<HostIn
         zerr?.code === "cancelled" || code === "zellij_timeout" ? "skipped" : "fail",
         sshish ? "zellij_unreachable" : code,
         elapsedSince(input.clock, binaryStarted),
-        { message: zerr?.message ?? (err instanceof Error ? err.message : String(err)) },
+        {
+          message: zerr?.message ?? (err instanceof Error ? err.message : String(err)),
+          ...(origin ? { origin } : {}),
+          ...(spawn && typeof spawn === "object" ? { spawn } : {}),
+        },
         REMEDY.zellij,
       ),
     );
@@ -1275,6 +1289,36 @@ function failReachedHostLayer(
   return extra;
 }
 
+/** Envelope failure after hello: keep completed host rows; serialize the request cause once. */
+function hostRequestEvidence(
+  failed: { code: string; remedy: string; detail: Record<string, unknown> },
+  message: string,
+): DoctorCheck {
+  const cause =
+    typeof failed.detail.transportCode === "string" && failed.detail.transportCode.length > 0
+      ? failed.detail.transportCode
+      : failed.code;
+  return check(
+    "host_request",
+    "host",
+    "fail",
+    failed.code,
+    0,
+    { cause, message },
+    failed.remedy,
+  );
+}
+
+function appendHostRequestFailure(
+  existing: DoctorCheck[],
+  failed: { code: string; remedy: string; detail: Record<string, unknown> },
+  message: string,
+): DoctorCheck[] {
+  const extra: DoctorCheck[] = [hostRequestEvidence(failed, message)];
+  extra.push(...skipHostChecks([...existing, ...extra], "skipped_upstream", failed.remedy));
+  return extra;
+}
+
 function coverHostReport(
   checks: DoctorCheck[],
   explicit: string | null,
@@ -1430,6 +1474,8 @@ function sshHasPositiveEvidence(inspect: HostInspectResult): boolean {
     if (item.id === "session" && item.state === "ok") return true;
     if (item.id !== "zellij_binary") return false;
     if (item.state === "ok") return true;
+    // Local spawn/preflight is not remote proof. Missing origin is not remote.
+    if (item.detail.origin !== "remote") return false;
     return (
       item.code === "zellij_missing" ||
       item.code === "zellij_wrong_bin" ||
@@ -1885,21 +1931,10 @@ async function inspectServeRoute(input: {
     }
     if (!hostResult.ok) {
       const failed = hostRequestFailure(hostResult);
-      const preserved = merged.checks;
-      const contradictory =
-        hostResult.error.code === DOCTOR_FAILED_CODE &&
-        preserved.length > 0 &&
-        preserved.every((item) => item.state !== "fail");
-      const envelope = contradictory
-        ? {
-            code: HOST_REPORT_INVALID_CODE,
-            remedy: REMEDY.hostReport,
-            detail: { ...failed.detail, reason: "contradictory_doctor_failed" },
-          }
-        : failed;
+      const preserved = merged.checks.filter((item) => item.id !== "host_request");
       input.checks.push(...preserved);
       input.checks.push(
-        ...failReachedHostLayer(input.checks, envelope.code, envelope.remedy, envelope.detail),
+        ...appendHostRequestFailure(input.checks, failed, hostResult.error.message),
       );
       input.status.requiredFailure = true;
       adoptHostSession();

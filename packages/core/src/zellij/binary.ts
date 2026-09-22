@@ -16,9 +16,33 @@ export { createSshExec, type SshTarget };
 
 export type ZellijExecResult = ExecResult;
 export type ZellijExecFn = ExecFn;
+/** Where a missing/wrong-Zellij failure was produced. */
+export type ZellijFailureOrigin = "local_spawn" | "local_preflight" | "remote";
 
 export const DEFAULT_TIMEOUT_MS = 15_000;
 export { NOT_FOUND_EXIT };
+
+/** Local Node spawn failure vs a process that actually started. */
+export function originFromExecResult(
+  result: ExecResult,
+): Exclude<ZellijFailureOrigin, "local_preflight"> {
+  return result.spawn?.origin === "local" ? "local_spawn" : "remote";
+}
+
+export function zellijExecDetails(result: ExecResult): Record<string, unknown> {
+  const origin = originFromExecResult(result);
+  return result.spawn
+    ? { origin, spawn: { origin: result.spawn.origin, errno: result.spawn.errno, bin: result.spawn.bin } }
+    : { origin };
+}
+
+export function zellijMissingError(zellijPath: string, result: ExecResult): ZellijError {
+  return new ZellijError(
+    "zellij_missing",
+    `zellij binary not found (${zellijPath}); install Zellij ≥ 0.42, add it to PATH, or set ZSWARM_BIN / ZSWARM_PATH`,
+    zellijExecDetails(result),
+  );
+}
 
 /** Expand a leading `~/` or `~\` using USERPROFILE/HOME. */
 export function expandHomePath(
@@ -64,6 +88,7 @@ export function assertZellijBinaryPath(path: string): void {
   throw new ZellijError(
     "zellij_wrong_bin",
     `ZSWARM_BIN/ZSWARM_PATH points at zswarm (${path}), not Zellij. Set it to the zellij binary (e.g. ~/.local/bin/zellij)`,
+    { origin: "local_preflight", bin: path },
   );
 }
 
@@ -177,13 +202,11 @@ export async function ensureZellijIdentity(
     throw new ZellijError(
       "zellij_wrong_bin",
       `resolved binary is zswarm, not Zellij (${zellijPath}). Set ZSWARM_BIN to the zellij executable`,
+      zellijExecDetails(result),
     );
   }
   if (result.code === NOT_FOUND_EXIT) {
-    throw new ZellijError(
-      "zellij_missing",
-      `zellij binary not found (${zellijPath}); install Zellij ≥ 0.42, add it to PATH, or set ZSWARM_BIN / ZSWARM_PATH`,
-    );
+    throw zellijMissingError(zellijPath, result);
   }
   if (result.code === 0) {
     if (signal?.aborted) return false;
@@ -194,6 +217,7 @@ export async function ensureZellijIdentity(
     throw new ZellijError(
       "zellij_wrong_bin",
       `resolved binary is not Zellij (${zellijPath}); --version returned: ${result.stdout.trim() || result.stderr.trim() || "empty"}`,
+      zellijExecDetails(result),
     );
   }
   // Timeout / transport failure: leave unresolved so a later call retries.
@@ -225,13 +249,11 @@ export async function ensureZellijCapabilities(
     throw new ZellijError(
       "zellij_wrong_bin",
       `resolved binary is zswarm, not Zellij (${zellijPath})`,
+      zellijExecDetails(result),
     );
   }
   if (result.code === NOT_FOUND_EXIT) {
-    throw new ZellijError(
-      "zellij_missing",
-      `zellij binary not found (${zellijPath})`,
-    );
+    throw zellijMissingError(zellijPath, result);
   }
   // Require the flags this client always passes.
   if (
@@ -247,6 +269,7 @@ export async function ensureZellijCapabilities(
     throw new ZellijError(
       "zellij_incompatible",
       `Zellij at ${zellijPath} does not advertise list-sessions --no-formatting; upgrade Zellij (≥ 0.42) or zswarm`,
+      zellijExecDetails(result),
     );
   }
   // Soft: leave unresolved on transport failure.

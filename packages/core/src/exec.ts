@@ -12,10 +12,19 @@ import {
   type RemoteShell,
 } from "./zellij/ipc.js";
 
+export type ExecSpawnFailure = {
+  /** Node could not start this process. Distinct from a remote 127. */
+  origin: "local";
+  errno: string;
+  bin: string;
+};
+
 export type ExecResult = {
   code: number;
   stdout: string;
   stderr: string;
+  /** Present only when this host failed to spawn the binary. */
+  spawn?: ExecSpawnFailure;
 };
 
 export type ExecOptions = {
@@ -40,6 +49,20 @@ export type ExecFn = (
 ) => Promise<ExecResult>;
 
 export const NOT_FOUND_EXIT = 127;
+
+function localSpawnResult(
+  err: Error & { code?: unknown },
+  binPath: string,
+): ExecResult {
+  const errno = typeof err.code === "string" && err.code ? err.code : "error";
+  const missing = errno === "ENOENT" || errno === "ENOTDIR";
+  return {
+    code: missing ? NOT_FOUND_EXIT : 1,
+    stdout: "",
+    stderr: `${errno}: ${err.message} (bin=${binPath})`,
+    spawn: { origin: "local", errno, bin: binPath },
+  };
+}
 
 /** POSIX single-quoting, for building a command line the remote shell parses. */
 export function shellQuote(arg: string): string {
@@ -470,12 +493,7 @@ function runUntil(
     }
     options.signal?.addEventListener("abort", onAbort, { once: true });
     child.on("error", (err: Error & { code?: string }) => {
-      const missing = err.code === "ENOENT" || err.code === "ENOTDIR";
-      finish({
-        code: missing ? NOT_FOUND_EXIT : 1,
-        stdout: "",
-        stderr: `${err.code ?? "error"}: ${err.message} (bin=${binPath})`,
-      });
+      finish(localSpawnResult(err, binPath));
     });
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -515,13 +533,7 @@ function runToExit(
           | (Error & { code?: unknown; killed?: boolean; signal?: string })
           | null;
         if (failure && typeof failure.code === "string") {
-          const missing =
-            failure.code === "ENOENT" || failure.code === "ENOTDIR";
-          resolve({
-            code: missing ? NOT_FOUND_EXIT : 1,
-            stdout: "",
-            stderr: `${failure.code}: ${failure.message} (bin=${binPath})`,
-          });
+          resolve(localSpawnResult(failure, binPath));
           return;
         }
         if (

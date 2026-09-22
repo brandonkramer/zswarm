@@ -88,10 +88,11 @@ Check `state` is `ok` | `warn` | `fail` | `skipped`. Stable **ids** and
 | `ssh` | yes on `--ssh` / `ssh://` when `fail` | Connect / auth / host-key / forward |
 | `serve` | yes on serve routes when `fail` | Hello, token, protocol. TCP connect alone is not readiness |
 | `zellij_binary` | yes when inspected and `fail` | Missing/wrong/incompatible binary |
-| `session` | yes when explicit, inherited, or host-default | Missing requested/default session fails. No selected session + no live sessions is a **warning** |
-| `tailscale` | advisory | Optional peer/online evidence |
 | `zellij_ipc` | yes when `fail` (established IPC) | Failed/expired SSH IPC is required even without `--session`. Unresolved/optional IPC stays advisory |
-| `zellij_sessions` | advisory at runtime; **required coverage on serve success reports** | Visible sessions vs none. A success host report that omits this layer is `host_report_incomplete` |
+| `zellij_sessions` | yes when `fail` | Missing/skipped listing coverage on a success host report is required (`host_report_incomplete`). `sessions_none` stays a warning |
+| `session` | yes when explicit, inherited, or host-default | Missing requested/default session fails. No selected session + no live sessions is a **warning** |
+| `host_request` | yes when `fail` | Post-hello host doctor envelope (`serve_unauthorized`, protocol, …). Completed binary/session rows stay; the cause is this row |
+| `tailscale` | advisory | Optional peer/online evidence |
 | `bus_artifact` / `bus_marker` / `bus_instance` | advisory | Degraded performance, not an unusable crew |
 
 Skipped host checks after a failed upstream stage use
@@ -99,8 +100,8 @@ Skipped host checks after a failed upstream stage use
 authenticated hello, an empty or malformed host doctor report is
 `host_report_invalid`; missing `zellij_binary` / session coverage is
 `host_report_incomplete`; auth/protocol/transport failures on the host
-request are `host_request_*` on the host layer (serve hello stays
-`serve_hello_ok`). Doctor never claims an unperformed host/session check
+request are `host_request_*` on a dedicated `host_request` row (serve hello stays
+`serve_hello_ok`; completed host findings are kept). Doctor never claims an unperformed host/session check
 passed and never falls back to another route.
 
 `--timeout-ms` is enforced through host inspection, including after the last
@@ -114,7 +115,9 @@ protocol/transport) stays a required failure even if it carries all-ok host
 rows. A success host report must cover binary, IPC, session listing, and
 session selection — skipped placeholders do not certify those layers. Direct
 SSH requires positive remote evidence before `ssh_ready` and copies an inferred
-host session into `report.route`.
+host session into `report.route`. Local SSH-client spawn failure (`ENOENT`) and
+local wrong-bin preflight are not remote proof; a remote process that reported
+missing or wrong Zellij still is.
 
 Cancellation and timeout keep any completed host
 findings in `error.details`.

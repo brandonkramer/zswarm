@@ -27,8 +27,10 @@ import {
   probeServe,
   serveChildEnv,
   startServe,
+  resetZellijIdentityCache,
   ZellijError,
 } from "../dist/index.js";
+import { nodeFixture } from "../test-support/node-fixture.mjs";
 
 const MUTATION_NEEDLES = [
   "pipe",
@@ -890,7 +892,7 @@ function hostDoctorReply(checks, extras = {}) {
   };
 }
 
-async function serveAfterHello(t, doctorResult) {
+async function serveAfterHello(t, doctorResult, token = "secret") {
   const server = await startServe(
     "127.0.0.1:0",
     async (request) => {
@@ -899,7 +901,7 @@ async function serveAfterHello(t, doctorResult) {
       }
       return { ok: true, data: { ignored: true } };
     },
-    { token: "secret" },
+    { token },
   );
   t.after(() => server.close());
   return server;
@@ -1007,9 +1009,11 @@ test("host-request unauthorized after hello is a host-layer failure", async (t) 
   assert.equal(result.ok, false);
   assert.equal(result.error.code, DOCTOR_FAILED_CODE);
   assert.equal(checkById(result.error.details, "serve").code, "serve_hello_ok");
-  assert.equal(checkById(result.error.details, "zellij_binary").code, "host_request_unauthorized");
-  assert.equal(checkById(result.error.details, "zellij_binary").state, "fail");
-  assert.equal(checkById(result.error.details, "session").state, "skipped");
+  assert.equal(checkById(result.error.details, "host_request").code, "host_request_unauthorized");
+  assert.equal(checkById(result.error.details, "host_request").state, "fail");
+  assert.equal(checkById(result.error.details, "zellij_binary").state, "skipped");
+  assert.match(result.error.message, /host_request_unauthorized/);
+  assert.match(JSON.stringify(result.error), /bad token on host doctor/);
 });
 
 test("host-request protocol failure after hello is a host-layer failure", async (t) => {
@@ -1028,7 +1032,10 @@ test("host-request protocol failure after hello is a host-layer failure", async 
   assert.equal(result.ok, false);
   assert.equal(result.error.code, DOCTOR_FAILED_CODE);
   assert.equal(checkById(result.error.details, "serve").code, "serve_hello_ok");
-  assert.equal(checkById(result.error.details, "zellij_binary").code, "host_request_protocol");
+  assert.equal(checkById(result.error.details, "host_request").code, "host_request_protocol");
+  assert.equal(checkById(result.error.details, "host_request").state, "fail");
+  assert.match(result.error.message, /host_request_protocol/);
+  assert.match(JSON.stringify(result.error), /truncated host doctor reply/);
 });
 
 test("cancelled host doctor keeps completed host findings", async (t) => {
@@ -1303,6 +1310,191 @@ test("late serve host reply after overall deadline cannot publish success", asyn
   assert.equal(result.ok, false, JSON.stringify(result));
   assert.equal(result.error.code, "timeout");
   assert.equal(checkById(doctorReportOf(result), "serve").code, "serve_hello_ok");
+});
+
+const independentHostLayers = ["zellij_binary", "zellij_ipc", "zellij_sessions", "session"];
+function goodIndependentLayer(id) {
+  return hostScopedCheck(id, { detail: id === "session" ? { session: "crew" } : {} });
+}
+for (const id of independentHostLayers) {
+  for (const variant of ["missing", "skipped", "fail"]) {
+    test(`host success cannot hide ${id} alone: ${variant}`, async (t) => {
+      const checks = independentHostLayers.flatMap((key) =>
+        key !== id
+          ? [goodIndependentLayer(key)]
+          : variant === "missing"
+            ? []
+            : [{ ...goodIndependentLayer(key), state: variant, code: `${key}_${variant}` }],
+      );
+      const server = await serveAfterHello(t, {
+        ok: true,
+        data: hostDoctorReply(checks, { session: "crew", sessionOrigin: "explicit" }),
+      });
+      const result = await dispatchZswarm(
+        { op: "doctor", session: "crew", timeoutMs: 2000 },
+        undefined,
+        { env: { ZSWARM_SERVE: server.label, ZSWARM_SERVE_TOKEN: "secret" }, tailscaleStatus: missingTailscale() },
+      );
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.error.code, DOCTOR_FAILED_CODE);
+      const row = checkById(doctorReportOf(result), id);
+      assert.equal(row.state, "fail", JSON.stringify(result));
+    });
+  }
+}
+
+function missingSshBin() {
+  return join(tmpdir(), `zswarm-no-such-ssh-${process.pid}-${Date.now()}`);
+}
+
+test("actual missing SSH executable is not positive remote evidence", async () => {
+  resetZellijIdentityCache();
+  const result = await dispatchZswarm(
+    { op: "doctor", ssh: "user@review-host-missing-exec", timeoutMs: 2000 },
+    undefined,
+    {
+      env: { ZSWARM_SSH_BIN: missingSshBin(), ZSWARM_LOG: "0", ZSWARM_BUS: "0" },
+      state: { readBus: () => null },
+      tailscaleStatus: missingTailscale(),
+    },
+  );
+  assert.equal(result.ok, false, JSON.stringify(result));
+  const ssh = checkById(doctorReportOf(result), "ssh");
+  assert.notEqual(ssh?.state, "ok", JSON.stringify(result));
+  const binary = checkById(doctorReportOf(result), "zellij_binary");
+  assert.equal(binary?.detail?.origin, "local_spawn", JSON.stringify(result));
+});
+
+test("a local wrong-binary precheck is not positive remote evidence", async () => {
+  resetZellijIdentityCache();
+  const result = await dispatchZswarm(
+    { op: "doctor", ssh: "user@review-host-local-precheck", timeoutMs: 2000 },
+    undefined,
+    {
+      env: {
+        ZSWARM_SSH_BIN: missingSshBin(),
+        ZSWARM_REMOTE_BIN: "zswarm",
+        ZSWARM_LOG: "0",
+        ZSWARM_BUS: "0",
+      },
+      state: { readBus: () => null },
+      tailscaleStatus: missingTailscale(),
+    },
+  );
+  assert.equal(result.ok, false, JSON.stringify(result));
+  const ssh = checkById(doctorReportOf(result), "ssh");
+  assert.notEqual(ssh?.state, "ok", JSON.stringify(result));
+  const binary = checkById(doctorReportOf(result), "zellij_binary");
+  assert.equal(binary?.code, "zellij_wrong_bin", JSON.stringify(result));
+  assert.equal(binary?.detail?.origin, "local_preflight", JSON.stringify(result));
+});
+
+test("remote process reporting missing Zellij is positive SSH evidence", async (t) => {
+  resetZellijIdentityCache();
+  const fixture = nodeFixture(t, "process.stderr.write('zellij: command not found\\n'); process.exit(127);\n");
+  const result = await dispatchZswarm(
+    { op: "doctor", ssh: "user@review-host-remote-missing", timeoutMs: 2000 },
+    undefined,
+    {
+      env: { ZSWARM_SSH_BIN: fixture.binary, ZSWARM_LOG: "0", ZSWARM_BUS: "0" },
+      state: { readBus: () => null },
+      tailscaleStatus: missingTailscale(),
+    },
+  );
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(checkById(doctorReportOf(result), "ssh").code, "ssh_ready", JSON.stringify(result));
+  const binary = checkById(doctorReportOf(result), "zellij_binary");
+  assert.equal(binary.code, "zellij_missing", JSON.stringify(result));
+  assert.equal(binary.detail.origin, "remote", JSON.stringify(result));
+});
+
+test("remote process reporting wrong Zellij is positive SSH evidence", async (t) => {
+  resetZellijIdentityCache();
+  const fixture = nodeFixture(
+    t,
+    "process.stdout.write('usage: zswarm\\nunknown arg: --version\\n'); process.exit(1);\n",
+  );
+  const result = await dispatchZswarm(
+    { op: "doctor", ssh: "user@review-host-remote-wrong-bin", timeoutMs: 2000 },
+    undefined,
+    {
+      env: { ZSWARM_SSH_BIN: fixture.binary, ZSWARM_LOG: "0", ZSWARM_BUS: "0" },
+      state: { readBus: () => null },
+      tailscaleStatus: missingTailscale(),
+    },
+  );
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(checkById(doctorReportOf(result), "ssh").code, "ssh_ready", JSON.stringify(result));
+  const binary = checkById(doctorReportOf(result), "zellij_binary");
+  assert.equal(binary.code, "zellij_wrong_bin", JSON.stringify(result));
+  assert.equal(binary.detail.origin, "remote", JSON.stringify(result));
+});
+
+function allOkHostChecks() {
+  return ["zellij_binary", "zellij_ipc", "zellij_sessions", "session", "bus_artifact", "bus_marker", "bus_instance"].map(
+    (id) => hostScopedCheck(id, { detail: id === "session" ? { session: "crew" } : {} }),
+  );
+}
+
+test("post-hello rejection preserves its cause when completed host checks are present", async (t) => {
+  const token = "repair03-host-token-not-for-output";
+  const server = await serveAfterHello(t, {
+    ok: false,
+    error: {
+      code: "serve_unauthorized",
+      message: "host token rotated",
+      details: hostDoctorReply(allOkHostChecks(), { session: "crew", sessionOrigin: "explicit" }),
+    },
+  }, token);
+  const result = await dispatchZswarm(
+    { op: "doctor", session: "crew", timeoutMs: 2000 },
+    undefined,
+    { env: { ZSWARM_SERVE: server.label, ZSWARM_SERVE_TOKEN: token }, tailscaleStatus: missingTailscale() },
+  );
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.error.code, DOCTOR_FAILED_CODE);
+  assert.match(JSON.stringify(result.error), /serve_unauthorized|host_request_unauthorized|host token rotated/, JSON.stringify(result));
+  assert.equal(checkById(result.error.details, "serve").code, "serve_hello_ok");
+  assert.equal(checkById(result.error.details, "zellij_binary").state, "ok");
+  assert.equal(checkById(result.error.details, "session").state, "ok");
+  const request = checkById(result.error.details, "host_request");
+  assert.equal(request.state, "fail");
+  assert.equal(request.code, "host_request_unauthorized");
+  assert.equal(request.detail.cause, "serve_unauthorized");
+  assert.equal(request.detail.message, "host token rotated");
+  assert.match(result.error.message, /host_request_unauthorized/);
+  assert.equal(JSON.stringify(result).includes(token), false, "must not leak serve token");
+});
+
+test("post-hello rejection preserves its cause when only a partial host report is attached", async (t) => {
+  const token = "repair03-partial-token-not-for-output";
+  const server = await serveAfterHello(t, {
+    ok: false,
+    error: {
+      code: "serve_unauthorized",
+      message: "host token rotated",
+      details: hostDoctorReply(
+        [hostScopedCheck("zellij_binary", { code: "zellij_ok" })],
+        { session: "crew", sessionOrigin: "explicit" },
+      ),
+    },
+  }, token);
+  const result = await dispatchZswarm(
+    { op: "doctor", timeoutMs: 2000 },
+    undefined,
+    { env: { ZSWARM_SERVE: server.label, ZSWARM_SERVE_TOKEN: token }, tailscaleStatus: missingTailscale() },
+  );
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.error.code, DOCTOR_FAILED_CODE);
+  assert.equal(checkById(result.error.details, "zellij_binary").code, "zellij_ok");
+  assert.equal(checkById(result.error.details, "host_request").code, "host_request_unauthorized");
+  assert.equal(checkById(result.error.details, "host_request").state, "fail");
+  assert.equal(checkById(result.error.details, "session").state, "skipped");
+  assert.match(result.error.message, /host_request_unauthorized/);
+  const requiredFails = doctorReportOf(result).checks.filter((row) => row.state === "fail" && ["zellij_binary", "zellij_ipc", "zellij_sessions", "session", "host_request"].includes(row.id));
+  assert.equal(requiredFails.filter((row) => row.id === "host_request").length, 1);
+  assert.equal(requiredFails.some((row) => row.id === "zellij_binary" && row.code !== "zellij_ok"), false);
+  assert.equal(JSON.stringify(result).includes(token), false, "must not leak serve token");
 });
 }
 
