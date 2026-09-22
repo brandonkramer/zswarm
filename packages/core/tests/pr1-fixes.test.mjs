@@ -71,11 +71,14 @@ else console.log("crew");
 // Leave room for cold Node startup on loaded CI runners. The final stage stalls
 // well past the budget; launch-time assertions below detect fresh child budgets.
 // Windows process kill after execFile timeout routinely exceeds 1s of wall
-// clock, and Date.now() vs spawn-option capture can skew remaining by hundreds
-// of ms under concurrent node --test files. Unix launch slack stays 50ms.
+// clock. Launch-budget capture vs Date.now() can also skew remaining by tens of
+// ms on loaded Ubuntu when node --test files run concurrently (observed 2944ms
+// timeout with 2892ms remaining, 2ms over a 50ms Unix slack). Unix launch slack
+// is 200ms; Windows launch slack is 1000ms. Elapsed slack: Unix 1000ms, Windows
+// 2000ms. Test-only; product timeouts are unchanged.
 const statusTimeoutMs = 3000;
 const elapsedSlackMs = process.platform === "win32" ? 2000 : 1000;
-const launchSlackMs = process.platform === "win32" ? 1000 : 50;
+const launchSlackMs = process.platform === "win32" ? 1000 : 200;
 for (const scenario of [
   { name: "identity", delays: { identity: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },
   { name: "capabilities with sampling", delays: { identity: 100, capabilities: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },
