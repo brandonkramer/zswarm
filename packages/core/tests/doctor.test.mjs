@@ -19,6 +19,7 @@ import {
   mcpInputSchema,
   parseCliArgv,
   resetZellijIdentityCache,
+  resolveInvocationEnv,
   serveChildEnv,
   startServe,
 } from "../dist/index.js";
@@ -298,14 +299,26 @@ test("explicit selector conflicts stay usage errors", async () => {
 });
 
 test("--local wins over inherited serve and --ssh wins over inherited serve", async (t) => {
+  const localEnv = resolveInvocationEnv(
+    { local: true },
+    { ZSWARM_SERVE: "127.0.0.1:1", ZSWARM_SSH: "user@host", ZSWARM_SERVE_TOKEN: "secret" },
+  );
+  assert.equal(localEnv.ZSWARM_SERVE, undefined);
+  assert.equal(localEnv.ZSWARM_SSH, undefined);
+  const sshEnv = resolveInvocationEnv(
+    { ssh: "win@host" },
+    { ZSWARM_SERVE: "127.0.0.1:1", ZSWARM_SSH: "old@host" },
+  );
+  assert.equal(sshEnv.ZSWARM_SSH, "win@host");
+  assert.equal(sshEnv.ZSWARM_SERVE, undefined);
   const { client } = localClient(t);
   const local = await dispatchZswarm(
     { op: "doctor", local: true, session: "crew", timeoutMs: 2000 },
     client,
     { env: missingTailscale({ ZSWARM_SERVE: "127.0.0.1:1", ZSWARM_SSH: "user@host" }) },
   );
-  assert.equal(reportOf(local).route.transport, "local");
-  assert.equal(reportOf(local).route.selector, "--local");
+  assert.equal(checkOf(local, "zellij").state, "ok");
+  assert.equal(checkOf(local, "serve").code, "not_applicable");
 });
 
 test("server-only default session is not the controller ZELLIJ_SESSION_NAME", async (t) => {
@@ -480,7 +493,8 @@ if (cmd === 'ps ax -o args=' || String(cmd).startsWith('powershell.exe')) {
   assert.equal(checkOf(result, "ssh").state, "ok");
   assert.equal(checkOf(result, "ipc").code, "ipc_unreachable");
   assert.equal(checkOf(result, "session").state, "skipped");
-  assert.equal(checkOf(result, "bus_artifact").code, "bus_unsupported_ssh");
+  assert.equal(checkOf(result, "bus_artifact").state, "skipped");
+  assert.equal(checkOf(result, "bus_artifact").code, "ipc_unreachable");
 });
 
 test("direct SSH bus is unsupported and does not read controller marker as remote", async (t) => {
@@ -785,11 +799,19 @@ console.log(JSON.stringify({
 });
 
 test("hanging hello times out without a 15s serveCallTimeout floor and skips host checks", async (t) => {
-  const server = createServer(() => {
-    /* accept and never reply */
+  const sockets = new Set();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise((done) => server.close(done)));
+  t.after(
+    () =>
+      new Promise((done) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => done());
+      }),
+  );
   const port = server.address().port;
   const start = Date.now();
   const result = await dispatchZswarm(
