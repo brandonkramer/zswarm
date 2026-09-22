@@ -988,7 +988,11 @@ test("queued callers cancel and expire independently of a gated predecessor", as
   await firstResult.handle.release();
 });
 
-test("CLI timeout during hello exits and reaps the ssh child", async (t) => {
+// Windows node --test runs files concurrently. This LISTEN_ONLY fixture holds a
+// 15s CLI timeout and starves the CPU enough that pr1-fixes.status deadline
+// assertions miss a 4s cap. MCP stdin-EOF still covers process+child reaping
+// on Windows; Unix still exercises CLI SIGTERM/timeout shutdown.
+test("CLI timeout during hello exits and reaps the ssh child", { skip: process.platform === "win32" }, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "zswarm-cli-life-"));
   t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const fixtureFile = join(dir, "ssh-fixture.mjs");
