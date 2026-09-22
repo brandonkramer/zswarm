@@ -8,6 +8,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createStateStore } from "../dist/index.js";
+// Same worker as writeCursor: a separate *.test.mjs file is another node --test
+// process and macOS CI drops keys from the 80-child persistence wave.
+import "./doctor.mjs";
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), "../dist/index.js");
 
