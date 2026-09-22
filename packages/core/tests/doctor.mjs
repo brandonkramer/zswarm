@@ -1,7 +1,7 @@
 process.env.ZSWARM_LOG = "0";
 process.env.ZSWARM_BUS = "0";
 
-import { test } from "node:test";
+import { test as nodeTest } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -261,6 +261,7 @@ function trackingManager(t, opts = {}) {
   return manager;
 }
 
+export function registerDoctorTests(test = nodeTest) {
 test("schema and CLI parse doctor with the shared surface", () => {
   assert.ok(OP_NAMES.includes("doctor"));
   assert.deepEqual(mcpInputSchema().properties.op.enum, [...OP_NAMES]);
@@ -1129,3 +1130,11 @@ test("expired budget during host inspection does not return ok:true and keeps co
   assert.equal(checkById(result.error.details, "session").code, "session_present");
   assert.notEqual(checkById(result.error.details, "bus_instance")?.state, "ok");
 });
+}
+
+function isStandaloneDoctorEntry() {
+  const self = fileURLToPath(import.meta.url).replaceAll("\\", "/");
+  return process.argv.some((arg) => arg.replaceAll("\\", "/").endsWith("tests/doctor.mjs") || arg.replaceAll("\\", "/") === self);
+}
+
+if (isStandaloneDoctorEntry()) registerDoctorTests();
