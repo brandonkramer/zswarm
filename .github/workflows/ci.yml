@@ -49,8 +49,10 @@ jobs:
         # No glob: PowerShell is the default shell on Windows runners and does
         # not expand one, so the pattern reached node as a literal path.
         # Node discovers **/*.test.mjs itself when given no paths.
+        # macOS serializes test files so other workers' Node fixtures cannot
+        # overlap writeCursor's 80-child lock wave. The assertion is unchanged.
         working-directory: packages/core
-        run: node --test
+        run: node --test ${{ matrix.os == 'macos-latest' && '--test-concurrency=1' || '' }}
 
       - name: Run script tests
         # Explicit path: same PowerShell glob trap as above.

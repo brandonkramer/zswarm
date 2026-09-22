@@ -99,6 +99,8 @@ test("postSignal steals a live-pid lock older than the stale window", () => {
 test("writeCursor serializes writers across processes", async (t) => {
   // 80 at once is the Windows case: open(wx) returns EPERM while the holder
   // still has cursors.lock, not EEXIST. Fewer workers never hit it on CI.
+  // Doctor fixtures load only after this test (below). macOS CI also runs
+  // node --test --test-concurrency=1 so other files cannot spawn during the wave.
   const dir = mkdtempSync(join(tmpdir(), "zswarm-cur-"));
   t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const worker = join(dir, "worker.mjs");
