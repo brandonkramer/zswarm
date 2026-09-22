@@ -172,6 +172,30 @@ export {
   type ServeHelloData,
   type ServePhase,
 } from "./ops/serve.js";
+export {
+  allocateLoopbackPort,
+  assertSafeSshTunnelOpts,
+  buildSshTunnelArgv,
+  createServeTunnelManager,
+  DEFAULT_SSH_PORT,
+  DEFAULT_SSH_SERVE_PORT,
+  describeServeTarget,
+  formatSshServeTarget,
+  forwardServe,
+  isSshServeTarget,
+  parseSshServeTarget,
+  redactSshUserinfo,
+  serveTunnelCacheKey,
+  SSH_SERVE_REMOTE_HOST,
+  SSH_TUNNEL_KEEPALIVE_COUNT,
+  SSH_TUNNEL_KEEPALIVE_INTERVAL_S,
+  stripControllerRouting,
+  type AcquireServeTunnelOptions,
+  type ParsedSshServeTarget,
+  type ServeTunnelHandle,
+  type ServeTunnelManager,
+  type ServeTunnelManagerOptions,
+} from "./ops/serve-tunnel.js";
 export { parseTabList, resolveTab, type ZellijTab } from "./zellij/tabs.js";
 export { selectTargets } from "./ops/broadcast.js";
 export { diffScreens, cursorKey } from "./ops/tail.js";

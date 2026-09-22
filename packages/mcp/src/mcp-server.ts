@@ -7,6 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  createServeTunnelManager,
   dispatchZswarm,
   mcpInputSchema,
   MCP_TOOL_DESCRIPTION,
@@ -14,6 +15,14 @@ import {
 
 const { version } = createRequire(import.meta.url)("../package.json") as {
   version: string;
+};
+
+const serveTunnels = createServeTunnelManager({ persistIdle: true });
+let shuttingDown = false;
+const shutdownTunnels = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  void serveTunnels.closeAll();
 };
 
 const server = new Server(
@@ -49,7 +58,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     };
   }
 
-  const result = await dispatchZswarm(args, undefined, { signal: extra.signal });
+  const result = await dispatchZswarm(args, undefined, {
+    signal: extra.signal,
+    serveTunnels,
+  });
   return {
     content: [
       { type: "text" as const, text: JSON.stringify(result, null, 2) },
@@ -59,4 +71,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 });
 
 const transport = new StdioServerTransport();
+transport.onclose = shutdownTunnels;
+transport.onerror = shutdownTunnels;
+process.stdin.on("end", shutdownTunnels);
+process.stdin.on("close", shutdownTunnels);
+process.once("SIGINT", shutdownTunnels);
+process.once("SIGTERM", shutdownTunnels);
 await server.connect(transport);

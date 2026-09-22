@@ -2,6 +2,7 @@
 import {
   ZellijError,
   cliUsage,
+  createServeTunnelManager,
   dispatchZswarm,
   parseCliArgv,
   serveChildEnv,
@@ -54,8 +55,26 @@ if (args.op === "serve" && args.install !== true && args.clear !== true) {
     process.exit(1);
   }
 } else {
-  const result = await dispatchZswarm(args);
-  process.stderr.write(routingNotice(result, process.stderr.isTTY === true));
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  process.exit(result.ok ? 0 : 1);
+  const serveTunnels = createServeTunnelManager({ persistIdle: false });
+  const ac = new AbortController();
+  const onStop = () => {
+    if (!ac.signal.aborted) ac.abort();
+  };
+  process.once("SIGINT", onStop);
+  process.once("SIGTERM", onStop);
+  let exitCode = 1;
+  try {
+    const result = await dispatchZswarm(args, undefined, {
+      signal: ac.signal,
+      serveTunnels,
+    });
+    process.stderr.write(routingNotice(result, process.stderr.isTTY === true));
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    exitCode = result.ok ? 0 : 1;
+  } finally {
+    process.off("SIGINT", onStop);
+    process.off("SIGTERM", onStop);
+    await serveTunnels.closeAll();
+  }
+  process.exit(exitCode);
 }

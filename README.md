@@ -159,7 +159,7 @@ zswarm await --channel tests --count 3          # Wait for 3 worker signals
 | `ZSWARM_TMP` | Remote IPC temp directory, or `auto` to parse live `zellij --server` paths |
 | `ZSWARM_SSH_MODE` | `interactive` — Windows only: run each CLI call in the desktop session (scheduled task, same idea as `schtasks /IT`) |
 | `ZSWARM_REMOTE_SHELL` | `cmd` or `sh` — override remote quoting (inferred from `.exe` / Windows tmp / interactive) |
-| `ZSWARM_SERVE` | `127.0.0.1:9419` — Forward ops to `zswarm serve` (SSH tunnel to loopback; non-loopback listen is refused) |
+| `ZSWARM_SERVE` | `127.0.0.1:9419`, `tcp://127.0.0.1:9419`, or `ssh://user@host[:22]?servePort=9419` — Forward ops to `zswarm serve`. `ssh://` opens a process-owned SSH LocalForward to remote loopback (desktop serve must already be running) |
 | `ZSWARM_SERVE_TOKEN` | Shared secret for `zswarm serve`. Required even on loopback (another local OS user can connect to 127.0.0.1); send the same value on the client |
 
 ### Remote crews
@@ -180,9 +180,11 @@ ZSWARM_SSH=user@host ZSWARM_SSH_MODE=interactive zswarm list
 # On the host, in the session that owns Zellij (loopback only; a token is not a bind substitute):
 ZSWARM_SERVE_TOKEN=secret zswarm serve --listen 127.0.0.1:9419
 # Windows, once (bakes ZSWARM_SERVE_TOKEN into the logon task env): zswarm serve --install
-# On the client:
+# On the client, existing tunnel:
 ssh -fN -L 9419:127.0.0.1:9419 user@host
 ZSWARM_SERVE=127.0.0.1:9419 ZSWARM_SERVE_TOKEN=secret zswarm list
+# Or one-shot attach (does not remotely install/start serve):
+zswarm --serve 'ssh://Administrator@host:22?servePort=9419' status --session crew
 ```
 
 `file:` plugin URLs stay on the machine that owns Zellij. A client with `ZSWARM_SERVE` never sends a local wasm path across the tunnel.
@@ -193,7 +195,7 @@ ZSWARM_SERVE=127.0.0.1:9419 ZSWARM_SERVE_TOKEN=secret zswarm list
     "zswarm": {
       "command": "/absolute/path/to/zswarm-mcp",
       "env": {
-        "ZSWARM_SERVE": "127.0.0.1:9419",
+        "ZSWARM_SERVE": "ssh://host?servePort=9419",
         "ZSWARM_SERVE_TOKEN": "secret",
         "ZSWARM_SESSION": "crew"
       }

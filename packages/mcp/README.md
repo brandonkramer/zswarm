@@ -41,7 +41,8 @@ the Zellij environment. Give the interpreter an absolute path and set
 `ZSWARM_SESSION`. Forward `ZELLIJ_PANE_ID` (or set `ZSWARM_FROM`) so send
 labels `[zswarm from=…]` with the sending pane instead of `swarm`.
 `ZSWARM_SSH` or `ZSWARM_SERVE` routes the same tool at a remote crew.
-Details: the [zswarm README](../../README.md).
+`ZSWARM_SERVE` may be `host:port` or `ssh://user@host?servePort=9419` (MCP reuses
+a healthy owned tunnel until stdin EOF). Details: the [zswarm README](../../README.md).
 
 ## License
 

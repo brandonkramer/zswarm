@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import type { ZellijTransport } from "../zellij/client.js";
 import { sessionFromEnv } from "../zellij/session.js";
+import { describeServeTarget } from "./serve-tunnel.js";
 import { isTrue, optionalString } from "./util.js";
 
 export type RoutingContext = {
@@ -24,7 +25,7 @@ export function invocationContext(
   const selected = sessionFromEnv(serve && !injected ? {} : env, optionalString(args.session));
   return {
     transport: injected?.kind ?? (serve ? "serve" : ssh ? "ssh" : "local"),
-    host: injected ? injected.host ?? hostname() : serve ?? ssh ?? hostname(),
+    host: injected ? injected.host ?? hostname() : serve ? describeServeTarget(serve) : ssh ?? hostname(),
     session: selected?.session ?? null,
     origin: {
       transport: injected ? "injected" : isTrue(args.local) ? "--local"

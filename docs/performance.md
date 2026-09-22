@@ -20,17 +20,34 @@ On a Unix host, the equivalent server command is:
 ZSWARM_SERVE_TOKEN='<shared token>' zswarm serve --listen 127.0.0.1:9419
 ```
 
-On the controller, keep a tunnel running, then use its existing endpoint:
+On the controller, either keep a tunnel running and use its existing endpoint,
+or pass an `ssh://` URI so zswarm owns a one-shot LocalForward:
 
 ```bash
 ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:9419:127.0.0.1:9419 user@host
 # In the controller's other terminal, with ZSWARM_SERVE_TOKEN already set:
 zswarm --serve 127.0.0.1:9419 status --session crew
+
+# One-shot attach (desktop serve must already be running; this does not install
+# or start it). Authority port is SSH; servePort is remote 127.0.0.1 (default 9419):
+zswarm --serve 'ssh://Administrator@host:22?servePort=9419' status --session crew
+# MCP: ZSWARM_SERVE='ssh://host?servePort=9419' and the same ZSWARM_SERVE_TOKEN.
 ```
 
+`host:port` and `tcp://host:port` still mean an already-open loopback endpoint.
+`ssh://` is parsed separately: zswarm spawns foreground `ssh -N -T` with
+`-L 127.0.0.1:<ephemeral>:127.0.0.1:<servePort>`, `ExitOnForwardFailure`, and
+keepalives. Host-key verification stays on. `ZSWARM_SSH_BIN` / `ZSWARM_SSH_OPTS`
+are honored; ControlMaster/daemonize that would outlive the tracked child is
+rejected. TCP connect is not readiness — `probeServe` (hello) must succeed
+before any application op. Wrong token, auth, or hello never dispatches.
+CLI disposes the child on success, failure, and cancel before exit. MCP reuses
+a healthy owned tunnel until stdin EOF. Reconnect only happens before a request
+is sent; a lost reply is `uncertain` and is never retried. Serve never falls
+back to direct `ZSWARM_SSH`.
+
 `--serve ADDRESS` overrides inherited SSH/serve destinations for one call;
-`--local`, `--ssh`, and `--serve` are mutually exclusive. It connects to an
-existing endpoint and does not launch a tunnel or server. MCP accepts
+`--local`, `--ssh`, and `--serve` are mutually exclusive. MCP accepts
 `serveAddress`, or set `ZSWARM_SERVE` in the MCP server environment. An explicit
 session travels with the request; other session defaults belong to the server.
 There is no automatic switch to a different host if the endpoint fails.
@@ -182,5 +199,7 @@ callers with different timeout or cancellation budgets.
 For direct SSH, existing OpenSSH connection multiplexing can be configured in
 `~/.ssh/config` or `ZSWARM_SSH_OPTS` where the controller's SSH implementation
 supports it. zswarm does not create control sockets or rewrite SSH config.
-Explicit sessions, a persistent serve process, and the bus provide the main
-improvements without requiring multiplexing.
+`ssh://` serve tunnels are the exception: they force a foreground-owned child
+(`ControlMaster=no`) so the LocalForward cannot outlive the process that
+spawned it. Explicit sessions, a persistent serve process, and the bus provide
+the main improvements without requiring multiplexing.

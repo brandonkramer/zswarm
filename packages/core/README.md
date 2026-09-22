@@ -30,6 +30,11 @@ const result = await dispatchZswarm({ op: "list" });
 `{ ok, data }` or `{ ok: false, error }`, with routing `context` once the
 invocation's destination is known.
 
+`ZSWARM_SERVE` / `--serve` may be `host:port`, `tcp://host:port`, or
+`ssh://user@host[:port]?servePort=9419`. The ssh URI opens a process-owned
+SSH LocalForward and calls `probeServe` before ops; pass a `serveTunnels`
+manager if the caller (MCP) should reuse it.
+
 Spawn lifecycle, body files, guarded keys, status tabs and routing context: [crew operations](../../docs/crew-operations.md).
 
 Ops, env, and the event bus: the [zswarm README](../../README.md).

@@ -1,4 +1,5 @@
 import type { RoutingContext } from "./routing.js";
+import type { ServeTunnelManager } from "./serve-tunnel.js";
 
 export type OpsResult = (
   | { ok: true; data: unknown }
@@ -19,6 +20,8 @@ export type DispatchDeps = {
   env?: NodeJS.ProcessEnv;
   /** MCP cancellation; aborted waits stop instead of running to timeout. */
   signal?: AbortSignal;
+  /** Process-owned ssh:// LocalForward manager. CLI disposes; MCP reuses. */
+  serveTunnels?: ServeTunnelManager;
 };
 
 export type Clock = {

@@ -56,11 +56,11 @@ import {
 import { waitForPane, type WaitBusTiming } from "./wait.js";
 import { listPeerWorktrees, removePeerWorktree } from "./worktree.js";
 import {
-  callServe,
   installServeLogon,
   serveCallTimeout,
   uninstallServeLogon,
 } from "./serve.js";
+import { forwardServe } from "./serve-tunnel.js";
 
 /**
  * Per-invocation routing from `--local` / `--ssh`. `--local` clears both SSH
@@ -260,14 +260,15 @@ async function dispatchOperation(
     // just because the host env has ZSWARM_SERVE set.
     if (!injected && env.ZSWARM_SERVE?.trim()) {
       const request = { ...attachKnownSender(args, env) };
-      delete request.serveAddress; // Routing is consumed here, never forwarded back into a tunnel.
-      return await callServe(
-        env.ZSWARM_SERVE.trim(),
-        request,
-        serveCallTimeout(args),
-        env.ZSWARM_SERVE_TOKEN,
+      return await forwardServe({
+        target: env.ZSWARM_SERVE.trim(),
+        args: request,
+        timeoutMs: serveCallTimeout(args),
+        token: env.ZSWARM_SERVE_TOKEN,
         signal,
-      );
+        env,
+        manager: deps.serveTunnels,
+      });
     }
     const baseClient = injected ?? createZellijClient({ env, signal, cache: isTrue(args.fresh) ? false : undefined });
     const client: ZellijClient = {

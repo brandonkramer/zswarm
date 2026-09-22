@@ -407,6 +407,7 @@ export function startServe(
   });
 }
 
+/** Direct host:port / tcp:// only. ssh:// URIs are resolved by serve-tunnel. */
 export function parseServeTarget(raw: string): { host: string; port: number } {
   return parseListenAddress(raw);
 }
