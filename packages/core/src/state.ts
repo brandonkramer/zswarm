@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -52,9 +52,13 @@ const CURSORS_LOCK = "cursors.lock";
 const BUS_FILE = "bus.json";
 /** Keeps the log bounded without needing a rotation daemon. */
 const LOG_TAIL_BYTES = 512 * 1024;
+/** Bound for waiting on a *live* lock holder before failing. */
 const LOCK_WAIT_MS = 5_000;
-/** A live pid older than this is treated as a recycle of a crashed holder. */
-const LOCK_STALE_MS = 30_000;
+/**
+ * Fresh empty/malformed lock files this young are treated as an in-flight
+ * exclusive create (wait), not as abandoned debris (refuse).
+ */
+const LOCK_PENDING_MS = LOCK_WAIT_MS;
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -152,30 +156,6 @@ export function createStateStore(options: StateStoreOptions = {}) {
     }
   }
 
-  /**
-   * Dead pid → steal now. This process's own leftover (unlink failed, or a
-   * non-reentrant re-entry) → steal now. A live pid whose `at` is older than
-   * LOCK_STALE_MS is a recycled pid, not a holder still inside fn().
-   * Empty leftover from older writers (wx with no owner bytes) → steal once
-   * mtime is older than the wait, so an in-flight create is not yanked out
-   * from under the holder.
-   * Owner is read once: a second read can see a pid that appeared after an
-   * empty snapshot and would steal a live lock.
-   */
-  function lockIsStale(lockPath: string): boolean {
-    const owner = readLockOwner(lockPath);
-    if (owner) {
-      if (owner.pid === process.pid) return true;
-      if (!pidAlive(owner.pid)) return true;
-      return Date.now() - owner.at >= LOCK_STALE_MS;
-    }
-    try {
-      return Date.now() - statSync(lockPath).mtimeMs >= LOCK_WAIT_MS;
-    } catch {
-      return false;
-    }
-  }
-
   function lockBusy(code: string | undefined): boolean {
     // Unix: O_EXCL on an existing file is EEXIST. Windows: a holder that still
     // has the handle open (or a delete-pending name) is EPERM / EACCES / EBUSY.
@@ -187,19 +167,153 @@ export function createStateStore(options: StateStoreOptions = {}) {
     );
   }
 
-  function unlinkLock(lockPath: string): void {
+  /**
+   * Cursor/signal locks: exclusive create (`wx`) + owner stamp; release by
+   * generation-matched unlink of the stamp this process published.
+   *
+   * Foreign / abandoned / empty-old lock files are NOT auto-reclaimed.
+   * Portable check-then-rename/unlink reclaim can move a live holder's shared
+   * name aside and admit another writer into that critical section (demonstrated
+   * with real cooperating writeCursor processes). Prefer bounded fail-closed
+   * refusal over unsafe automatic recovery.
+   *
+   * A dead-looking owner observation is only refused when that same generation
+   * is still present. If normal release removed the path or another writer
+   * published a new generation between observation and the liveness check,
+   * contenders retry exclusive create within the original LOCK_WAIT_MS budget
+   * (generation churn does not reset the deadline).
+   *
+   * Self-pid leftovers (same process, prior unlink failed) may be removed when
+   * the on-disk generation still matches — this process is not inside `fn()`.
+   *
+   * Operator recovery: if acquisition refuses an abandoned lock, confirm the
+   * recorded pid is gone and no writer holds the file, then remove the lock
+   * path manually and retry.
+   */
+  function unlinkIfMatchingOwner(
+    lockPath: string,
+    expected: { pid: number; at: number },
+  ): boolean {
     const until = Date.now() + 500;
     while (true) {
+      const current = readLockOwner(lockPath);
+      if (
+        !current ||
+        current.pid !== expected.pid ||
+        current.at !== expected.at
+      ) {
+        return false;
+      }
       try {
         rmSync(lockPath, { force: true });
-        return;
+        return true;
       } catch (err) {
         if (!lockBusy((err as NodeJS.ErrnoException).code) || Date.now() >= until) {
-          return;
+          return false;
         }
         sleepSync(10);
       }
     }
+  }
+
+  /** Only this process may clear its own leftover generation. */
+  function tryReclaimSelfLock(lockPath: string): boolean {
+    const owner = readLockOwner(lockPath);
+    if (!owner || owner.pid !== process.pid) return false;
+    return unlinkIfMatchingOwner(lockPath, owner);
+  }
+
+  function abandonedLockError(
+    lockName: string,
+    lockPath: string,
+    observed: { pid: number; at: number } | null,
+  ): Error {
+    // Use the generation that justified refusal — do not re-read the path and
+    // accidentally describe a live successor as needing operator recovery.
+    if (observed) {
+      return new Error(
+        `refusing automatic reclaim of ${lockName} (dead-or-abandoned owner pid=${observed.pid} at=${observed.at}); ` +
+          `remove ${lockPath} only after confirming that process is gone and no writer holds the file, then retry`,
+      );
+    }
+    return new Error(
+      `refusing automatic reclaim of ${lockName} (empty or malformed lock without a safe owner record); ` +
+        `remove ${lockPath} only when no writer is using it, then retry`,
+    );
+  }
+
+  /**
+   * Classify a blocking lock against the *current* generation.
+   *
+   * `wait` = live holder or fresh in-flight create.
+   * `refuse` = unchanged abandoned foreign/empty debris — fail closed.
+   * `self` = reclaimable same-pid leftover.
+   * `retry` = observation went stale during the check (normal release removed
+   * the path, or a new generation superseded the departed owner). Contender
+   * must retry exclusive create within the original wait budget — not refuse
+   * a lock that is no longer abandoned, and not unlink/rename anything.
+   */
+  function classifyBlockingLock(
+    lockPath: string,
+  ): {
+    kind: "self" | "wait" | "refuse" | "retry";
+    observed: { pid: number; at: number } | null;
+  } {
+    const owner = readLockOwner(lockPath);
+    if (owner) {
+      if (owner.pid === process.pid) return { kind: "self", observed: owner };
+      if (pidAlive(owner.pid)) return { kind: "wait", observed: owner };
+      // Dead-looking foreign owner: only refuse if THIS generation is still
+      // current. Normal release+exit between read and liveness check leaves
+      // the path absent or replaced by a live successor — that is not
+      // abandoned debris.
+      const still = readLockOwner(lockPath);
+      if (!still) return { kind: "retry", observed: null };
+      if (still.pid !== owner.pid || still.at !== owner.at) {
+        return { kind: "retry", observed: still };
+      }
+      return { kind: "refuse", observed: owner };
+    }
+    try {
+      if (Date.now() - statSync(lockPath).mtimeMs < LOCK_PENDING_MS) {
+        return { kind: "wait", observed: null };
+      }
+    } catch {
+      // Path disappeared between the busy create and this check.
+      return { kind: "retry", observed: null };
+    }
+    // Old empty/malformed: confirm it is still present and still ownerless
+    // before refusing — a successor may have published while we inspected.
+    const again = readLockOwner(lockPath);
+    if (again) {
+      if (again.pid === process.pid) return { kind: "self", observed: again };
+      if (pidAlive(again.pid)) return { kind: "wait", observed: again };
+      const confirm = readLockOwner(lockPath);
+      if (!confirm) return { kind: "retry", observed: null };
+      if (confirm.pid !== again.pid || confirm.at !== again.at) {
+        return { kind: "retry", observed: confirm };
+      }
+      return { kind: "refuse", observed: again };
+    }
+    try {
+      statSync(lockPath);
+    } catch {
+      return { kind: "retry", observed: null };
+    }
+    return { kind: "refuse", observed: null };
+  }
+
+  /**
+   * Drop this process's lock only when the generation we published is still at
+   * the well-known path. Under fail-closed foreign reclaim, generations are not
+   * stolen while we hold the critical section, so a matching unlink cannot
+   * remove a successor published by another cooperating writer.
+   */
+  function unlinkOwnedLock(
+    lockPath: string,
+    stamp: { pid: number; at: number },
+  ): void {
+    unlinkIfMatchingOwner(lockPath, stamp);
   }
 
   function withFileLock<T>(lockName: string, fn: () => T): T {
@@ -207,20 +321,43 @@ export function createStateStore(options: StateStoreOptions = {}) {
     const lockPath = join(dir, lockName);
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
+      const stamp = { pid: process.pid, at: Date.now() };
       try {
-        const fd = openSync(lockPath, "wx");
+        // Exclusive create (`wx`) plus a write of the owner record. That is
+        // not one atomic publish of populated bytes — create and write still
+        // have an interval. The UTF-8 fast path keeps that interval in one
+        // native writeFileSync rather than two JS turns (openSync then write).
+        // Abandoned foreign/empty locks are refused (not renamed or unlinked).
+        writeFileSync(lockPath, JSON.stringify(stamp), {
+          encoding: "utf8",
+          flag: "wx",
+        });
         try {
-          writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
           return fn();
         } finally {
-          closeSync(fd);
-          unlinkLock(lockPath);
+          unlinkOwnedLock(lockPath, stamp);
         }
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (!lockBusy(code)) throw err;
-        if (lockIsStale(lockPath)) {
-          unlinkLock(lockPath);
+        if (tryReclaimSelfLock(lockPath)) {
+          continue;
+        }
+        const { kind, observed } = classifyBlockingLock(lockPath);
+        if (kind === "self") {
+          if (tryReclaimSelfLock(lockPath)) continue;
+        }
+        if (kind === "refuse") {
+          throw abandonedLockError(lockName, lockPath, observed);
+        }
+        if (kind === "retry") {
+          // Observation changed (released or superseded). Retry exclusive
+          // create within the original budget — do not reset the deadline on
+          // generation churn (unbounded handoffs become a timeout).
+          if (Date.now() >= deadline) {
+            throw new Error(`timed out waiting for ${lockName}`);
+          }
+          sleepSync(10);
           continue;
         }
         if (Date.now() >= deadline) {

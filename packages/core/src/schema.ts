@@ -33,6 +33,7 @@ export const OP_NAMES = [
   "checkpoint",
   "bus",
   "serve",
+  "doctor",
 ] as const;
 
 export type OpName = (typeof OP_NAMES)[number];
@@ -73,7 +74,7 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "string",
     flags: ["--session", "-s"],
     description:
-      "Zellij session name (optional if sole live session or ZSWARM_SESSION / ZELLIJ_SESSION_NAME)",
+      "Zellij session name (optional if sole live session or ZSWARM_SESSION / ZELLIJ_SESSION_NAME). serve --install: readiness target only — does not change the task's default routing",
   },
   {
     name: "to",
@@ -140,14 +141,14 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "boolean",
     flags: ["--clear"],
     description:
-      "signal: reset the channel (all channels when none is given); bus: forget the installed plugin; serve: unregister the Windows logon task",
+      "signal: reset the channel (all channels when none is given); bus: forget the installed plugin; serve: stop and unregister the owned Windows zswarm-serve logon task if present",
   },
   {
     name: "install",
     type: "boolean",
     flags: ["--install"],
     description:
-      "bus: load the event-bus plugin in a pane so its permission prompt can be answered, then remember it; serve: register a Windows logon task that listens for remote zswarm",
+      "bus: load the event-bus plugin in a pane so its permission prompt can be answered, then remember it; serve: register the current-user Windows Interactive logon task and wait for authenticated hello plus host session visibility",
   },
   {
     name: "reset",
@@ -179,7 +180,8 @@ export const PARAMS: readonly ParamSpec[] = [
     name: "serveAddress",
     type: "string",
     flags: ["--serve"],
-    description: "use an existing serve endpoint (e.g. 127.0.0.1:9419 through an SSH tunnel); preferred for frequent status calls; uses ZSWARM_SERVE_TOKEN",
+    description:
+      "existing serve endpoint: host:port, tcp://host:port, or ssh://user@host[:sshPort]?servePort=9419. ssh:// opens a process-owned SSH LocalForward and probes hello before ops (desktop serve must already be running). Omit sshPort to use ssh_config Port. tcp:// also names a private Tailscale Serve frontend over loopback (docs/tailscale.md). Uses ZSWARM_SERVE_TOKEN",
   },
   {
     name: "limit",
@@ -295,7 +297,7 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "number",
     flags: ["--timeout-ms"],
     description:
-      "wait: timeout (default 60000); status/spawn: overall deadline (default 30000), including setup and observation",
+      "wait: timeout (default 60000); status/spawn: overall deadline (default 30000); doctor: overall deadline (default 10000), including Tailscale/SSH/hello/host checks; serve --install: overall install/readiness deadline (default 30000)",
   },
   {
     name: "keys",
@@ -484,7 +486,7 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "string",
     flags: ["--listen"],
     description:
-      "serve: bind address (default 127.0.0.1:9419). Reach it from another machine with ZSWARM_SERVE after an SSH tunnel",
+      "serve: bind address (default 127.0.0.1:9419). Loopback needs no Tailscale; a non-loopback literal must be a verified local Tailscale IP (see docs/tailscale.md). Reach via ZSWARM_SERVE / --serve (direct host:port, private Tailscale Serve tcp:// frontend, or ssh:// to remote loopback)",
   },
   {
     name: "verbose",
@@ -556,8 +558,9 @@ export function cliUsage(): string {
     "",
     "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force). --expect requires the screen to contain a substring first.",
     "Bus: `zswarm bus --install` once per Zellij session. `--force` closes orphan bus panes and reloads; do not use it as a retry.",
-    "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE (+ ZSWARM_SERVE_TOKEN). Serve binds loopback only and always requires a token.",
-    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZSWARM_FROM, ZELLIJ_PANE_ID, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN, ZSWARM_CACHE_TTL_MS",
+    "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE / --serve (host:port, tcp://, or ssh://user@host?servePort=9419) plus ZSWARM_SERVE_TOKEN. Serve defaults to loopback and always requires a token; an explicit local Tailscale IP is allowed only after host verification. Private raw TCP Tailscale Serve keeps the backend on 127.0.0.1 behind `tailscale serve --tcp=…` (docs/tailscale.md). ssh:// does not start remote serve. Windows default recipe: `zswarm serve --install` (verified readiness).",
+    "Doctor: `zswarm doctor --session crew` inspects local, --ssh, and --serve routes without installs, pane changes, or plugin launch. See docs/doctor.md and docs/tailscale.md.",
+    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZSWARM_FROM, ZELLIJ_PANE_ID, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_SSH_BIN, ZSWARM_SSH_OPTS, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN, ZSWARM_TAILSCALE_BIN, ZSWARM_CACHE_TTL_MS",
     "",
   );
   return lines.join("\n");

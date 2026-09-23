@@ -6,12 +6,19 @@ listing caches and the event bus beside the crew. Windows interactive SSH still
 works for occasional commands, but each uncached Zellij action requires a
 scheduled desktop task.
 
+**Windows + Tailscale default:** verified `zswarm serve --install` on the
+logged-in desktop, then controller `ssh://` attach. See
+[Tailscale crew](tailscale.md) for that path, optional verified Tailscale-IP
+bind, and private raw TCP Tailscale Serve (native Windows uses OpenSSH over
+Tailscale, not the integrated Tailscale SSH server).
+
 Set `ZSWARM_SERVE_TOKEN` to the same private value on the server and controller.
-On Windows, start the server from the logged-in desktop (PowerShell):
+On Windows, the documented install path waits for authenticated hello and host
+visibility (`Start-ScheduledTask` is asynchronous and is not readiness):
 
 ```powershell
 $env:ZSWARM_SERVE_TOKEN = '<shared token>'
-zswarm serve --listen 127.0.0.1:9419
+zswarm serve --install --listen 127.0.0.1:9419 --session crew --timeout-ms 30000
 ```
 
 On a Unix host, the equivalent server command is:
@@ -20,23 +27,138 @@ On a Unix host, the equivalent server command is:
 ZSWARM_SERVE_TOKEN='<shared token>' zswarm serve --listen 127.0.0.1:9419
 ```
 
-On the controller, keep a tunnel running, then use its existing endpoint:
+On the controller, either keep a tunnel running and use its existing endpoint,
+or pass an `ssh://` URI so zswarm owns a one-shot LocalForward:
 
 ```bash
 ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:9419:127.0.0.1:9419 user@host
 # In the controller's other terminal, with ZSWARM_SERVE_TOKEN already set:
 zswarm --serve 127.0.0.1:9419 status --session crew
+
+# One-shot attach (desktop serve must already be running; this does not install
+# or start it). Authority port is SSH; servePort is remote 127.0.0.1 (default 9419):
+zswarm --serve 'ssh://Administrator@host:22?servePort=9419' status --session crew
+# MCP: ZSWARM_SERVE='ssh://host?servePort=9419' and the same ZSWARM_SERVE_TOKEN.
 ```
 
+`host:port` and `tcp://host:port` still mean an already-open endpoint (loopback
+tunnel, direct Tailscale IP, or a private Tailscale Serve TCP frontend).
+`ssh://` is parsed separately: zswarm spawns foreground `ssh -N -T` with
+`-L 127.0.0.1:<ephemeral>:127.0.0.1:<servePort>`, `ExitOnForwardFailure`, and
+keepalives. Host-key verification stays on. An explicit URI authority port
+becomes `ssh -p`; an omitted port is not forced to 22, so an SSH alias's
+configured `Port` still applies. Required ownership options
+(`ControlPath=none` / `-S none`, `ForkAfterAuthentication=no`,
+`ControlMaster=no`, `BatchMode=yes`, `ExitOnForwardFailure=yes`) are placed so
+OpenSSH's first-obtained-value rule wins over user `-o` and `ssh_config`.
+`ZSWARM_SSH_BIN` / `ZSWARM_SSH_OPTS` still supply identities, proxy settings,
+and host-key files; ControlMaster/daemonize/fork/extra forwards/remote commands
+that would outlive or escape the tracked child are rejected. TCP connect is not
+readiness — `probeServe` (hello) must succeed with the caller's credentials
+before any application op, including reuse of a live tunnel. Wrong token, auth,
+or hello never reports the tunnel as ready and never dispatches. CLI disposes
+every owned child (including in-flight startups) on success, failure, and
+cancel before exit. MCP reuses a healthy owned tunnel until stdin EOF, then
+cancels pending work, reaps children, and closes stdio. `closeAll` is terminal:
+later acquires are rejected. Reconnect only happens before a request is sent; a
+lost reply is `uncertain` and is never retried. Invalidating one lease does not
+kill another caller's still-active child. Serve never falls back to direct
+`ZSWARM_SSH`.
+
 `--serve ADDRESS` overrides inherited SSH/serve destinations for one call;
-`--local`, `--ssh`, and `--serve` are mutually exclusive. It connects to an
-existing endpoint and does not launch a tunnel or server. MCP accepts
+`--local`, `--ssh`, and `--serve` are mutually exclusive. MCP accepts
 `serveAddress`, or set `ZSWARM_SERVE` in the MCP server environment. An explicit
 session travels with the request; other session defaults belong to the server.
 There is no automatic switch to a different host if the endpoint fails.
 If embedding `startServe` yourself, pass `serveChildEnv(process.env)` to the
 handler's `dispatchZswarm` environment, as the CLI does, so inherited routing
 does not forward requests back into the server.
+
+## Serve hello and transport errors
+
+After token auth, and before any application op, `zswarm serve` answers a reserved
+hello control without touching Zellij, the bus, or a session:
+
+```json
+{ "serveControl": "hello", "serveToken": "<token>" }
+```
+
+`{ "op": "hello", "serveToken": "<token>" }` is accepted for compatibility. A
+request must not include both `serveControl` and `op`. Unknown controls return
+`serve_protocol` and never run an application op as a side effect.
+
+A successful hello `data` object is:
+
+| Field | Meaning |
+| --- | --- |
+| `protocol` | `1` |
+| `serverId` | Opaque id unique to this `startServe` instance |
+| `hostname` | Server hostname |
+| `platform` | `process.platform` |
+| `version` | `@zswarm/core` package version |
+| `capabilities` | Currently `["hello"]` only |
+| `launchId` | Optional. Present when the process was started with `ZSWARM_SERVE_LAUNCH_ID` (Windows `--install` uses this to distinguish a fresh task from a stale listener). Protocol 1 without `launchId` is unchanged. |
+
+`probeServe(target, { token, timeoutMs, signal })` sends that hello and validates
+protocol 1 plus the hello capability. A legacy serve, a malformed hello, or
+another protocol number is an explicit diagnostic failure — never a false
+healthy. Ordinary commands still work against a legacy serve without probing
+hello first.
+
+Wrong or missing tokens keep `serve_unauthorized` with no hello metadata.
+
+`callServe` keeps its callers and `OpsResult` shape. Client-side transport
+failures add `error.details`:
+
+| Field | Meaning |
+| --- | --- |
+| `phase` | `connect`, `hello`, or `request` |
+| `endpoint` | `host:port` label |
+| `delivery` | `not_sent`, `uncertain` (request written, no complete reply), or `replied` |
+| `remedy` | Conservative next step |
+
+`delivery: "uncertain"` means the remote outcome is unknown; do not retry.
+Connect and hello waits are bounded inside the overall deadline so a long
+`wait`/`await` budget is not spent on a dead TCP handshake. A socket EOF or
+truncated JSONL settles promptly. Serve failures never fall back to SSH.
+Authorization and application errors keep `serve_unauthorized` / their app
+codes and are not labeled as a dead tunnel.
+
+Success JSONL replies must include an own `data` field (`null` is valid).
+`{ "ok": true }` and a success envelope that only carries `error` are
+`serve_protocol` (complete frame, `delivery: "replied"`). Incomplete frames
+stay `uncertain`.
+
+### Reply size
+
+Limits are **UTF-8 bytes of the complete JSONL frame, including the
+terminating newline**. Split multibyte sequences are reassembled before
+decode. The cap is not a silent truncate.
+
+| Limit | Default | Meaning |
+| --- | --- | --- |
+| Zellij capture | 8MiB (`maxBuffer`) | `dump --max 0` / `--full` can return this much pane text |
+| Ordinary serve reply | 16MiB + 256KiB | 8MiB capture with JSON newline escaping (2×) plus envelope slack |
+| Hello reply | 16KiB | Independent of dump-sized ops |
+| Serve request | 1MiB | Unchanged JSONL request bound |
+
+`ZSWARM_SERVE_MAX_REPLY_BYTES` on the **caller** (CLI or MCP environment)
+overrides the ordinary reply cap. Hello stays on its own 16KiB cap. A frame
+over the cap fails promptly with `serve_protocol` and does not echo the
+body. Control-heavy dumps that JSON-escape beyond the default (for example
+`\uXXXX`) can raise that env var; they still fail closed rather than
+truncate.
+
+Protocol codes:
+
+| Code | Meaning |
+| --- | --- |
+| `serve_protocol` | Unknown/ambiguous control, or malformed/truncated/incomplete JSONL |
+| `serve_incompatible` | Hello `protocol` is not `1` |
+| `serve_hello_unsupported` | Endpoint answered but does not speak hello |
+| `serve_unreachable` | TCP connect failed before a request was sent |
+| `serve_unauthorized` | Missing or wrong token |
+| `timeout` | Connect, hello, or request deadline |
 
 Direct SSH status includes `polling.recommendation` explaining the serve path;
 interactive CLI use also prints this advice on stderr. `polling.busAvailable`
@@ -97,5 +219,10 @@ callers with different timeout or cancellation budgets.
 For direct SSH, existing OpenSSH connection multiplexing can be configured in
 `~/.ssh/config` or `ZSWARM_SSH_OPTS` where the controller's SSH implementation
 supports it. zswarm does not create control sockets or rewrite SSH config.
-Explicit sessions, a persistent serve process, and the bus provide the main
-improvements without requiring multiplexing.
+`ssh://` serve tunnels are the exception: they force a private foreground-owned
+child (`ControlPath=none`, `-S none`, `ForkAfterAuthentication=no`,
+`ControlMaster=no`) so the LocalForward cannot attach to an external master or
+outlive the process that spawned it. Direct SSH continues to honor the
+controller's existing OpenSSH multiplexing configuration. Explicit sessions, a
+persistent serve process, and the bus provide the main improvements without
+requiring multiplexing.

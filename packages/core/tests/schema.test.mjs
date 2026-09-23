@@ -79,6 +79,11 @@ test("parseCliArgv maps flags onto dispatch args", () => {
     op: "status",
     timeoutMs: 5000,
   });
+  assert.deepEqual(parseCliArgv(["doctor", "--session", "crew", "--timeout-ms", "10000"]), {
+    op: "doctor",
+    session: "crew",
+    timeoutMs: 10000,
+  });
   assert.deepEqual(parseCliArgv(["list", "--local"]), {
     op: "list",
     local: true,
@@ -126,6 +131,7 @@ test("cliUsage lists every flagged param", () => {
   for (const op of OP_NAMES) assert.ok(usage.includes(op));
   assert.ok(usage.includes("always requires a token"));
   assert.equal(usage.includes("off loopback"), false);
+  assert.ok(usage.includes("Tailscale IP") || usage.includes("local Tailscale"));
 });
 
 test("parseCliArgv finds the op when flags come first", () => {

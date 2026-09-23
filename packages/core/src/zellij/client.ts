@@ -45,6 +45,8 @@ import {
   resolveSshTarget,
   resolveZellijBinary,
   sanitizeZellijEnv,
+  zellijExecDetails,
+  zellijMissingError,
   type ZellijExecFn,
 } from "./binary.js";
 import {
@@ -212,10 +214,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
     await ensureIdentity(remaining);
     const result = await exec(args, { timeoutMs: remaining() });
     if (result.code === NOT_FOUND_EXIT) {
-      throw new ZellijError(
-        "zellij_missing",
-        `zellij binary not found (${zellijPath}); install Zellij ≥ 0.42, add it to PATH, or set ZSWARM_BIN / ZSWARM_PATH`,
-      );
+      throw zellijMissingError(zellijPath, result);
     }
     if (result.code !== 0) {
       const detail =
@@ -224,11 +223,13 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
         throw new ZellijError(
           "zellij_wrong_bin",
           `resolved binary looks like zswarm, not Zellij (${zellijPath}): ${detail}`,
+          zellijExecDetails(result),
         );
       }
       throw new ZellijError(
         "zellij_failed",
         `${label} failed (exit ${result.code}): ${detail}`,
+        zellijExecDetails(result),
       );
     }
     return result;
@@ -264,10 +265,7 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
         timeoutMs: remaining(),
       });
       if (result.code === NOT_FOUND_EXIT) {
-        throw new ZellijError(
-          "zellij_missing",
-          `zellij binary not found (${zellijPath}); install Zellij ≥ 0.42, add it to PATH, or set ZSWARM_BIN / ZSWARM_PATH`,
-        );
+        throw zellijMissingError(zellijPath, result);
       }
       if (result.code !== 0) {
         const detail =
@@ -276,12 +274,14 @@ export function createZellijClient(options: ZellijClientOptions = {}) {
           throw new ZellijError(
             "zellij_wrong_bin",
             `resolved binary looks like zswarm, not Zellij (${zellijPath}): ${detail}`,
+            zellijExecDetails(result),
           );
         }
         if (isZellijNoSessionsOutput(result.stdout, result.stderr)) return [];
         throw new ZellijError(
           "zellij_failed",
           `zellij list-sessions failed (exit ${result.code}): ${detail}`,
+          zellijExecDetails(result),
         );
       }
       return parseSessionList(result.stdout);

@@ -2,6 +2,7 @@
 import {
   ZellijError,
   cliUsage,
+  createServeTunnelManager,
   dispatchZswarm,
   parseCliArgv,
   serveChildEnv,
@@ -41,7 +42,11 @@ if (args.op === "serve" && args.install !== true && args.clear !== true) {
   try {
     const { label } = await startServe(listen, (request) =>
       dispatchZswarm(request, undefined, { env: serveChildEnv(process.env) }),
-      { token: process.env.ZSWARM_SERVE_TOKEN },
+      {
+        token: process.env.ZSWARM_SERVE_TOKEN,
+        launchId: process.env.ZSWARM_SERVE_LAUNCH_ID,
+        env: process.env,
+      },
     );
     process.stdout.write(
       `${JSON.stringify({ ok: true, data: { listening: label } }, null, 2)}\n`,
@@ -54,8 +59,27 @@ if (args.op === "serve" && args.install !== true && args.clear !== true) {
     process.exit(1);
   }
 } else {
-  const result = await dispatchZswarm(args);
-  process.stderr.write(routingNotice(result, process.stderr.isTTY === true));
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  process.exit(result.ok ? 0 : 1);
+  const serveTunnels = createServeTunnelManager({ persistIdle: false });
+  const ac = new AbortController();
+  const onStop = () => {
+    if (!ac.signal.aborted) ac.abort();
+    void serveTunnels.closeAll();
+  };
+  process.once("SIGINT", onStop);
+  process.once("SIGTERM", onStop);
+  let exitCode = 1;
+  try {
+    const result = await dispatchZswarm(args, undefined, {
+      signal: ac.signal,
+      serveTunnels,
+    });
+    process.stderr.write(routingNotice(result, process.stderr.isTTY === true));
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    exitCode = result.ok ? 0 : 1;
+  } finally {
+    process.off("SIGINT", onStop);
+    process.off("SIGTERM", onStop);
+    await serveTunnels.closeAll();
+  }
+  process.exit(exitCode);
 }

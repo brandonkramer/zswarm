@@ -56,11 +56,15 @@ import {
 import { waitForPane, type WaitBusTiming } from "./wait.js";
 import { listPeerWorktrees, removePeerWorktree } from "./worktree.js";
 import {
-  callServe,
+  DEFAULT_SERVE_INSTALL_TIMEOUT_MS,
   installServeLogon,
-  serveCallTimeout,
   uninstallServeLogon,
+} from "./serve-install.js";
+import {
+  serveCallTimeout,
 } from "./serve.js";
+import { doctorOp } from "./doctor.js";
+import { forwardServe } from "./serve-tunnel.js";
 
 /**
  * Per-invocation routing from `--local` / `--ssh`. `--local` clears both SSH
@@ -238,18 +242,42 @@ async function dispatchOperation(
     // Policy gates the op before anything touches the session.
     assertOpAllowed(policy, op);
     assertSshGitAllowed(env, op, args);
+    if (op === "doctor") {
+      // Before serve forwarding and session resolution so a dead tunnel still
+      // yields controller findings. Policy already ran.
+      return await doctorOp(args, injected, deps, context, env, clock);
+    }
     if (op === "serve") {
+      const timeoutMs = numberArg(args, "timeoutMs", DEFAULT_SERVE_INSTALL_TIMEOUT_MS, {
+        min: 1,
+        max: 900_000,
+      });
       if (isTrue(args.clear)) {
         const cleared = await uninstallServeLogon({
-          platform: process.platform,
+          platform: deps.serveInstall?.platform ?? process.platform,
+          timeoutMs,
+          signal,
+          env,
+          token: env.ZSWARM_SERVE_TOKEN,
+          ...deps.serveInstall,
         });
         return { ok: true, data: cleared };
       }
       if (isTrue(args.install)) {
         const installed = await installServeLogon({
           listen: typeof args.listen === "string" ? args.listen : undefined,
+          session: optionalString(args.session),
+          timeoutMs,
+          signal,
+          env,
+          token: env.ZSWARM_SERVE_TOKEN,
+          now: clock.now,
+          sleep: clock.sleep,
+          tailscaleStatus: deps.tailscaleStatus,
+          networkInterfaces: deps.networkInterfaces,
+          ...deps.serveInstall,
         });
-        return { ok: true, data: { ...installed, running: true } };
+        return { ok: true, data: installed };
       }
       throw new ZellijError(
         "usage",
@@ -260,13 +288,15 @@ async function dispatchOperation(
     // just because the host env has ZSWARM_SERVE set.
     if (!injected && env.ZSWARM_SERVE?.trim()) {
       const request = { ...attachKnownSender(args, env) };
-      delete request.serveAddress; // Routing is consumed here, never forwarded back into a tunnel.
-      return await callServe(
-        env.ZSWARM_SERVE.trim(),
-        request,
-        serveCallTimeout(args),
-        env.ZSWARM_SERVE_TOKEN,
-      );
+      return await forwardServe({
+        target: env.ZSWARM_SERVE.trim(),
+        args: request,
+        timeoutMs: serveCallTimeout(args),
+        token: env.ZSWARM_SERVE_TOKEN,
+        signal,
+        env,
+        manager: deps.serveTunnels,
+      });
     }
     const baseClient = injected ?? createZellijClient({ env, signal, cache: isTrue(args.fresh) ? false : undefined });
     const client: ZellijClient = {

@@ -9,7 +9,14 @@ export const DEFAULT_WAIT_MAX_CHARS = 2_000;
 
 export function fail(err: unknown): OpsResult {
   if (err instanceof ZellijError) {
-    return { ok: false, error: { code: err.code, message: err.message } };
+    return {
+      ok: false,
+      error: {
+        code: err.code,
+        message: err.message,
+        ...(err.details ? { details: err.details } : {}),
+      },
+    };
   }
   const message = err instanceof Error ? err.message : String(err);
   return { ok: false, error: { code: "failed", message } };
