@@ -332,29 +332,46 @@ tailscale serve status --json
 Then enable **explicit private raw TCP** on an unused frontend port (example
 `19419` → loopback `9419`). Do **not** use default HTTPS, `--http`, `--https`,
 `--tls-terminated-tcp`, `--proxy-protocol`, or Tailscale Services / virtual-IP
-management for this path:
+management for this path.
+
+Choose **one** of the two alternative forwarder lifecycles below — do not run
+both for the same port. Backend zswarm and the Tailscale forwarder still have
+separate lifetimes and readiness.
+
+**Alternative A — foreground** (second host terminal; session-owned share):
 
 ```bash
-# Foreground (Ctrl+C stops this process's share; config may still need `off`)
+# Terminal 2 — keep this process running while you want the share:
 tailscale serve --tcp=19419 tcp://127.0.0.1:9419
+```
 
-# Persistent until disabled with the matching port-specific off command:
+Stop by sending Ctrl+C to **that** owning CLI process, then inspect
+`tailscale serve status --json` to confirm the selected mapping is gone.
+Foreground shares must be restarted after host or Tailscale restart. Do **not**
+use `tailscale serve --tcp=19419 off` to stop a different foreground CLI
+session: `off` clears parent/background TCP config and does not terminate
+another process's nested foreground WatchIPNBus share
+([v1.52.0 serve CLI](https://github.com/tailscale/tailscale/blob/v1.52.0/cmd/tailscale/cli/serve_v2.go#L235-L283);
+`removeTCPServe` only inspects the selected config's TCP map).
+
+**Alternative B — persistent background** (survives host/Tailscale restart
+until port-specific disable):
+
+```bash
 tailscale serve --bg --tcp=19419 tcp://127.0.0.1:9419
+```
+
+Disable only after `tailscale serve status --json` confirms the selected
+mapping is still the one you manage:
+
+```bash
+tailscale serve --bg --tcp=19419 off
 ```
 
 Validate the resulting private mapping and that Funnel is **not** enabled for
 the selected endpoint (`tailscale serve status` / `--json`). If the selected
 port already has an incompatible handler, decide explicitly — do **not** run
 `tailscale serve reset` or otherwise clear unrelated services.
-
-Disable only this forwarder with the **same flags** (target optional; original
-flags required):
-
-```bash
-tailscale serve --tcp=19419 off
-# If you used --bg when enabling:
-tailscale serve --bg --tcp=19419 off
-```
 
 Existing tailnet grants/ACLs and host policy must allow intended controllers to
 reach the frontend port. Private binding alone does not identify callers.
