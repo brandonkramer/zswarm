@@ -13,6 +13,12 @@ import {
   dispatchZswarm,
   resetBusCache,
 } from "../dist/index.js";
+import {
+  defaultExec,
+  ensureZellijProbes,
+  identityCacheKey,
+} from "../dist/zellij/binary.js";
+import { routingEnvironment } from "../dist/zellij/cache.js";
 
 const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
 const timedOut = { code: -1, stdout: "", stderr: "timed out" };
@@ -73,24 +79,48 @@ else console.log("crew");
 // Windows process kill after execFile timeout routinely exceeds 1s of wall
 // clock. Launch-budget capture vs Date.now() can also skew remaining by tens of
 // ms on loaded Ubuntu when node --test files run concurrently (observed 2944ms
-// timeout with 2892ms remaining, 2ms over a 50ms Unix slack). Unix launch slack
-// is 200ms; Windows launch slack is 1000ms. Elapsed slack: Unix 1000ms, Windows
-// 2000ms. Test-only; product timeouts are unchanged.
+// timeout with 2892ms remaining, 2ms over a 50ms Unix slack). Windows CI also
+// observed 5149ms wall clock for a 3000ms status budget (149ms over a 2000ms
+// kill slack) on capabilities-without-sampling. A separate session-listing flake
+// saw identity+capabilities cold-start consume the whole budget so list-sessions
+// never started under concurrent load — those scenarios pre-warm probes outside
+// the status budget so the hung stage is what shares the deadline. Status budget
+// stays 3000ms (must not exceed the 5s ensureZellijProbes cap, or probe hangs
+// soft-fail and later stages succeed). Product defaults unchanged. Unix launch
+// slack is 200ms; Windows launch slack is 1000ms. Elapsed slack: Unix 1000ms,
+// Windows 3000ms. Test-only.
 const statusTimeoutMs = 3000;
-const elapsedSlackMs = process.platform === "win32" ? 2000 : 1000;
+const elapsedSlackMs = process.platform === "win32" ? 3000 : 1000;
 const launchSlackMs = process.platform === "win32" ? 1000 : 200;
 for (const scenario of [
   { name: "identity", delays: { identity: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },
   { name: "capabilities with sampling", delays: { identity: 100, capabilities: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities"] },
   { name: "capabilities without sampling", delays: { identity: 100, capabilities: 10_000 }, session: "crew", sampleMs: 0, calls: ["identity", "capabilities"] },
-  { name: "session listing", delays: { identity: 100, capabilities: 100, sessions: 10_000 }, sampleMs: 50, calls: ["identity", "capabilities", "sessions"] },
-  { name: "pane listing", delays: { identity: 100, capabilities: 100, panes: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities", "panes"] },
+  { name: "session listing", delays: { identity: 100, capabilities: 100, sessions: 10_000 }, sampleMs: 50, calls: ["identity", "capabilities", "sessions"], prewarmProbes: true },
+  { name: "pane listing", delays: { identity: 100, capabilities: 100, panes: 10_000 }, session: "crew", sampleMs: 50, calls: ["identity", "capabilities", "panes"], prewarmProbes: true },
 ]) {
   test(`status shares its deadline through real ${scenario.name}`, async (t) => {
     const fixture = binaryFixture(t, `
 await delay((${JSON.stringify(scenario.delays)})[op] ?? 0);
 ${standardReplies}
 `);
+    // Warm identity/capability caches outside the status budget so Windows CI
+    // load cannot spend the whole deadline on cold Node --version/--help and
+    // skip the intentional hung stage (list-sessions / list-panes).
+    if (scenario.prewarmProbes) {
+      const zellijPath = fixture.env.ZSWARM_BIN;
+      const probeKey = JSON.stringify([
+        identityCacheKey(zellijPath),
+        routingEnvironment(fixture.env),
+      ]);
+      await ensureZellijProbes(
+        defaultExec(zellijPath, fixture.env),
+        zellijPath,
+        15_000,
+        probeKey,
+      );
+    }
+    const statusLaunchesFrom = fixture.launches.length;
     const start = Date.now();
     const result = await dispatchZswarm({
       op: "status", session: scenario.session, sampleMs: scenario.sampleMs, timeoutMs: statusTimeoutMs,
@@ -101,9 +131,9 @@ ${standardReplies}
     assert.equal(result.error.code, "zellij_failed", JSON.stringify(result));
     assert.match(result.error.message, /timed out/);
     const observed = fixture.calls().map((c) => c.op);
-    assert.deepEqual(observed.slice(0, 2).sort(), ["capabilities", "identity"]);
-    assert.deepEqual(observed.slice(2), scenario.calls.slice(2));
-    for (const call of fixture.launches) {
+    assert.deepEqual(observed.slice(0, 2).sort(), ["capabilities", "identity"], JSON.stringify(observed));
+    assert.deepEqual(observed.slice(2), scenario.calls.slice(2), JSON.stringify({ observed, error: result.error }));
+    for (const call of fixture.launches.slice(statusLaunchesFrom)) {
       const remaining = statusTimeoutMs - (call.at - start);
       assert.ok(remaining > 0, "child started after the deadline");
       assert.ok(call.timeoutMs > 0 && call.timeoutMs <= remaining + launchSlackMs,
