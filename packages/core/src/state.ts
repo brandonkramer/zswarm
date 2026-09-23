@@ -177,6 +177,12 @@ export function createStateStore(options: StateStoreOptions = {}) {
    * with real cooperating writeCursor processes). Prefer bounded fail-closed
    * refusal over unsafe automatic recovery.
    *
+   * A dead-looking owner observation is only refused when that same generation
+   * is still present. If normal release removed the path or another writer
+   * published a new generation between observation and the liveness check,
+   * contenders retry exclusive create within the original LOCK_WAIT_MS budget
+   * (generation churn does not reset the deadline).
+   *
    * Self-pid leftovers (same process, prior unlink failed) may be removed when
    * the on-disk generation still matches — this process is not inside `fn()`.
    *
@@ -217,12 +223,16 @@ export function createStateStore(options: StateStoreOptions = {}) {
     return unlinkIfMatchingOwner(lockPath, owner);
   }
 
-  function abandonedLockError(lockName: string, lockPath: string): Error {
-    const owner = readLockOwner(lockPath);
-    if (owner) {
-      const liveness = pidAlive(owner.pid) ? "live-or-unsignalable" : "dead-or-abandoned";
+  function abandonedLockError(
+    lockName: string,
+    lockPath: string,
+    observed: { pid: number; at: number } | null,
+  ): Error {
+    // Use the generation that justified refusal — do not re-read the path and
+    // accidentally describe a live successor as needing operator recovery.
+    if (observed) {
       return new Error(
-        `refusing automatic reclaim of ${lockName} (${liveness} owner pid=${owner.pid} at=${owner.at}); ` +
+        `refusing automatic reclaim of ${lockName} (dead-or-abandoned owner pid=${observed.pid} at=${observed.at}); ` +
           `remove ${lockPath} only after confirming that process is gone and no writer holds the file, then retry`,
       );
     }
@@ -233,28 +243,64 @@ export function createStateStore(options: StateStoreOptions = {}) {
   }
 
   /**
-   * Classify a blocking lock file. `wait` = live holder or fresh in-flight
-   * create. `refuse` = abandoned foreign/empty debris — fail closed now.
+   * Classify a blocking lock against the *current* generation.
+   *
+   * `wait` = live holder or fresh in-flight create.
+   * `refuse` = unchanged abandoned foreign/empty debris — fail closed.
    * `self` = reclaimable same-pid leftover.
+   * `retry` = observation went stale during the check (normal release removed
+   * the path, or a new generation superseded the departed owner). Contender
+   * must retry exclusive create within the original wait budget — not refuse
+   * a lock that is no longer abandoned, and not unlink/rename anything.
    */
   function classifyBlockingLock(
     lockPath: string,
-  ): "self" | "wait" | "refuse" {
+  ): {
+    kind: "self" | "wait" | "refuse" | "retry";
+    observed: { pid: number; at: number } | null;
+  } {
     const owner = readLockOwner(lockPath);
     if (owner) {
-      if (owner.pid === process.pid) return "self";
-      // Foreign owner: never auto-reclaim, whether the pid looks dead or live.
-      // A dead-looking pid is still refuse (not steal): observation is not a
-      // delete permit. Live holders are waited out until LOCK_WAIT_MS.
-      if (pidAlive(owner.pid)) return "wait";
-      return "refuse";
+      if (owner.pid === process.pid) return { kind: "self", observed: owner };
+      if (pidAlive(owner.pid)) return { kind: "wait", observed: owner };
+      // Dead-looking foreign owner: only refuse if THIS generation is still
+      // current. Normal release+exit between read and liveness check leaves
+      // the path absent or replaced by a live successor — that is not
+      // abandoned debris.
+      const still = readLockOwner(lockPath);
+      if (!still) return { kind: "retry", observed: null };
+      if (still.pid !== owner.pid || still.at !== owner.at) {
+        return { kind: "retry", observed: still };
+      }
+      return { kind: "refuse", observed: owner };
     }
     try {
-      if (Date.now() - statSync(lockPath).mtimeMs < LOCK_PENDING_MS) return "wait";
+      if (Date.now() - statSync(lockPath).mtimeMs < LOCK_PENDING_MS) {
+        return { kind: "wait", observed: null };
+      }
     } catch {
-      return "wait";
+      // Path disappeared between the busy create and this check.
+      return { kind: "retry", observed: null };
     }
-    return "refuse";
+    // Old empty/malformed: confirm it is still present and still ownerless
+    // before refusing — a successor may have published while we inspected.
+    const again = readLockOwner(lockPath);
+    if (again) {
+      if (again.pid === process.pid) return { kind: "self", observed: again };
+      if (pidAlive(again.pid)) return { kind: "wait", observed: again };
+      const confirm = readLockOwner(lockPath);
+      if (!confirm) return { kind: "retry", observed: null };
+      if (confirm.pid !== again.pid || confirm.at !== again.at) {
+        return { kind: "retry", observed: confirm };
+      }
+      return { kind: "refuse", observed: again };
+    }
+    try {
+      statSync(lockPath);
+    } catch {
+      return { kind: "retry", observed: null };
+    }
+    return { kind: "refuse", observed: null };
   }
 
   /**
@@ -297,14 +343,25 @@ export function createStateStore(options: StateStoreOptions = {}) {
         if (tryReclaimSelfLock(lockPath)) {
           continue;
         }
-        const kind = classifyBlockingLock(lockPath);
+        const { kind, observed } = classifyBlockingLock(lockPath);
+        if (kind === "self") {
+          if (tryReclaimSelfLock(lockPath)) continue;
+        }
         if (kind === "refuse") {
-          throw abandonedLockError(lockName, lockPath);
+          throw abandonedLockError(lockName, lockPath, observed);
+        }
+        if (kind === "retry") {
+          // Observation changed (released or superseded). Retry exclusive
+          // create within the original budget — do not reset the deadline on
+          // generation churn (unbounded handoffs become a timeout).
+          if (Date.now() >= deadline) {
+            throw new Error(`timed out waiting for ${lockName}`);
+          }
+          sleepSync(10);
+          continue;
         }
         if (Date.now() >= deadline) {
-          throw kind === "wait"
-            ? new Error(`timed out waiting for ${lockName}`)
-            : abandonedLockError(lockName, lockPath);
+          throw new Error(`timed out waiting for ${lockName}`);
         }
         sleepSync(10);
       }
