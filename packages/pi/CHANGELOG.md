@@ -1,5 +1,17 @@
 # @zswarm/pi
 
+## 0.1.8
+
+### Patch Changes
+
+- Updated dependencies [bc662c6]
+- Updated dependencies [572135d]
+- Updated dependencies [63e9959]
+- Updated dependencies [bac6a60]
+- Updated dependencies [6a088ce]
+- Updated dependencies [a5a4885]
+  - @zswarm/mcp@0.1.8
+
 ## 0.1.7
 
 ### Patch Changes

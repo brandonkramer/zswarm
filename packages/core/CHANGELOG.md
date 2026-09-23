@@ -1,5 +1,18 @@
 # @zswarm/core
 
+## 0.1.8
+
+### Patch Changes
+
+- 8613f5c: Refuse `bus --install` / `--clear` over direct SSH with `bus_remote_unsupported` before session discovery or marker writes. Run those mutations on the Zellij host or through `--serve`; read-only remote bus reports are unchanged.
+- bc662c6: Add inspect-only `zswarm doctor` for local, direct SSH, and serve routes: layered controller/host checks, authenticated hello, lease-safe ssh://, no pane/plugin/state mutations.
+- 572135d: Fix state-lock handoff: a departed observed owner no longer refuses acquisition when the lock was normally released or superseded. Contenders retry exclusive create within the existing wait budget; unchanged abandoned locks still fail closed. Await all 80 writeCursor children before fixture cleanup.
+- 63e9959: Add ssh:// serve targets: process-owned SSH LocalForward, authenticated hello before ops and reuse, CLI/MCP dispose of in-flight children, independent caller deadlines. host:port and tcp:// stay compatible. An omitted SSH port is not forced to 22.
+- bac6a60: Document and test private raw TCP Tailscale Serve: keep `zswarm serve` on loopback, forward with `tailscale serve --tcp=…`, and reach it via existing `--serve`/`tcp://` endpoints with mandatory token auth. No Funnel, HTTPS gateway, or PROXY protocol.
+- 00c7bff: Add authenticated serve hello (protocol 1) and transport diagnostics: probeServe, UTF-8 JSONL reply caps sized for dump/status (8MiB capture, no silent truncate), required success `data`, and connect/hello/request error details without SSH fallback.
+- 6a088ce: Allow `zswarm serve --listen` to bind an explicit local Tailscale IP after fresh daemon + OS ownership checks. Loopback remains the default; token auth stays mandatory; Windows install revalidates on every startup and clear still works when Tailscale is down.
+- a5a4885: Windows `serve --install` waits for authenticated hello and host session visibility (not Start-ScheduledTask acceptance), keeps the current-user Interactive logon task, and documents the Tailscale crew recipe (OpenSSH over Tailscale, loopback + token).
+
 ## 0.1.7
 
 ### Patch Changes
