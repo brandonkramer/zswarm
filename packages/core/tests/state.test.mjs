@@ -3,9 +3,8 @@ process.env.ZSWARM_LOG = "0";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { once } from "node:events";
 import fs from "node:fs";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -43,7 +42,7 @@ for (let i = 0; i < n; i++) store.postSignal("ch", String(i), Date.now());
   assert.equal(store.readSignals().ch.count, workers * each);
 });
 
-test("postSignal steals a leftover signals.lock from a dead owner", async () => {
+test("postSignal refuses a leftover signals.lock from a dead owner", async () => {
   const dir = mkdtempSync(join(tmpdir(), "zswarm-sig-orphan-"));
   const child = spawn(process.execPath, ["-e", "process.exit(0)"]);
   const pid = child.pid;
@@ -52,25 +51,31 @@ test("postSignal steals a leftover signals.lock from a dead owner", async () => 
     child.on("exit", resolve);
     child.on("error", reject);
   });
-  writeFileSync(join(dir, "signals.lock"), JSON.stringify({ pid, at: Date.now() }));
+  const lock = join(dir, "signals.lock");
+  writeFileSync(lock, JSON.stringify({ pid, at: Date.now() }));
   const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
-  const t0 = Date.now();
-  store.postSignal("ch", "x", Date.now());
-  assert.ok(Date.now() - t0 < 1000);
-  assert.equal(store.readSignals().ch.count, 1);
+  assert.throws(
+    () => store.postSignal("ch", "x", Date.now()),
+    /refusing automatic reclaim|dead-or-abandoned|remove .*signals\.lock/i,
+  );
+  assert.equal(JSON.parse(readFileSync(lock, "utf8")).pid, pid);
+  assert.equal(store.readSignals().ch, undefined);
+  rmSync(dir, { recursive: true, force: true });
 });
 
-test("postSignal steals an empty leftover signals.lock older than the wait", () => {
+test("postSignal refuses an empty leftover signals.lock older than the pending window", () => {
   const dir = mkdtempSync(join(tmpdir(), "zswarm-sig-empty-"));
   const lock = join(dir, "signals.lock");
   writeFileSync(lock, "");
   const past = new Date(Date.now() - 10_000);
   utimesSync(lock, past, past);
   const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
-  const t0 = Date.now();
-  store.postSignal("ch", "x", Date.now());
-  assert.ok(Date.now() - t0 < 1000);
-  assert.equal(store.readSignals().ch.count, 1);
+  assert.throws(
+    () => store.postSignal("ch", "x", Date.now()),
+    /refusing automatic reclaim|empty or malformed|remove .*signals\.lock/i,
+  );
+  assert.equal(store.readSignals().ch, undefined);
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("postSignal steals a leftover lock owned by this process", () => {
@@ -84,19 +89,24 @@ test("postSignal steals a leftover lock owned by this process", () => {
   store.postSignal("ch", "x", Date.now());
   assert.ok(Date.now() - t0 < 1000);
   assert.equal(store.readSignals().ch.count, 1);
+  rmSync(dir, { recursive: true, force: true });
 });
 
-test("postSignal steals a live-pid lock older than the stale window", () => {
+test("postSignal refuses a foreign live-pid lock even when its stamp is old", () => {
   const dir = mkdtempSync(join(tmpdir(), "zswarm-sig-recycle-"));
+  // pid 1 is almost always alive; automatic reclaim of foreign owners is refused
+  // regardless of stamp age (no stale-window steal).
   writeFileSync(
     join(dir, "signals.lock"),
     JSON.stringify({ pid: 1, at: 1 }),
   );
   const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
-  const t0 = Date.now();
-  store.postSignal("ch", "x", Date.now());
-  assert.ok(Date.now() - t0 < 1000);
-  assert.equal(store.readSignals().ch.count, 1);
+  assert.throws(
+    () => store.postSignal("ch", "x", Date.now()),
+    /timed out waiting for signals\.lock|refusing automatic reclaim/i,
+  );
+  assert.equal(store.readSignals().ch, undefined);
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("writeCursor serializes writers across processes", async (t) => {
@@ -134,107 +144,65 @@ store.writeCursor(process.argv[3], process.argv[3]);
 });
 
 /**
- * Deterministic filesystem interleaving under rename-to-tomb reclaim.
- *
- * The repair-01 check-then-`rmSync(well-known path)` interval is no longer a
- * cooperating-writer step: reclaim/release rename the shared name to a private
- * tomb, then delete only a matching tomb generation. A successor published at
- * the well-known path is a different inode; the rename loser gets ENOENT and
- * never removes it.
- *
- * This harness schedules a competing reclaim (rename stale aside + wx live
- * owner) immediately before the contender's rename of the shared path — the
- * analogue of the old "replacement after the final check" race — and asserts
- * the live successor is restored/left intact, not destroyed.
+ * Fail-closed foreign reclaim: an abandoned lock is refused without moving the
+ * shared pathname. The repair-02 rename-to-tomb interval (observe → rename live
+ * holder aside → admit a third writer) is no longer a cooperating-writer step.
+ * Contenders never rename/unlink a foreign generation, so a live critical
+ * section cannot be exposed as unlocked to admit another writer.
  */
-test("a stale owner observation must not delete a replacement live owner lock", async () => {
-  const dir = fs.mkdtempSync(join(tmpdir(), "zswarm-lock-interleave-"));
+test("abandoned lock reclaim is refused without displacing the shared lock name", () => {
+  const dir = fs.mkdtempSync(join(tmpdir(), "zswarm-lock-refuse-"));
   const lock = join(dir, "cursors.lock");
   const departed = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
   assert.equal(departed.status, 0);
   assert.ok(departed.pid);
   assert.throws(() => process.kill(departed.pid, 0), { code: "ESRCH" });
-  const live = spawn(process.execPath, ["-e", "process.stdin.resume()"], {
-    stdio: ["pipe", "ignore", "ignore"],
-  });
-  const exited = once(live, "exit");
-  const originalRead = fs.readFileSync;
-  const originalRm = fs.rmSync;
+  const seed = { pid: departed.pid, at: Date.now() };
+  fs.writeFileSync(lock, JSON.stringify(seed));
+  fs.writeFileSync(join(dir, "cursors.json"), JSON.stringify({ seed: "seed" }));
+
   const originalRename = fs.renameSync;
-  let replaced = false;
-  let removedLiveOwner = false;
+  const originalRm = fs.rmSync;
+  let renamedShared = false;
+  let removedShared = false;
   try {
-    process.kill(live.pid, 0);
-    fs.writeFileSync(lock, JSON.stringify({ pid: departed.pid, at: Date.now() }));
     fs.renameSync = function (from, to, ...args) {
-      if (
-        String(from) === lock &&
-        String(to).includes(".tomb.") &&
-        !replaced
-      ) {
-        assert.equal(JSON.parse(originalRead(lock, "utf8")).pid, departed.pid);
-        const competitorTomb = `${lock}.competitor-won`;
-        originalRename(lock, competitorTomb);
-        originalRm(competitorTomb, { force: true });
-        fs.writeFileSync(lock, JSON.stringify({ pid: live.pid, at: Date.now() }), {
-          flag: "wx",
-        });
-        replaced = true;
-      }
+      if (String(from) === lock) renamedShared = true;
       return originalRename.call(this, from, to, ...args);
     };
     fs.rmSync = function (path, ...args) {
-      try {
-        if (JSON.parse(originalRead(path, "utf8")).pid === live.pid) {
-          process.kill(live.pid, 0);
-          removedLiveOwner = true;
-        }
-      } catch (e) {
-        if (e.code !== "ENOENT" && e instanceof SyntaxError === false) {
-          // ignore non-JSON tombs / missing paths
-        }
-      }
+      if (String(path) === lock) removedShared = true;
       return originalRm.call(this, path, ...args);
     };
     syncBuiltinESMExports();
-    let outcome;
-    try {
-      createStateStore({ dir, env: { ZSWARM_LOG: "0" } }).writeCursor("contender", "value");
-    } catch (error) {
-      outcome = error;
-    }
-    assert.equal(replaced, true, "interleaving must execute");
-    assert.equal(removedLiveOwner, false, "stale contender unlinked the new live owner lock");
-    assert.ok(outcome, "contender must wait/fail while another live owner holds the lock");
+    assert.throws(
+      () => createStateStore({ dir, env: { ZSWARM_LOG: "0" } }).writeCursor("A", "A"),
+      /refusing automatic reclaim|dead-or-abandoned|remove .*cursors\.lock/i,
+    );
+    assert.equal(renamedShared, false, "fail-closed reclaim must not rename the shared lock");
+    assert.equal(removedShared, false, "fail-closed reclaim must not unlink the shared lock");
+    assert.deepEqual(JSON.parse(readFileSync(lock, "utf8")), seed);
     assert.equal(
-      JSON.parse(originalRead(lock, "utf8")).pid,
-      live.pid,
-      "live successor must still own the well-known lock path",
+      createStateStore({ dir, env: { ZSWARM_LOG: "0" } }).readCursor("A"),
+      null,
     );
   } finally {
-    fs.readFileSync = originalRead;
-    fs.rmSync = originalRm;
     fs.renameSync = originalRename;
+    fs.rmSync = originalRm;
     syncBuiltinESMExports();
-    live.stdin.end();
-    await exited;
-    fs.rmSync(dir, { recursive: true, force: true });
+    originalRm(dir, { recursive: true, force: true });
   }
 });
 
-/**
- * Two reclaimers racing rename-to-tomb on the same stale generation: only one
- * rename wins; the loser must not destroy the winner's subsequent wx claim.
- */
-test("multiple reclaimers serialize on rename-to-tomb without deleting the winner", async () => {
-  const dir = fs.mkdtempSync(join(tmpdir(), "zswarm-lock-multireclaim-"));
+test("multiple contenders refuse the same abandoned lock without entering", async () => {
+  const dir = fs.mkdtempSync(join(tmpdir(), "zswarm-lock-multirefuse-"));
   const lock = join(dir, "cursors.lock");
   const departed = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
   assert.equal(departed.status, 0);
-  assert.throws(() => process.kill(departed.pid, 0), { code: "ESRCH" });
   fs.writeFileSync(lock, JSON.stringify({ pid: departed.pid, at: Date.now() }));
+  fs.writeFileSync(join(dir, "cursors.json"), JSON.stringify({}));
 
-  const worker = join(dir, "reclaim-worker.mjs");
+  const worker = join(dir, "refuse-worker.mjs");
   writeFileSync(
     worker,
     `import { createStateStore } from ${JSON.stringify(pathToFileURL(DIST).href)};
@@ -250,7 +218,7 @@ try {
   );
 
   const results = await Promise.all(
-    ["a", "b", "c", "d"].map(
+    ["A", "B", "C", "D"].map(
       (key) =>
         new Promise((resolve) => {
           const child = spawn(process.execPath, [worker, dir, key], {
@@ -265,22 +233,50 @@ try {
     ),
   );
 
-  const succeeded = results.filter((r) => r.code === 0);
-  const timedOut = results.filter((r) => r.code !== 0);
-  // With a live departed lock cleared by the first winner, every worker should
-  // eventually acquire in sequence — all four keys must land. If a reclaimer
-  // deleted a live successor, we would lose keys or see crashes.
-  assert.equal(succeeded.length + timedOut.length, 4);
-  const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
-  // Retry briefly: losers poll until LOCK_WAIT; all should finish with keys.
-  const deadline = Date.now() + 8_000;
-  while (Date.now() < deadline) {
-    const keys = ["a", "b", "c", "d"].filter((k) => store.readCursor(k) === k);
-    if (keys.length === 4) break;
-    await new Promise((r) => setTimeout(r, 50));
+  for (const result of results) {
+    assert.equal(result.code, 2, `${result.key} must refuse, not enter`);
+    assert.match(result.err, /refusing automatic reclaim|dead-or-abandoned/i);
   }
-  for (const key of ["a", "b", "c", "d"]) {
-    assert.equal(store.readCursor(key), key, `${key} missing after multi-reclaim wave`);
+  const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
+  for (const key of ["A", "B", "C", "D"]) {
+    assert.equal(store.readCursor(key), null, `${key} must not have written`);
+  }
+  assert.equal(JSON.parse(readFileSync(lock, "utf8")).pid, departed.pid);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+/**
+ * Real cooperating writers under normal release (no abandoned reclaim): a
+ * holder that finishes must not lose another successful writer's key. Uses
+ * the product API only — no rename/reclaim of foreign locks.
+ */
+test("successful writers keep keys when a live holder releases normally", async () => {
+  const dir = fs.mkdtempSync(join(tmpdir(), "zswarm-lock-live-writers-"));
+  const worker = join(dir, "live-worker.mjs");
+  writeFileSync(
+    worker,
+    `import { createStateStore } from ${JSON.stringify(pathToFileURL(DIST).href)};
+const store = createStateStore({ dir: process.argv[2], env: { ZSWARM_LOG: "0" } });
+store.writeCursor(process.argv[3], process.argv[3]);
+`,
+  );
+  const keys = ["A", "B", "C"];
+  await Promise.all(
+    keys.map(
+      (key) =>
+        new Promise((resolve, reject) => {
+          const child = spawn(process.execPath, [worker, dir, key], {
+            stdio: "inherit",
+          });
+          child.on("exit", (code) =>
+            code === 0 ? resolve() : reject(new Error(`worker exit ${code}`)),
+          );
+        }),
+    ),
+  );
+  const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
+  for (const key of keys) {
+    assert.equal(store.readCursor(key), key);
   }
   rmSync(dir, { recursive: true, force: true });
 });

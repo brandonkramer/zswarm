@@ -52,9 +52,13 @@ const CURSORS_LOCK = "cursors.lock";
 const BUS_FILE = "bus.json";
 /** Keeps the log bounded without needing a rotation daemon. */
 const LOG_TAIL_BYTES = 512 * 1024;
+/** Bound for waiting on a *live* lock holder before failing. */
 const LOCK_WAIT_MS = 5_000;
-/** A live pid older than this is treated as a recycle of a crashed holder. */
-const LOCK_STALE_MS = 30_000;
+/**
+ * Fresh empty/malformed lock files this young are treated as an in-flight
+ * exclusive create (wait), not as abandoned debris (refuse).
+ */
+const LOCK_PENDING_MS = LOCK_WAIT_MS;
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -152,29 +156,6 @@ export function createStateStore(options: StateStoreOptions = {}) {
     }
   }
 
-  /**
-   * Dead pid → steal now. This process's own leftover (unlink failed, or a
-   * non-reentrant re-entry) → steal now. A live pid whose `at` is older than
-   * LOCK_STALE_MS is a recycled pid, not a holder still inside fn().
-   * Empty leftover from older writers (wx with no owner bytes) → steal once
-   * mtime is older than the wait, so an in-flight create is not yanked out
-   * from under the holder.
-   *
-   * Ownership transition is rename-serialized: a cooperating reclaim/release
-   * never `rmSync`s the well-known lock path. It renames that path to a private
-   * tomb, then inspects the tomb. Only the rename winner can clear a given
-   * on-disk generation; a successor published at the well-known path after that
-   * rename is a different inode and is never deleted by the loser. A tomb whose
-   * generation does not match the observation is restored (or left in place on
-   * EEXIST) — fail closed, never destroy a possibly-live successor to keep
-   * opportunistic recovery.
-   */
-  function ownerObservationIsStale(owner: { pid: number; at: number }): boolean {
-    if (owner.pid === process.pid) return true;
-    if (!pidAlive(owner.pid)) return true;
-    return Date.now() - owner.at >= LOCK_STALE_MS;
-  }
-
   function lockBusy(code: string | undefined): boolean {
     // Unix: O_EXCL on an existing file is EEXIST. Windows: a holder that still
     // has the handle open (or a delete-pending name) is EPERM / EACCES / EBUSY.
@@ -186,143 +167,107 @@ export function createStateStore(options: StateStoreOptions = {}) {
     );
   }
 
-  /** Private tomb path next to the well-known lock (same directory / volume). */
-  function lockTombPath(
-    lockPath: string,
-    kind: "owner" | "empty",
-    expected?: { pid: number; at: number },
-  ): string {
-    const tag =
-      kind === "owner" && expected
-        ? `${expected.pid}.${expected.at}`
-        : "empty";
-    return `${lockPath}.tomb.${process.pid}.${tag}.${process.hrtime.bigint()}`;
-  }
-
   /**
-   * Move the well-known lock to a private tomb. Only the rename winner owns
-   * that inode thereafter. Never `rmSync` the well-known path.
+   * Cursor/signal locks: exclusive create (`wx`) + owner stamp; release by
+   * generation-matched unlink of the stamp this process published.
+   *
+   * Foreign / abandoned / empty-old lock files are NOT auto-reclaimed.
+   * Portable check-then-rename/unlink reclaim can move a live holder's shared
+   * name aside and admit another writer into that critical section (demonstrated
+   * with real cooperating writeCursor processes). Prefer bounded fail-closed
+   * refusal over unsafe automatic recovery.
+   *
+   * Self-pid leftovers (same process, prior unlink failed) may be removed when
+   * the on-disk generation still matches — this process is not inside `fn()`.
+   *
+   * Operator recovery: if acquisition refuses an abandoned lock, confirm the
+   * recorded pid is gone and no writer holds the file, then remove the lock
+   * path manually and retry.
    */
-  function renameLockToTomb(lockPath: string, tomb: string): boolean {
+  function unlinkIfMatchingOwner(
+    lockPath: string,
+    expected: { pid: number; at: number },
+  ): boolean {
     const until = Date.now() + 500;
     while (true) {
+      const current = readLockOwner(lockPath);
+      if (
+        !current ||
+        current.pid !== expected.pid ||
+        current.at !== expected.at
+      ) {
+        return false;
+      }
       try {
-        renameSync(lockPath, tomb);
+        rmSync(lockPath, { force: true });
         return true;
       } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code === "ENOENT") return false;
-        if (!lockBusy(code) || Date.now() >= until) return false;
+        if (!lockBusy((err as NodeJS.ErrnoException).code) || Date.now() >= until) {
+          return false;
+        }
         sleepSync(10);
       }
     }
   }
 
-  /**
-   * After a tomb rename: destroy only a matching stale/owned generation.
-   * Mismatched tombs are restored to the well-known path when possible; on
-   * EEXIST the tomb is left in place (fail closed) rather than deleted.
-   */
-  function settleTomb(
-    lockPath: string,
-    tomb: string,
-    accept: (moved: { pid: number; at: number } | null) => boolean,
-  ): boolean {
-    const moved = readLockOwner(tomb);
-    if (accept(moved)) {
-      try {
-        rmSync(tomb, { force: true });
-      } catch {
-        // Tomb is private; a leftover here does not affect exclusivity.
-      }
-      return true;
-    }
-    try {
-      renameSync(tomb, lockPath);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "EEXIST" || lockBusy(code)) {
-        // Another live claim occupies the well-known path. Do not destroy the
-        // tomb's possibly-live generation; leave it for operator cleanup.
-        return false;
-      }
-      if (code !== "ENOENT") {
-        return false;
-      }
-    }
-    return false;
+  /** Only this process may clear its own leftover generation. */
+  function tryReclaimSelfLock(lockPath: string): boolean {
+    const owner = readLockOwner(lockPath);
+    if (!owner || owner.pid !== process.pid) return false;
+    return unlinkIfMatchingOwner(lockPath, owner);
   }
 
-  /**
-   * Drop or reclaim a matching owner generation via rename-to-tomb. Cooperating
-   * writers never remove the well-known path with `rmSync`, so a successor
-   * published there after a final content check cannot be deleted by an older
-   * observation (the old check-then-unlink interval is not part of this protocol).
-   */
-  function reclaimMatchingOwner(
-    lockPath: string,
-    expected: { pid: number; at: number },
-  ): boolean {
-    const current = readLockOwner(lockPath);
-    if (
-      !current ||
-      current.pid !== expected.pid ||
-      current.at !== expected.at
-    ) {
-      return false;
+  function abandonedLockError(lockName: string, lockPath: string): Error {
+    const owner = readLockOwner(lockPath);
+    if (owner) {
+      const liveness = pidAlive(owner.pid) ? "live-or-unsignalable" : "dead-or-abandoned";
+      return new Error(
+        `refusing automatic reclaim of ${lockName} (${liveness} owner pid=${owner.pid} at=${owner.at}); ` +
+          `remove ${lockPath} only after confirming that process is gone and no writer holds the file, then retry`,
+      );
     }
-    const tomb = lockTombPath(lockPath, "owner", expected);
-    if (!renameLockToTomb(lockPath, tomb)) return false;
-    return settleTomb(
-      lockPath,
-      tomb,
-      (moved) =>
-        !!moved && moved.pid === expected.pid && moved.at === expected.at,
+    return new Error(
+      `refusing automatic reclaim of ${lockName} (empty or malformed lock without a safe owner record); ` +
+        `remove ${lockPath} only when no writer is using it, then retry`,
     );
   }
 
   /**
-   * Empty/malformed lock reclaim: rename aside only when still ownerless.
-   * A tomb that gained a real owner record is restored (fail closed).
+   * Classify a blocking lock file. `wait` = live holder or fresh in-flight
+   * create. `refuse` = abandoned foreign/empty debris — fail closed now.
+   * `self` = reclaimable same-pid leftover.
    */
-  function reclaimIfStillOwnerless(lockPath: string): boolean {
-    if (readLockOwner(lockPath)) return false;
-    try {
-      statSync(lockPath);
-    } catch {
-      return false;
-    }
-    if (readLockOwner(lockPath)) return false;
-    const tomb = lockTombPath(lockPath, "empty");
-    if (!renameLockToTomb(lockPath, tomb)) return false;
-    return settleTomb(lockPath, tomb, (moved) => moved === null);
-  }
-
-  function tryReclaimStaleLock(lockPath: string): boolean {
+  function classifyBlockingLock(
+    lockPath: string,
+  ): "self" | "wait" | "refuse" {
     const owner = readLockOwner(lockPath);
     if (owner) {
-      if (!ownerObservationIsStale(owner)) return false;
-      return reclaimMatchingOwner(lockPath, owner);
+      if (owner.pid === process.pid) return "self";
+      // Foreign owner: never auto-reclaim, whether the pid looks dead or live.
+      // A dead-looking pid is still refuse (not steal): observation is not a
+      // delete permit. Live holders are waited out until LOCK_WAIT_MS.
+      if (pidAlive(owner.pid)) return "wait";
+      return "refuse";
     }
     try {
-      if (Date.now() - statSync(lockPath).mtimeMs < LOCK_WAIT_MS) return false;
+      if (Date.now() - statSync(lockPath).mtimeMs < LOCK_PENDING_MS) return "wait";
     } catch {
-      return false;
+      return "wait";
     }
-    return reclaimIfStillOwnerless(lockPath);
+    return "refuse";
   }
 
   /**
-   * Drop this process's lock only when the generation we published is still the
-   * inode at the well-known path. Release uses the same rename-to-tomb rule as
-   * reclaim so a waiter that already wx-created a successor cannot be removed
-   * by a late owner unlink of the shared name.
+   * Drop this process's lock only when the generation we published is still at
+   * the well-known path. Under fail-closed foreign reclaim, generations are not
+   * stolen while we hold the critical section, so a matching unlink cannot
+   * remove a successor published by another cooperating writer.
    */
   function unlinkOwnedLock(
     lockPath: string,
     stamp: { pid: number; at: number },
   ): void {
-    reclaimMatchingOwner(lockPath, stamp);
+    unlinkIfMatchingOwner(lockPath, stamp);
   }
 
   function withFileLock<T>(lockName: string, fn: () => T): T {
@@ -336,11 +281,7 @@ export function createStateStore(options: StateStoreOptions = {}) {
         // not one atomic publish of populated bytes — create and write still
         // have an interval. The UTF-8 fast path keeps that interval in one
         // native writeFileSync rather than two JS turns (openSync then write).
-        // Empty leftovers can still be stolen after LOCK_WAIT_MS if a crash
-        // or a still-empty file is old enough. Stale reclaim/release clear the
-        // well-known path only by winning rename-to-tomb for a matching
-        // generation; they never `rmSync` that path (so a live successor at
-        // the name cannot be deleted by an older observation).
+        // Abandoned foreign/empty locks are refused (not renamed or unlinked).
         writeFileSync(lockPath, JSON.stringify(stamp), {
           encoding: "utf8",
           flag: "wx",
@@ -353,11 +294,17 @@ export function createStateStore(options: StateStoreOptions = {}) {
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (!lockBusy(code)) throw err;
-        if (tryReclaimStaleLock(lockPath)) {
+        if (tryReclaimSelfLock(lockPath)) {
           continue;
         }
+        const kind = classifyBlockingLock(lockPath);
+        if (kind === "refuse") {
+          throw abandonedLockError(lockName, lockPath);
+        }
         if (Date.now() >= deadline) {
-          throw new Error(`timed out waiting for ${lockName}`);
+          throw kind === "wait"
+            ? new Error(`timed out waiting for ${lockName}`)
+            : abandonedLockError(lockName, lockPath);
         }
         sleepSync(10);
       }

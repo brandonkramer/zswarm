@@ -851,7 +851,7 @@ export async function installServeLogon(
     await authorizeServeListen(host, {
       env,
       signal: input.signal,
-      timeoutMs: remaining(),
+      deadline,
       now,
       tailscaleStatus: input.tailscaleStatus,
       networkInterfaces: input.networkInterfaces,

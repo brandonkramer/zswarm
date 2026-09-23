@@ -336,10 +336,13 @@ export async function startServe(
     }
   };
 
+  // Share the absolute startup deadline with verification; do not refresh a
+  // new relative allowance after time has already elapsed.
+  assertStartupOpen("authorize");
   const authorized = await authorizeServeListen(host, {
     env: options.env,
     signal: options.signal,
-    timeoutMs,
+    deadline,
     now,
     tailscaleStatus: options.tailscaleStatus,
     networkInterfaces: options.networkInterfaces,
@@ -570,49 +573,55 @@ export async function startServe(
 
     // Exact verified address only — never 0.0.0.0 / :: / a different host.
     // Startup budget ends once listening succeeds; it is not a lifetime timer.
-    server.listen(port, bindHost, () => {
-      if (settled) {
-        closeStartupListener();
-        return;
-      }
-      if (options.signal?.aborted) {
-        rejectStartup(
-          new ZellijError("cancelled", "serve startup cancelled before listen completed", {
-            phase: "bind",
-            cause: "cancelled",
-            stage: "listening",
-            remedy: SERVE_BIND_REMEDY.cancelled,
-          }),
-        );
-        return;
-      }
-      if (now() >= deadline) {
-        rejectStartup(
-          new ZellijError(
-            "serve_auth",
-            "zswarm serve startup timed out before listen completed",
-            {
+    try {
+      server.listen(port, bindHost, () => {
+        if (settled) {
+          closeStartupListener();
+          return;
+        }
+        if (options.signal?.aborted) {
+          rejectStartup(
+            new ZellijError("cancelled", "serve startup cancelled before listen completed", {
               phase: "bind",
-              cause: "timeout",
+              cause: "cancelled",
               stage: "listening",
-              remedy: SERVE_BIND_REMEDY.timeout,
-            },
-          ),
-        );
-        return;
-      }
-      const addr = server.address();
-      const actualPort =
-        typeof addr === "object" && addr ? addr.port : port;
-      resolveStartup({
-        label: formatListenLabel(bindHost, actualPort),
-        close: () =>
-          new Promise((done, fail) => {
-            for (const open of sockets) open.destroy();
-            server.close((err) => (err ? fail(err) : done()));
-          }),
+              remedy: SERVE_BIND_REMEDY.cancelled,
+            }),
+          );
+          return;
+        }
+        if (now() >= deadline) {
+          rejectStartup(
+            new ZellijError(
+              "serve_auth",
+              "zswarm serve startup timed out before listen completed",
+              {
+                phase: "bind",
+                cause: "timeout",
+                stage: "listening",
+                remedy: SERVE_BIND_REMEDY.timeout,
+              },
+            ),
+          );
+          return;
+        }
+        const addr = server.address();
+        const actualPort =
+          typeof addr === "object" && addr ? addr.port : port;
+        resolveStartup({
+          label: formatListenLabel(bindHost, actualPort),
+          close: () =>
+            new Promise((done, fail) => {
+              for (const open of sockets) open.destroy();
+              server.close((err) => (err ? fail(err) : done()));
+            }),
+        });
       });
-    });
+    } catch (err) {
+      // Synchronous listen failures must clear abort/timer watchers and close
+      // the owned listener; preserve the original error cause/message.
+      rejectStartup(err);
+    }
   });
 }
 

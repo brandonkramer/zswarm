@@ -975,6 +975,69 @@ export function registerServeBindTests(test = nodeTest) {
       await close();
     }
   });
+
+  test("verification receives only the remaining overall startup budget", async () => {
+    let reads = 0;
+    let granted;
+    const handle = await startServe(`${SELF_V4}:9419`, async () => ({ ok: true, data: {} }), {
+      token: "secret",
+      timeoutMs: 100,
+      // Time passes between creating the outer startup deadline and entering
+      // the nested verifier; both operations use the same clock.
+      now: () => (++reads === 1 ? 1000 : 1090),
+      tailscaleStatus: async (input) => {
+        granted = input.timeoutMs;
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            BackendState: "Running",
+            Self: { TailscaleIPs: [SELF_V4] },
+            TailscaleIPs: [SELF_V4],
+          }),
+          stderr: "",
+        };
+      },
+      networkInterfaces: ownedIfaces(),
+      createServer: recordingServer([]),
+    });
+    await handle.close();
+    assert.ok(granted > 0 && granted <= 10, `CLI received ${granted}ms with only 10ms remaining in startup`);
+  });
+
+  test("synchronous listen failure clears startup watchers and closes owned resources", async () => {
+    const ac = new AbortController();
+    let closes = 0;
+    let observed;
+    try {
+      await startServe("127.0.0.1:9419", async () => ({ ok: true, data: {} }), {
+        token: "secret",
+        signal: ac.signal,
+        timeoutMs: 10_000,
+        createServer: () => {
+          const server = new EventEmitter();
+          server.listen = () => {
+            throw new Error("sync-listen failure");
+          };
+          server.address = () => ({ address: "127.0.0.1", family: "IPv4", port: 9419 });
+          server.close = (cb) => {
+            closes += 1;
+            queueMicrotask(() => cb?.());
+            return server;
+          };
+          return server;
+        },
+      });
+    } catch (error) {
+      observed = error;
+    }
+    const { getEventListeners } = await import("node:events");
+    const listenersAtFailure = getEventListeners(ac.signal, "abort").length;
+    const closesAtFailure = closes;
+    ac.abort();
+    assert.match(observed?.message ?? "", /sync-listen failure/);
+    assert.equal(listenersAtFailure, 0, "abort watcher survived an already-rejected startup");
+    assert.ok(closesAtFailure >= 1, "owned listener was not closed on synchronous failure");
+  });
 }
 
 function isStandaloneServeBindEntry() {

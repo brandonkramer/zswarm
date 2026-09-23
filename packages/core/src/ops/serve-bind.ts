@@ -33,8 +33,14 @@ export type NetworkInterfacesFn = () => NodeJS.Dict<NetworkInterfaceInfo[]>;
 export type ServeBindDeps = {
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
-  /** Overall verification/startup budget (install shares its deadline remaining). */
+  /**
+   * Relative verification budget when `deadline` is omitted. Callers that
+   * already fixed an absolute startup deadline should pass `deadline` instead
+   * of refreshing a new allowance from `now + timeoutMs`.
+   */
   timeoutMs?: number;
+  /** Absolute verify/bind deadline (same clock as `now`). Preferred over `timeoutMs`. */
+  deadline?: number;
   now?: () => number;
   tailscaleStatus?: TailscaleStatusRunner;
   networkInterfaces?: NetworkInterfacesFn;
@@ -300,8 +306,9 @@ function osOwnsCanonical(
  * host requires a strict literal IP present in fresh local Tailscale self
  * addresses and assigned on a local OS interface.
  *
- * Uses one startup budget (`timeoutMs` from `now`) across CLI and OS stages.
- * Does not install a lifetime timer on a healthy server.
+ * Uses one absolute startup deadline across CLI and OS stages (shared with
+ * `startServe` when `deadline` is passed). Does not install a lifetime timer
+ * on a healthy server.
  */
 export async function authorizeServeListen(
   host: string,
@@ -331,8 +338,10 @@ export async function authorizeServeListen(
     );
   }
 
-  const timeoutMs = Math.max(1, Math.floor(deps.timeoutMs ?? SERVE_BIND_VERIFY_TIMEOUT_MS));
-  const deadline = now() + timeoutMs;
+  const deadline =
+    typeof deps.deadline === "number" && Number.isFinite(deps.deadline)
+      ? deps.deadline
+      : now() + Math.max(1, Math.floor(deps.timeoutMs ?? SERVE_BIND_VERIFY_TIMEOUT_MS));
   const remaining = (): number => deadline - now();
   const assertRunnable = (stage: string): number => {
     throwIfAborted(signal);
