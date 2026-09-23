@@ -74,6 +74,12 @@ ZSWARM_SERVE=127.0.0.1:9419 ZSWARM_SERVE_TOKEN=secret zswarm list
 `ZSWARM_SSH` only forwards Zellij. Git worktrees, `diff`, and `checkpoint` stay
 local — use `serve` on the host that owns the repo if those ops should run there.
 
+Direct SSH cannot `bus --install` or `bus --clear` (`bus_remote_unsupported`):
+the plugin `file:` URL and the install marker belong on the Zellij host. Run
+those on that host, or through `serve` over a tunnel. A remote `bus` report
+still explains that the bus is unavailable. `--local` overrides inherited SSH
+when this machine owns Zellij.
+
 MCP: set `ZSWARM_SERVE` in the MCP server env. Pass `session` explicitly or
 configure `ZSWARM_SESSION` on the host running `serve`. Do **not** call
 `op: "serve"` to listen — that is CLI-only. Other ops forward.

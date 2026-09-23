@@ -1,0 +1,10 @@
+{
+  "name": "zSwarm",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "crew (zellij)",
+      "command": "zellij attach --create crew"
+    }
+  ]
+}

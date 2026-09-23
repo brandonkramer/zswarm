@@ -18,6 +18,7 @@ import {
   planBus,
   resetBusCache,
   resolveBusPlugin,
+  startServe,
 } from "../dist/index.js";
 
 let seq = 0;
@@ -724,4 +725,181 @@ test("first install launches a floating pane and remembers the session", async (
   assert.ok(launchCalls(calls)[0].includes("--floating"));
   assert.equal(store.readBus("demo").configKey, "zswarm-bus");
   assert.equal(store.readBus("other"), null);
+});
+
+const REMOTE_BUS_METHODS = [
+  "resolveSession",
+  "listSessions",
+  "listPanes",
+  "launchPlugin",
+  "closePane",
+  "pipePlugin",
+];
+
+/** A live test client whose transport is direct SSH, with method/exec spies. */
+function sshBusClient(options = {}) {
+  const inner = busClient({
+    panesJson: JSON.stringify([BUS_PLUGIN_PANE]),
+    ...options,
+  });
+  const hits = [];
+  const remote = {
+    ...inner.client,
+    remote: true,
+    transport: { kind: "ssh", mode: "ssh", host: "user@host" },
+  };
+  for (const name of REMOTE_BUS_METHODS) {
+    const orig = remote[name].bind(inner.client);
+    remote[name] = (...args) => {
+      hits.push(name);
+      return orig(...args);
+    };
+  }
+  return { ...inner, client: remote, hits };
+}
+
+function assertBusRemoteUnsupported(result, store, session, previous, calls, hits) {
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "bus_remote_unsupported");
+  assert.match(
+    result.error.message,
+    /run on Zellij host or use --serve through a tunnel; direct SSH cannot install\/clear the bus/,
+  );
+  assert.deepEqual(hits, []);
+  assert.deepEqual(calls, []);
+  assert.equal(store.readBus(session)?.configKey ?? null, previous?.configKey ?? null);
+  assert.equal(store.readBus(session)?.plugin ?? null, previous?.plugin ?? null);
+  assert.equal(store.readBus(session)?.installedAt ?? null, previous?.installedAt ?? null);
+}
+
+test("direct SSH refuses bus install/force/clear before discovery or marker writes", async () => {
+  for (const args of [
+    { install: true },
+    { install: true, force: true },
+    { clear: true },
+  ]) {
+    resetBusCache();
+    const store = installed(tempState());
+    const previous = store.readBus("demo");
+    const { client, calls, hits } = sshBusClient();
+    const result = await dispatchZswarm({ op: "bus", ...args }, client, {
+      state: store,
+      env: { ZSWARM_BUS_PLUGIN: PLUGIN_FILE, ZSWARM_SSH: "user@host" },
+      now: () => 1,
+      sleep: async () => {},
+    });
+    assertBusRemoteUnsupported(result, store, "demo", previous, calls, hits);
+  }
+});
+
+test("bus install/clear use the client transport, not inherited SSH env", async () => {
+  resetBusCache();
+  const remoteStore = installed(tempState());
+  const previous = remoteStore.readBus("demo");
+  const remote = sshBusClient();
+  const remoteDenied = await dispatchZswarm(
+    { op: "bus", install: true },
+    remote.client,
+    {
+      state: remoteStore,
+      env: { ZSWARM_BUS_PLUGIN: PLUGIN_FILE },
+      now: () => 1,
+      sleep: async () => {},
+    },
+  );
+  assertBusRemoteUnsupported(
+    remoteDenied,
+    remoteStore,
+    "demo",
+    previous,
+    remote.calls,
+    remote.hits,
+  );
+
+  resetBusCache();
+  const localStore = tempState();
+  const { client, calls } = busClient();
+  const localInstall = await dispatchZswarm(
+    { op: "bus", install: true, local: true },
+    client,
+    {
+      state: localStore,
+      env: { ZSWARM_BUS_PLUGIN: PLUGIN_FILE, ZSWARM_SSH: "user@host" },
+      now: () => 1,
+      sleep: async () => {},
+    },
+  );
+  assert.equal(localInstall.ok, true);
+  assert.equal(localInstall.data.installed, true);
+  assert.equal(launchCalls(calls).length, 1);
+  assert.equal(localStore.readBus("demo").configKey, "zswarm-bus");
+});
+
+test("a remote bus report still explains unavailability without installing", async () => {
+  resetBusCache();
+  const store = installed(tempState());
+  const previous = store.readBus("demo");
+  const { client, calls } = sshBusClient();
+  const report = await dispatchZswarm({ op: "bus" }, client, {
+    state: store,
+    env: { ZSWARM_SSH: "user@host" },
+  });
+  assert.equal(report.ok, true);
+  assert.equal(report.data.enabled, false);
+  assert.match(report.data.reason, /remote session/);
+  assert.equal(launchCalls(calls).length, 0);
+  assert.equal(closeCalls(calls).length, 0);
+  assert.equal(store.readBus("demo").configKey, previous.configKey);
+});
+
+test("serve-forwarded bus install and clear run on the host-local client", async () => {
+  resetBusCache();
+  const store = tempState();
+  const { client, calls } = busClient();
+  const { label, close } = await startServe(
+    "127.0.0.1:0",
+    async (args) =>
+      dispatchZswarm(args, client, {
+        state: store,
+        env: { ZSWARM_BUS_PLUGIN: PLUGIN_FILE },
+        now: () => 1,
+        sleep: async () => {},
+      }),
+    { token: "secret" },
+  );
+  try {
+    const installedRemote = await dispatchZswarm(
+      { op: "bus", install: true },
+      undefined,
+      {
+        env: {
+          ZSWARM_SERVE: label,
+          ZSWARM_SERVE_TOKEN: "secret",
+          ZSWARM_SSH: "user@host",
+        },
+      },
+    );
+    assert.equal(installedRemote.ok, true, JSON.stringify(installedRemote));
+    assert.equal(installedRemote.data.installed, true);
+    assert.equal(installedRemote.context.transport, "serve");
+    assert.equal(launchCalls(calls).length, 1);
+    assert.equal(store.readBus("demo").configKey, "zswarm-bus");
+
+    const clearedRemote = await dispatchZswarm(
+      { op: "bus", clear: true },
+      undefined,
+      {
+        env: {
+          ZSWARM_SERVE: label,
+          ZSWARM_SERVE_TOKEN: "secret",
+          ZSWARM_SSH: "user@host",
+        },
+      },
+    );
+    assert.equal(clearedRemote.ok, true, JSON.stringify(clearedRemote));
+    assert.equal(clearedRemote.data.cleared, true);
+    assert.equal(store.readBus("demo"), null);
+  } finally {
+    await close();
+  }
 });
