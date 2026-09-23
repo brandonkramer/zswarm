@@ -14,8 +14,11 @@ Linux/macOS-CLI feature). If the Zellij crew actually runs in **WSL**, treat it
 as a Linux host (Unix sockets / `$TMPDIR`), not this Interactive logon task.
 
 `zswarm serve --install` creates or updates the **owned** `zswarm-serve`
-Interactive logon task for the current Windows user, then waits until
-authenticated hello and host inspection prove this installation. It does
+current-user Interactive/Limited logon task, then waits until
+authenticated hello and host inspection prove this installation. Identical
+command text is not reused unless that principal is still Interactive/Limited;
+Highest or missing/incompatible principal configuration is corrected on the
+owned task. It does
 **not** install or change Tailscale, OpenSSH, tailnet ACLs, or firewalls.
 Tests and PR validation use isolated fixtures; they do not operate a live
 human-host task or tailnet.

@@ -176,6 +176,8 @@ const REMEDY = {
     "This task requires an already logged-in interactive desktop session (LogonType Interactive, RunLevel Limited). It is not a headless boot/SYSTEM service.",
   token:
     "Set the same ZSWARM_SERVE_TOKEN on the server and this caller. The token is stored in the task action (readable by this user and administrators), not encrypted; reinstall to rotate.",
+  uncertain:
+    "Inspect the zswarm-serve task. The last mutation was interrupted before a confirmed reply; the task may or may not exist. Install/clear does not claim rollback.",
 } as const;
 
 export function looksLikeMcpEntrypoint(scriptPath: string): boolean {
@@ -439,7 +441,17 @@ export function buildServeTaskScript(
     "$stopError = $null",
     "try {",
     "  $task = Get-ZswarmTask",
-    "  [void](Assert-ZswarmCurrentOwner $task)",
+    "} catch {",
+    "  if (Test-ZswarmMissing $_) {",
+    "    Write-ZswarmJson @{ cleared = $true; missing = $true; stopped = $false; taskName = '" +
+      SERVE_TASK_NAME +
+      "' }",
+    "    exit 0",
+    "  }",
+    "  throw",
+    "}",
+    "[void](Assert-ZswarmCurrentOwner $task)",
+    "try {",
     `  Stop-ScheduledTask -TaskName '${SERVE_TASK_NAME}'`,
     "  $stopped = $true",
     "} catch {",
@@ -574,7 +586,9 @@ function tokenFromCommand(command: string): string[] {
 }
 
 function scrubDiagnosticText(text: string, secrets: string[]): string {
-  let out = text;
+  let out = text
+    .replace(/set\s+"ZSWARM_SERVE_TOKEN=[^"]*"/gi, 'set "ZSWARM_SERVE_TOKEN=***"')
+    .replace(/ZSWARM_SERVE_TOKEN=([^"&\r\n]*)/gi, "ZSWARM_SERVE_TOKEN=***");
   for (const secret of secrets) {
     if (!secret) continue;
     out = redactServeSecret(out, secret);
@@ -752,7 +766,7 @@ async function runTask(
         phase: action,
         cause: "helper_failed",
         exitCode: result.code,
-        stderr: scrubDiagnosticText((result.stderr || result.stdout).trim().slice(0, 400), input.secrets),
+        stderr: scrubDiagnosticText((result.stderr || result.stdout).trim(), input.secrets).slice(0, 400),
       },
       input.secrets,
     ),
@@ -838,8 +852,8 @@ export async function installServeLogon(
   const explicitSession = input.session?.trim() || null;
   const requestedLaunchId = input.launchId?.trim() || "";
 
-  const partial = (extra: Record<string, unknown>): Record<string, unknown> =>
-    scrubSecrets(
+  const partial = (extra: Record<string, unknown>): Record<string, unknown> => {
+    const details = scrubSecrets(
       {
         installed: false,
         ready: false,
@@ -849,7 +863,10 @@ export async function installServeLogon(
         ...extra,
       },
       secrets,
-    );
+    ) as Record<string, unknown>;
+    if (details.mutation === "uncertain") delete details.installed;
+    return details;
+  };
 
   const assertRunnable = (phase: string, extra: Record<string, unknown> = {}): number => {
     if (input.signal?.aborted) {
@@ -946,7 +963,8 @@ export async function installServeLogon(
     exists &&
     execute.toLowerCase() === "cmd.exe" &&
     serveCommandFingerprint(existingCommand) === desiredBase &&
-    (!asString(inspected.logonType) || asString(inspected.logonType).toLowerCase() === "interactive");
+    asString(inspected.logonType).toLowerCase() === "interactive" &&
+    asString(inspected.runLevel).toLowerCase() === "limited";
   const reuseExistingLaunch =
     configMatches &&
     Boolean(existingLaunchId) &&
@@ -994,7 +1012,12 @@ export async function installServeLogon(
     try {
       registered = await mutate(
         "register",
-        { phase: "register", installed: false },
+        {
+          phase: "register",
+          mutation: "uncertain",
+          observed: { existed: exists },
+          remedy: REMEDY.uncertain,
+        },
         command,
       );
       installed = true;
@@ -1065,6 +1088,16 @@ export async function installServeLogon(
       sessions: lastSessions,
       session: explicitSession,
     });
+  const waitRetry = async (): Promise<void> => {
+    try {
+      await sleep(Math.min(100, remaining()));
+    } catch (err) {
+      if (err instanceof ZellijError && (err.code === "cancelled" || err.code === "timeout")) {
+        throw notReadyError(err.message, known(), secrets, err.code);
+      }
+      throw err;
+    }
+  };
 
   while (remaining() > 0 && probes < 64) {
     assertRunnable("hello", { installed: true, principal });
@@ -1088,7 +1121,7 @@ export async function installServeLogon(
             ? REMEDY.notReady
             : hello.error.message;
       if (remaining() <= 0) break;
-      await sleep(Math.min(100, remaining()));
+      await waitRetry();
       continue;
     }
     const server = hello.data as ServeHelloData;
@@ -1105,7 +1138,7 @@ export async function installServeLogon(
       lastPhase = "hello";
       lastCause = "serve_incompatible";
       lastRemedy = `This serve protocol is not supported by this client (got ${server.protocol}).`;
-      await sleep(Math.min(100, remaining()));
+      await waitRetry();
       continue;
     }
     if (server.launchId !== launchId) {
@@ -1113,7 +1146,7 @@ export async function installServeLogon(
       lastCause = "stale_listener";
       lastRemedy = REMEDY.stale;
       if (remaining() <= 0) break;
-      await sleep(Math.min(100, remaining()));
+      await waitRetry();
       continue;
     }
     assertRunnable("host", { installed: true, principal, server: lastServer });
@@ -1140,7 +1173,7 @@ export async function installServeLogon(
       lastRemedy = REMEDY.notReady;
       absorbHostRows(hostResult);
       if (remaining() <= 0) break;
-      await sleep(Math.min(100, remaining()));
+      await waitRetry();
       continue;
     }
     if (!hostResult.ok) {
@@ -1169,7 +1202,7 @@ export async function installServeLogon(
       lastCause = "doctor_unsupported";
       lastRemedy =
         "This serve peer does not implement doctor host inspection. Upgrade zswarm serve on the crew host, then retry.";
-      await sleep(Math.min(100, remaining()));
+      await waitRetry();
       continue;
     }
     if (merged.invalid) {
@@ -1178,7 +1211,7 @@ export async function installServeLogon(
       lastRemedy =
         "Authenticated hello succeeded, but the host doctor reply was missing or malformed. Upgrade zswarm serve and retry.";
       if (remaining() <= 0) break;
-      await sleep(Math.min(100, remaining()));
+      await waitRetry();
       continue;
     }
     const checks = coverHostReport(merged.checks, explicitSession);
@@ -1228,7 +1261,7 @@ export async function installServeLogon(
       );
     }
     if (remaining() <= 0) break;
-    await sleep(Math.min(100, remaining()));
+    await waitRetry();
   }
 
   if (input.signal?.aborted) {
@@ -1330,20 +1363,26 @@ export async function uninstallServeLogon(
   } catch (err) {
     if (err instanceof ZellijError && (err.code === "cancelled" || err.code === "timeout")) {
       throw notReadyError(err.message, {
-        installed: inspected.exists === true,
         ready: false,
         task: SERVE_TASK_NAME,
         phase: "unregister",
         cause: err.code,
+        mutation: "uncertain",
+        observed: { existed: inspected.exists === true },
+        remedy: REMEDY.uncertain,
       }, secrets, err.code);
     }
     throw err;
   }
-  return {
-    task: SERVE_TASK_NAME,
-    cleared: true,
+  const confirmed = {
+    cleared: true as const,
     stopped: cleared.stopped === true,
     ...(cleared.missing === true ? { missing: true } : {}),
     ...(cleared.stopFailed === true ? { stopFailed: true } : {}),
+  };
+  assertClear("unregister", confirmed);
+  return {
+    task: SERVE_TASK_NAME,
+    ...confirmed,
   };
 }

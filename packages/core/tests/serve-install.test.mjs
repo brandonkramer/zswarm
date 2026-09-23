@@ -1218,6 +1218,241 @@ test("clear does not certify stop from task existence alone", async (t) => {
   assert.equal(result.cleared, true);
 });
 
+test("clear helper script keeps ownership off the stop/unregister path", () => {
+  const script = buildServeTaskScript("unregister");
+  const identity = script.lastIndexOf("\n$identity = Get-ZswarmIdentity");
+  const owner = script.lastIndexOf("Assert-ZswarmCurrentOwner");
+  const stop = script.lastIndexOf("Stop-ScheduledTask");
+  const unregister = script.lastIndexOf("Unregister-ScheduledTask");
+  assert.ok(identity > 0, "PowerShell mock injection still finds $identity = Get-ZswarmIdentity");
+  assert.ok(owner > identity);
+  assert.ok(stop > owner);
+  assert.ok(unregister > stop);
+  const stopBlock = script.slice(script.lastIndexOf("try {\n  Stop-ScheduledTask"), unregister);
+  assert.equal(stopBlock.includes("Assert-ZswarmCurrentOwner"), false);
+  assert.equal(stopBlock.includes("Get-ZswarmTask"), false);
+});
+
+for (const variant of ["deadline", "cancel"]) {
+  test(`clear completion after ${variant} keeps the failure and confirmed removal`, async (t) => {
+    const ac = new AbortController();
+    let now = 1000;
+    const harness = taskHarness({
+      task: {
+        userId: "DESKTOP\\me",
+        state: "Running",
+        execute: "cmd.exe",
+        arguments: "/c zswarm",
+        logonType: "Interactive",
+        runLevel: "Limited",
+      },
+      afterTask: async (action) => {
+        if (action === "unregister") {
+          if (variant === "deadline") now += 200;
+          else ac.abort();
+        }
+      },
+    });
+    await assert.rejects(
+      () =>
+        uninstallServeLogon({
+          platform: "win32",
+          timeoutMs: 100,
+          now: () => now,
+          signal: ac.signal,
+          runPowerShell: harness.runPowerShell,
+        }),
+      (err) => {
+        assert.equal(err.code, variant === "deadline" ? "timeout" : "cancelled");
+        assert.equal(err.details?.cleared, true);
+        assert.equal(err.details?.stopped, true);
+        assert.equal(harness.task, null);
+        return true;
+      },
+    );
+  });
+}
+
+test("cancellation in startup retry sleep retains confirmed registration", async (t) => {
+  const ac = new AbortController();
+  const harness = taskHarness();
+  const input = baseInput(t, {
+    harness,
+    session: "crew",
+    signal: ac.signal,
+    timeoutMs: 2_000,
+    probeServe: async () => {
+      queueMicrotask(() => ac.abort());
+      return { ok: false, error: { code: "serve_unreachable", message: "starting" } };
+    },
+  });
+  await assert.rejects(() => installServeLogon(input), (err) => {
+    assert.equal(err.code, "cancelled");
+    assert.equal(err.details?.installed, true);
+    assert.equal(err.details?.phase, "hello");
+    assert.equal(harness.calls.includes("unregister"), false);
+    return true;
+  });
+});
+
+test("cancellation in host retry sleep retains completed host findings", async (t) => {
+  const ac = new AbortController();
+  const harness = taskHarness();
+  const followed = followTaskServe(harness);
+  const input = baseInput(t, {
+    harness,
+    session: "crew",
+    signal: ac.signal,
+    timeoutMs: 2_000,
+    probeServe: followed.probeServe,
+    callServe: async () => {
+      queueMicrotask(() => ac.abort());
+      return {
+        ok: false,
+        error: { code: "timeout", message: "partial host timeout", details: hostReport({ session: "crew" }).data },
+      };
+    },
+  });
+  await assert.rejects(() => installServeLogon(input), (err) => {
+    assert.equal(err.code, "cancelled");
+    assert.equal(err.details?.installed, true);
+    assert.ok(err.details?.inspection?.checks.some((row) => row.id === "zellij_ipc" && row.state === "ok"));
+    assert.equal(harness.calls.includes("unregister"), false);
+    return true;
+  });
+});
+
+test("interrupted registration with no reply does not certify installed:false", async (t) => {
+  const harness = taskHarness();
+  const original = harness.runPowerShell;
+  const input = baseInput(t, {
+    harness,
+    runPowerShell: async (script) => {
+      const result = await original(script);
+      if (actionOf(script) === "register") return { code: 1, stdout: "", stderr: "", timedOut: true };
+      return result;
+    },
+  });
+  await assert.rejects(() => installServeLogon(input), (err) => {
+    assert.equal(err.code, "timeout");
+    assert.ok(harness.task, "the helper may have registered before its output was interrupted");
+    assert.notEqual(err.details?.installed, false);
+    assert.equal(err.details?.mutation, "uncertain");
+    assert.equal(err.details?.observed?.existed, false);
+    assert.match(String(err.details?.remedy), /inspect/i);
+    return true;
+  });
+});
+
+test("interrupted clear does not certify the previously present task still exists", async (t) => {
+  const harness = taskHarness({
+    task: {
+      userId: "DESKTOP\\me",
+      state: "Running",
+      execute: "cmd.exe",
+      arguments: "/c zswarm",
+      logonType: "Interactive",
+      runLevel: "Limited",
+    },
+  });
+  const original = harness.runPowerShell;
+  await assert.rejects(
+    () =>
+      uninstallServeLogon({
+        platform: "win32",
+        timeoutMs: 2_000,
+        runPowerShell: async (script) => {
+          const result = await original(script);
+          if (actionOf(script) === "unregister") return { code: 1, stdout: "", stderr: "", timedOut: true };
+          return result;
+        },
+      }),
+    (err) => {
+      assert.equal(err.code, "timeout");
+      assert.notEqual(err.details?.installed, true);
+      assert.equal(err.details?.mutation, "uncertain");
+      assert.equal(err.details?.observed?.existed, true);
+      assert.match(String(err.details?.remedy), /inspect/i);
+      return true;
+    },
+  );
+});
+
+test("inspect failure cannot disclose an old task token in a task action", async (t) => {
+  const oldToken = "old-task-secret-value";
+  const input = baseInput(t, {
+    token: "review-token-ONLY",
+    env: { ZSWARM_SERVE_TOKEN: "review-token-ONLY" },
+    runPowerShell: async () => ({
+      code: 1,
+      stdout: "",
+      stderr: `Existing task action: cmd.exe /c set "ZSWARM_SERVE_TOKEN=${oldToken}"&& node cli.js serve`,
+    }),
+  });
+  await assert.rejects(() => installServeLogon(input), (err) => {
+    const dumped = `${err.message}${JSON.stringify(err.details ?? {})}`;
+    assert.equal(dumped.includes(oldToken), false);
+    assert.equal(err.details?.phase, "inspect");
+    assert.equal(err.details?.cause, "helper_failed");
+    return true;
+  });
+});
+
+test("malformed inspect output cannot disclose an old raw task token", async (t) => {
+  const oldToken = "old-task-secret-value";
+  const input = baseInput(t, {
+    token: "review-token-ONLY",
+    env: { ZSWARM_SERVE_TOKEN: "review-token-ONLY" },
+    runPowerShell: async () => ({
+      code: 0,
+      stdout: `not-json set "ZSWARM_SERVE_TOKEN=${oldToken}"&& node cli.js serve`,
+      stderr: "",
+    }),
+  });
+  await assert.rejects(() => installServeLogon(input), (err) => {
+    const dumped = `${err.message}${JSON.stringify(err.details ?? {})}`;
+    assert.equal(dumped.includes(oldToken), false);
+    return true;
+  });
+});
+
+test("same command configured with Highest or missing principal is corrected before reuse", async (t) => {
+  for (const tweak of [
+    (task) => {
+      task.runLevel = "Highest";
+    },
+    (task) => {
+      delete task.logonType;
+    },
+    (task) => {
+      task.logonType = "ServiceAccount";
+    },
+  ]) {
+    const harness = taskHarness();
+    const dir = tempDir(t);
+    const scriptPath = writeCli(dir);
+    const shared = {
+      platform: "win32",
+      listen: "127.0.0.1:9419",
+      env: { ZSWARM_SERVE_TOKEN: "s3cret-token", ZSWARM_BIN: "C:\\zellij.exe" },
+      token: "s3cret-token",
+      session: "crew",
+      execPath: process.execPath,
+      scriptPath,
+      timeoutMs: 2_000,
+      runPowerShell: harness.runPowerShell,
+      ...followTaskServe(harness),
+    };
+    await installServeLogon(shared);
+    tweak(harness.task);
+    const before = harness.calls.length;
+    const result = await installServeLogon(shared);
+    assert.equal(result.principal.runLevel, "Limited");
+    assert.equal(result.principal.logonType, "Interactive");
+    assert.ok(harness.calls.slice(before).includes("register"), JSON.stringify(harness.calls.slice(before)));
+  }
+});
+
 test("register scripts parse on Windows PowerShell", {
   skip: process.platform !== "win32",
 }, (t) => {
