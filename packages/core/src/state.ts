@@ -159,21 +159,80 @@ export function createStateStore(options: StateStoreOptions = {}) {
    * Empty leftover from older writers (wx with no owner bytes) → steal once
    * mtime is older than the wait, so an in-flight create is not yanked out
    * from under the holder.
-   * Owner is read once: a second read can see a pid that appeared after an
-   * empty snapshot and would steal a live lock.
+   *
+   * Observation alone is not a delete permit: reclaim only unlinks when the
+   * on-disk generation (pid+at, or still-ownerless for empty files) still
+   * matches the observation that was deemed stale. A successor that replaced
+   * the path must not be removed by an older observation.
    */
-  function lockIsStale(lockPath: string): boolean {
+  function ownerObservationIsStale(owner: { pid: number; at: number }): boolean {
+    if (owner.pid === process.pid) return true;
+    if (!pidAlive(owner.pid)) return true;
+    return Date.now() - owner.at >= LOCK_STALE_MS;
+  }
+
+  /** Unlink only when the lock content still matches the stale observation. */
+  function unlinkIfMatchingOwner(
+    lockPath: string,
+    expected: { pid: number; at: number },
+  ): boolean {
+    const until = Date.now() + 500;
+    while (true) {
+      const current = readLockOwner(lockPath);
+      if (
+        !current ||
+        current.pid !== expected.pid ||
+        current.at !== expected.at
+      ) {
+        return false;
+      }
+      try {
+        rmSync(lockPath, { force: true });
+        return true;
+      } catch (err) {
+        if (!lockBusy((err as NodeJS.ErrnoException).code) || Date.now() >= until) {
+          return false;
+        }
+        sleepSync(10);
+      }
+    }
+  }
+
+  /**
+   * Empty/malformed lock reclaim: only remove if the path is still ownerless
+   * (no valid pid record). A live replacement with a real owner is left alone.
+   */
+  function unlinkIfStillOwnerless(lockPath: string): boolean {
+    const until = Date.now() + 500;
+    while (true) {
+      if (readLockOwner(lockPath)) return false;
+      try {
+        // Confirm the path still exists and still has no owner before delete.
+        statSync(lockPath);
+        if (readLockOwner(lockPath)) return false;
+        rmSync(lockPath, { force: true });
+        return true;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return false;
+        if (!lockBusy(code) || Date.now() >= until) return false;
+        sleepSync(10);
+      }
+    }
+  }
+
+  function tryReclaimStaleLock(lockPath: string): boolean {
     const owner = readLockOwner(lockPath);
     if (owner) {
-      if (owner.pid === process.pid) return true;
-      if (!pidAlive(owner.pid)) return true;
-      return Date.now() - owner.at >= LOCK_STALE_MS;
+      if (!ownerObservationIsStale(owner)) return false;
+      return unlinkIfMatchingOwner(lockPath, owner);
     }
     try {
-      return Date.now() - statSync(lockPath).mtimeMs >= LOCK_WAIT_MS;
+      if (Date.now() - statSync(lockPath).mtimeMs < LOCK_WAIT_MS) return false;
     } catch {
       return false;
     }
+    return unlinkIfStillOwnerless(lockPath);
   }
 
   function lockBusy(code: string | undefined): boolean {
@@ -187,40 +246,16 @@ export function createStateStore(options: StateStoreOptions = {}) {
     );
   }
 
-  function unlinkLock(lockPath: string): void {
-    const until = Date.now() + 500;
-    while (true) {
-      try {
-        rmSync(lockPath, { force: true });
-        return;
-      } catch (err) {
-        if (!lockBusy((err as NodeJS.ErrnoException).code) || Date.now() >= until) {
-          return;
-        }
-        sleepSync(10);
-      }
-    }
-  }
-
   /**
-   * Drop this process's lock file only. Retry-unlink of whatever now sits at
-   * the path can delete a waiter that already recreated it with wx; a third
-   * process then enters fn() and last-rename drops cursor keys.
+   * Drop this process's lock file only when the on-disk generation still
+   * matches the stamp we published. Retry-unlink of whatever now sits at the
+   * path can delete a waiter that already recreated it with wx.
    */
-  function unlinkOwnedLock(lockPath: string): void {
-    const until = Date.now() + 500;
-    while (true) {
-      if (readLockOwner(lockPath)?.pid !== process.pid) return;
-      try {
-        rmSync(lockPath, { force: true });
-        return;
-      } catch (err) {
-        if (!lockBusy((err as NodeJS.ErrnoException).code) || Date.now() >= until) {
-          return;
-        }
-        sleepSync(10);
-      }
-    }
+  function unlinkOwnedLock(
+    lockPath: string,
+    stamp: { pid: number; at: number },
+  ): void {
+    unlinkIfMatchingOwner(lockPath, stamp);
   }
 
   function withFileLock<T>(lockName: string, fn: () => T): T {
@@ -228,27 +263,28 @@ export function createStateStore(options: StateStoreOptions = {}) {
     const lockPath = join(dir, lockName);
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
+      const stamp = { pid: process.pid, at: Date.now() };
       try {
         // Exclusive create (`wx`) plus a write of the owner record. That is
         // not one atomic publish of populated bytes — create and write still
         // have an interval. The UTF-8 fast path keeps that interval in one
         // native writeFileSync rather than two JS turns (openSync then write).
         // Empty leftovers can still be stolen after LOCK_WAIT_MS if a crash
-        // or a still-empty file is old enough. pid-checked unlink remains.
-        writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: Date.now() }), {
+        // or a still-empty file is old enough. Reclaim only deletes a matching
+        // observed generation (pid+at), never a successor at the same path.
+        writeFileSync(lockPath, JSON.stringify(stamp), {
           encoding: "utf8",
           flag: "wx",
         });
         try {
           return fn();
         } finally {
-          unlinkOwnedLock(lockPath);
+          unlinkOwnedLock(lockPath, stamp);
         }
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (!lockBusy(code)) throw err;
-        if (lockIsStale(lockPath)) {
-          unlinkLock(lockPath);
+        if (tryReclaimStaleLock(lockPath)) {
           continue;
         }
         if (Date.now() >= deadline) {

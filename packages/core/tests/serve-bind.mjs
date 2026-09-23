@@ -124,6 +124,9 @@ export function registerServeBindTests(test = nodeTest) {
     assert.equal(canonicalizeListenIp("crew-host.tailnet.ts.net"), null);
     assert.equal(canonicalizeListenIp("::ffff:100.64.1.2"), null);
     assert.equal(canonicalizeListenIp("0:0:0:0:0:ffff:100.64.1.2"), null);
+    assert.equal(canonicalizeListenIp("0:0:0:0:0:0:0:0"), null);
+    assert.equal(canonicalizeListenIp("0::ffff:6440:102"), null);
+    assert.equal(canonicalizeListenIp("::ffff:6440:102"), null);
     assert.deepEqual(canonicalizeListenIp(SELF_V4), { family: 4, canonical: SELF_V4 });
     assert.equal(canonicalizeListenIp(SELF_V6)?.canonical, expandIPv6(SELF_V6));
     assert.equal(
@@ -710,6 +713,151 @@ export function registerServeBindTests(test = nodeTest) {
     );
     assert.equal(ps, 0);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("startup budget expiry after status or OS inspection prevents listener creation", async () => {
+    for (const stage of ["status", "interfaces"]) {
+      let now = 1000;
+      const record = [];
+      await assert.rejects(
+        () =>
+          startServe(`${SELF_V4}:9419`, async () => ({ ok: true, data: {} }), {
+            token: "secret",
+            timeoutMs: 10,
+            now: () => now,
+            tailscaleStatus: async () => {
+              if (stage === "status") now += 11;
+              return { code: 0, stdout: statusJson(), stderr: "" };
+            },
+            networkInterfaces: () => {
+              if (stage === "interfaces") now += 11;
+              return ownedIfaces()();
+            },
+            createServer: recordingServer(record),
+          }),
+        /timeout|timed out/i,
+      );
+      assert.equal(record.length, 0, stage);
+    }
+  });
+
+  test("abort between authorization and listen prevents createServer", async () => {
+    const ac = new AbortController();
+    const record = [];
+    await assert.rejects(
+      () =>
+        startServe(`${SELF_V4}:9419`, async () => ({ ok: true, data: {} }), {
+          token: "secret",
+          signal: ac.signal,
+          timeoutMs: 100,
+          now: () => 1000,
+          tailscaleStatus: okStatus(),
+          networkInterfaces: () => {
+            queueMicrotask(() => ac.abort());
+            return ownedIfaces()();
+          },
+          createServer: recordingServer(record),
+        }),
+      /cancel|abort/i,
+    );
+    assert.equal(record.length, 0);
+  });
+
+  test("cancel or deadline before listen callback closes the startup listener", async () => {
+    for (const cause of ["cancel", "deadline"]) {
+      const ac = new AbortController();
+      let now = 1000;
+      let closes = 0;
+      await assert.rejects(
+        () =>
+          startServe(`${SELF_V4}:9419`, async () => ({ ok: true, data: {} }), {
+            token: "secret",
+            signal: ac.signal,
+            timeoutMs: 10,
+            now: () => now,
+            tailscaleStatus: okStatus(),
+            networkInterfaces: ownedIfaces(),
+            createServer: () => {
+              const server = new EventEmitter();
+              server.listen = (_port, _host, cb) => {
+                queueMicrotask(() => {
+                  if (cause === "cancel") ac.abort();
+                  else now += 11;
+                  cb();
+                  server.emit("listening");
+                });
+                return server;
+              };
+              server.address = () => ({ address: SELF_V4, port: 9419, family: "IPv4" });
+              server.close = (cb) => {
+                closes += 1;
+                queueMicrotask(() => cb?.());
+                return server;
+              };
+              return server;
+            },
+          }),
+        /cancel|abort|timeout|timed out/i,
+      );
+      assert.ok(closes >= 1, cause);
+    }
+  });
+
+  test("present invalid root/self TailscaleIP shapes refuse before listen", async () => {
+    const bodies = [
+      { ...JSON.parse(statusJson()), TailscaleIPs: [] },
+      { ...JSON.parse(statusJson()), TailscaleIPs: "unexpected-shape" },
+      { ...JSON.parse(statusJson()), TailscaleIPs: ["not-an-ip"] },
+      { ...JSON.parse(statusJson()), Self: { TailscaleIPs: [SELF_V4, 42] } },
+    ];
+    for (const body of bodies) {
+      const record = [];
+      await assert.rejects(
+        () =>
+          startServe(`${SELF_V4}:9419`, async () => ({ ok: true, data: {} }), {
+            token: "secret",
+            tailscaleStatus: async () => ({ code: 0, stdout: JSON.stringify(body), stderr: "" }),
+            networkInterfaces: ownedIfaces(),
+            createServer: recordingServer(record),
+          }),
+        /serve_auth|Tailscale|malformed|conflict|valid/i,
+      );
+      assert.equal(record.length, 0);
+    }
+  });
+
+  test("absent root TailscaleIPs still binds when Self is valid", async () => {
+    const record = [];
+    const body = JSON.parse(statusJson());
+    delete body.TailscaleIPs;
+    const { close } = await startServe(`${SELF_V4}:9419`, async () => ({ ok: true, data: {} }), {
+      token: "secret",
+      tailscaleStatus: async () => ({ code: 0, stdout: JSON.stringify(body), stderr: "" }),
+      networkInterfaces: ownedIfaces(),
+      createServer: recordingServer(record),
+    });
+    try {
+      assert.deepEqual(record, [{ port: 9419, host: SELF_V4 }]);
+    } finally {
+      await close();
+    }
+  });
+
+  test("healthy server survives past the startup budget", async () => {
+    let now = 1000;
+    const { label, close } = await startServe(
+      "127.0.0.1:0",
+      async () => ({ ok: true, data: { alive: true } }),
+      { token: "secret", timeoutMs: 20, now: () => now },
+    );
+    try {
+      now += 50_000;
+      const { callServe } = await import("../dist/index.js");
+      const reply = await callServe(label, { op: "ping" }, 2_000, "secret");
+      assert.deepEqual(reply, { ok: true, data: { alive: true } });
+    } finally {
+      await close();
+    }
   });
 }
 

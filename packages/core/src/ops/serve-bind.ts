@@ -17,7 +17,7 @@ function isLoopbackListenHost(host: string): boolean {
 
 /** Bounded read of `tailscale status --json` for serve bind authorization. */
 export const SERVE_BIND_STATUS_MAX_BYTES = 256 * 1024;
-/** Default verification budget for foreground `serve --listen` (not the server lifetime). */
+/** Default verification/startup budget for foreground `serve --listen` (not the server lifetime). */
 export const SERVE_BIND_VERIFY_TIMEOUT_MS = 10_000;
 /** Env override for the Tailscale CLI binary (persisted on Windows install when set). */
 export const SERVE_TAILSCALE_BIN_ENV = "ZSWARM_TAILSCALE_BIN";
@@ -33,7 +33,7 @@ export type NetworkInterfacesFn = () => NodeJS.Dict<NetworkInterfaceInfo[]>;
 export type ServeBindDeps = {
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
-  /** Overall verification budget (install shares its deadline remaining). */
+  /** Overall verification/startup budget (install shares its deadline remaining). */
   timeoutMs?: number;
   now?: () => number;
   tailscaleStatus?: TailscaleStatusRunner;
@@ -107,25 +107,32 @@ export function expandIPv6(address: string): string | null {
   return hextets.join(":");
 }
 
+const UNSPECIFIED_V6 = "0000:0000:0000:0000:0000:0000:0000:0000";
+
+function isUnsafeCanonicalIPv6(canonical: string): boolean {
+  if (canonical === UNSPECIFIED_V6) return true;
+  // IPv4-mapped (::ffff:x) after expansion, any spelling of the input.
+  const parts = canonical.split(":");
+  return (
+    parts.length === 8 &&
+    parts[0] === "0000" &&
+    parts[1] === "0000" &&
+    parts[2] === "0000" &&
+    parts[3] === "0000" &&
+    parts[4] === "0000" &&
+    parts[5] === "ffff"
+  );
+}
+
 /**
  * Canonicalize a strict literal IP for comparison. Rejects hostnames, wildcards,
- * and IPv4-mapped IPv6 (no silent bypass onto the embedded v4 address).
+ * unspecified addresses, and IPv4-mapped IPv6 after full expansion (no silent
+ * bypass onto the embedded v4 address).
  */
 export function canonicalizeListenIp(raw: string): { family: 4 | 6; canonical: string } | null {
   const host = raw.trim().replace(/^\[|\]$/g, "");
   if (!host) return null;
   if (host === "0.0.0.0" || host === "::" || host === "*" || host === "0") return null;
-  const lower = host.toLowerCase();
-  // IPv4-mapped IPv6 must not bypass verification via the embedded v4 form.
-  if (
-    lower.startsWith(":ffff:") ||
-    lower.startsWith("0:0:0:0:0:ffff:") ||
-    lower.startsWith("0000:0000:0000:0000:0000:ffff:") ||
-    /^:?:ffff:/i.test(lower) ||
-    /:ffff:\d+\.\d+\.\d+\.\d+$/i.test(lower)
-  ) {
-    return null;
-  }
   const kind = isIP(host);
   if (kind === 4) {
     const parts = host.split(".");
@@ -138,11 +145,13 @@ export function canonicalizeListenIp(raw: string): { family: 4 | 6; canonical: s
       if (!Number.isInteger(n) || n < 0 || n > 255) return null;
       octets.push(n);
     }
-    return { family: 4, canonical: octets.join(".") };
+    const canonical = octets.join(".");
+    if (canonical === "0.0.0.0") return null;
+    return { family: 4, canonical };
   }
   if (kind === 6) {
     const canonical = expandIPv6(host);
-    if (!canonical) return null;
+    if (!canonical || isUnsafeCanonicalIPv6(canonical)) return null;
     return { family: 6, canonical };
   }
   return null;
@@ -152,25 +161,6 @@ export function sameCanonicalIp(a: string, b: string): boolean {
   const left = canonicalizeListenIp(a);
   const right = canonicalizeListenIp(b);
   return Boolean(left && right && left.family === right.family && left.canonical === right.canonical);
-}
-
-function asStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string" && item.trim() !== "");
-}
-
-function uniqueCanonical(ips: string[]): { family: 4 | 6; canonical: string }[] {
-  const out: { family: 4 | 6; canonical: string }[] = [];
-  const seen = new Set<string>();
-  for (const ip of ips) {
-    const normalized = canonicalizeListenIp(ip);
-    if (!normalized) continue;
-    const key = `${normalized.family}/${normalized.canonical}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(normalized);
-  }
-  return out;
 }
 
 function setKey(entry: { family: 4 | 6; canonical: string }): string {
@@ -184,6 +174,47 @@ function sameAddressSet(
   if (a.length !== b.length) return false;
   const keys = new Set(a.map(setKey));
   return b.every((entry) => keys.has(setKey(entry)));
+}
+
+/**
+ * Parse a present TailscaleIP list field. Fail closed on non-arrays and any
+ * non-canonicalizable member; do not filter invalid entries away.
+ */
+function parsePresentIpList(
+  value: unknown,
+  field: string,
+): { family: 4 | 6; canonical: string }[] {
+  if (!Array.isArray(value)) {
+    fail(
+      `zswarm serve Tailscale ${field} is not a valid address list`,
+      { phase: "verify", cause: "invalid_ip_list", field },
+      SERVE_BIND_REMEDY.statusShape,
+    );
+  }
+  const out: { family: 4 | 6; canonical: string }[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string" || !item.trim()) {
+      fail(
+        `zswarm serve Tailscale ${field} contains a malformed address entry`,
+        { phase: "verify", cause: "malformed_ip_entry", field },
+        SERVE_BIND_REMEDY.statusShape,
+      );
+    }
+    const normalized = canonicalizeListenIp(item);
+    if (!normalized) {
+      fail(
+        `zswarm serve Tailscale ${field} contains an unusable address`,
+        { phase: "verify", cause: "invalid_ip_entry", field },
+        SERVE_BIND_REMEDY.statusShape,
+      );
+    }
+    const key = setKey(normalized);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
 }
 
 export function resolveTailscaleBin(env: NodeJS.ProcessEnv): string {
@@ -268,6 +299,9 @@ function osOwnsCanonical(
  * Authorize a serve listen host. Loopback needs no Tailscale evidence. Any other
  * host requires a strict literal IP present in fresh local Tailscale self
  * addresses and assigned on a local OS interface.
+ *
+ * Uses one startup budget (`timeoutMs` from `now`) across CLI and OS stages.
+ * Does not install a lifetime timer on a healthy server.
  */
 export async function authorizeServeListen(
   host: string,
@@ -275,6 +309,7 @@ export async function authorizeServeListen(
 ): Promise<ServeBindAuthorization> {
   const env = deps.env ?? process.env;
   const signal = deps.signal;
+  const now = deps.now ?? Date.now;
   throwIfAborted(signal);
 
   if (isLoopbackListenHost(host)) {
@@ -297,13 +332,28 @@ export async function authorizeServeListen(
   }
 
   const timeoutMs = Math.max(1, Math.floor(deps.timeoutMs ?? SERVE_BIND_VERIFY_TIMEOUT_MS));
+  const deadline = now() + timeoutMs;
+  const remaining = (): number => deadline - now();
+  const assertRunnable = (stage: string): number => {
+    throwIfAborted(signal);
+    const left = remaining();
+    if (left <= 0) {
+      fail(
+        `zswarm serve bind verification timed out during ${stage} before listen`,
+        { phase: "verify", cause: "timeout", stage },
+        SERVE_BIND_REMEDY.timeout,
+      );
+    }
+    return left;
+  };
+
   const runner = deps.tailscaleStatus ?? defaultServeTailscaleStatus;
   const ifacesFn = deps.networkInterfaces ?? osNetworkInterfaces;
 
-  throwIfAborted(signal);
+  const statusBudget = assertRunnable("status");
   let statusResult: { code: number; stdout: string; stderr: string };
   try {
-    statusResult = await runner({ timeoutMs, signal, env });
+    statusResult = await runner({ timeoutMs: statusBudget, signal, env });
   } catch (err) {
     if (err instanceof ZellijError) throw err;
     fail(
@@ -312,7 +362,7 @@ export async function authorizeServeListen(
       SERVE_BIND_REMEDY.daemon,
     );
   }
-  throwIfAborted(signal);
+  assertRunnable("status");
 
   if (statusResult.code === NOT_FOUND_EXIT) {
     fail(
@@ -399,8 +449,15 @@ export async function authorizeServeListen(
     );
   }
 
-  const selfIps = uniqueCanonical(asStringArray((status.Self as Record<string, unknown>).TailscaleIPs));
-  const rootIps = uniqueCanonical(asStringArray(status.TailscaleIPs));
+  const selfRow = status.Self as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(selfRow, "TailscaleIPs")) {
+    fail(
+      "zswarm serve Tailscale Self.TailscaleIPs is missing; cannot authorize a Tailscale listen address",
+      { phase: "verify", cause: "missing_self_ips" },
+      SERVE_BIND_REMEDY.statusShape,
+    );
+  }
+  const selfIps = parsePresentIpList(selfRow.TailscaleIPs, "Self.TailscaleIPs");
   if (selfIps.length === 0) {
     fail(
       "zswarm serve Tailscale Self.TailscaleIPs is empty; cannot authorize a Tailscale listen address",
@@ -408,17 +465,22 @@ export async function authorizeServeListen(
       SERVE_BIND_REMEDY.notSelf,
     );
   }
-  if (rootIps.length > 0 && !sameAddressSet(selfIps, rootIps)) {
-    fail(
-      "zswarm serve Tailscale Self.TailscaleIPs and TailscaleIPs conflict; refusing bind",
-      { phase: "verify", cause: "self_root_conflict" },
-      SERVE_BIND_REMEDY.conflict,
-    );
+
+  // Absent root TailscaleIPs is allowed (Self is authoritative). A present
+  // field — including [] or a non-array — must be structurally valid and match Self.
+  if (Object.prototype.hasOwnProperty.call(status, "TailscaleIPs")) {
+    const rootIps = parsePresentIpList(status.TailscaleIPs, "TailscaleIPs");
+    if (!sameAddressSet(selfIps, rootIps)) {
+      fail(
+        "zswarm serve Tailscale Self.TailscaleIPs and TailscaleIPs conflict; refusing bind",
+        { phase: "verify", cause: "self_root_conflict" },
+        SERVE_BIND_REMEDY.conflict,
+      );
+    }
   }
 
   // Peer entries are never identity evidence, even if a buggy CLI still emits them.
-  const authorized = selfIps;
-  const matched = authorized.find(
+  const matched = selfIps.find(
     (entry) => entry.family === literal.family && entry.canonical === literal.canonical,
   );
   if (!matched) {
@@ -429,6 +491,7 @@ export async function authorizeServeListen(
     );
   }
 
+  assertRunnable("interfaces");
   let ifaces: NodeJS.Dict<NetworkInterfaceInfo[]>;
   try {
     ifaces = ifacesFn();
@@ -439,6 +502,7 @@ export async function authorizeServeListen(
       SERVE_BIND_REMEDY.osMissing,
     );
   }
+  assertRunnable("interfaces");
   if (!osOwnsCanonical(matched, ifaces ?? {})) {
     fail(
       `zswarm serve listen address ${literal.canonical} is not assigned on a local OS interface`,
@@ -447,7 +511,7 @@ export async function authorizeServeListen(
     );
   }
 
-  throwIfAborted(signal);
+  assertRunnable("authorize");
   return {
     bindHost: host.trim().replace(/^\[|\]$/g, ""),
     canonical: matched.canonical,

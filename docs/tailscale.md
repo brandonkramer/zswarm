@@ -227,9 +227,13 @@ Tailscale CLI for ordinary serve calls:
 
 ```bash
 export ZSWARM_SERVE_TOKEN="$(cat ~/.zswarm-serve-token)"
-HOST_TS="$(…host Tailscale IPv4…)"   # from the host's `tailscale ip -4`, not guessed
+# Paste the *host's* Tailscale IPv4 from that machine's `tailscale ip -4`
+# (not this controller's address, and not a guessed 100.x value).
+HOST_TS="100.64.1.2"
 zswarm --serve "${HOST_TS}:9419" doctor --session crew --timeout-ms 10000
 zswarm --serve "${HOST_TS}:9419" status --session crew
+# IPv6 on the host: use that machine's `tailscale ip -6` the same way:
+# zswarm --serve '[fd7a:115c:a1e0::1]:9419' status --session crew
 ```
 
 Doctor stays inspect-only on direct endpoints. Optional Tailscale diagnostics on

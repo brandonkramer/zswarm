@@ -310,21 +310,52 @@ export async function startServe(
       { remedy: SERVE_BIND_REMEDY.token },
     );
   }
+  const now = options.now ?? Date.now;
+  const timeoutMs = Math.max(1, Math.floor(options.timeoutMs ?? SERVE_BIND_VERIFY_TIMEOUT_MS));
+  const deadline = now() + timeoutMs;
+  const assertStartupOpen = (stage: string): void => {
+    if (options.signal?.aborted) {
+      throw new ZellijError("cancelled", "serve startup cancelled before listen", {
+        phase: "bind",
+        cause: "cancelled",
+        stage,
+        remedy: SERVE_BIND_REMEDY.cancelled,
+      });
+    }
+    if (now() >= deadline) {
+      throw new ZellijError(
+        "serve_auth",
+        `zswarm serve startup timed out during ${stage} before listen`,
+        {
+          phase: "bind",
+          cause: "timeout",
+          stage,
+          remedy: SERVE_BIND_REMEDY.timeout,
+        },
+      );
+    }
+  };
+
   const authorized = await authorizeServeListen(host, {
     env: options.env,
     signal: options.signal,
-    timeoutMs: options.timeoutMs ?? SERVE_BIND_VERIFY_TIMEOUT_MS,
-    now: options.now,
+    timeoutMs,
+    now,
     tailscaleStatus: options.tailscaleStatus,
     networkInterfaces: options.networkInterfaces,
   });
+  // Abort queued during authorization must be observed before listener effects.
+  assertStartupOpen("authorize");
   const bindHost = authorized.bindHost;
   const maxRequestBytes = options.maxRequestBytes ?? SERVE_MAX_REQUEST_BYTES;
   const idleTimeoutMs = options.idleTimeoutMs ?? SERVE_IDLE_TIMEOUT_MS;
   const maxConnections = options.maxConnections ?? SERVE_MAX_CONNECTIONS;
   const hello = helloData(randomUUID(), options.launchId);
   const makeServer = options.createServer ?? createServer;
+  // Recheck immediately before allocating a listener (microtask aborts land here).
+  assertStartupOpen("listen");
   return new Promise((resolve, reject) => {
+    let settled = false;
     const sockets = new Set<Socket>();
     const server = makeServer((socket) => {
       socket.on("error", () => {
@@ -416,9 +447,26 @@ export async function startServe(
         }
       }
     });
+
+    const closeStartupListener = (): void => {
+      for (const open of sockets) open.destroy();
+      try {
+        server.close(() => {});
+      } catch {
+        // ignore close races on fake/test listeners
+      }
+    };
+
+    const rejectStartup = (err: unknown): void => {
+      if (settled) return;
+      settled = true;
+      closeStartupListener();
+      reject(err);
+    };
+
     server.on("error", (err: NodeJS.ErrnoException) => {
       const code = typeof err.code === "string" ? err.code : "listen_failed";
-      reject(
+      rejectStartup(
         new ZellijError(
           "serve_auth",
           `zswarm serve failed to bind ${formatListenLabel(bindHost, port)} (${code}); no fallback listen address`,
@@ -432,11 +480,51 @@ export async function startServe(
         ),
       );
     });
+
+    try {
+      assertStartupOpen("listen");
+    } catch (err) {
+      rejectStartup(err);
+      return;
+    }
+
     // Exact verified address only — never 0.0.0.0 / :: / a different host.
+    // Startup budget ends once listening succeeds; it is not a lifetime timer.
     server.listen(port, bindHost, () => {
+      if (settled) {
+        closeStartupListener();
+        return;
+      }
+      if (options.signal?.aborted) {
+        rejectStartup(
+          new ZellijError("cancelled", "serve startup cancelled before listen completed", {
+            phase: "bind",
+            cause: "cancelled",
+            stage: "listening",
+            remedy: SERVE_BIND_REMEDY.cancelled,
+          }),
+        );
+        return;
+      }
+      if (now() >= deadline) {
+        rejectStartup(
+          new ZellijError(
+            "serve_auth",
+            "zswarm serve startup timed out before listen completed",
+            {
+              phase: "bind",
+              cause: "timeout",
+              stage: "listening",
+              remedy: SERVE_BIND_REMEDY.timeout,
+            },
+          ),
+        );
+        return;
+      }
       const addr = server.address();
       const actualPort =
         typeof addr === "object" && addr ? addr.port : port;
+      settled = true;
       resolve({
         label: formatListenLabel(bindHost, actualPort),
         close: () =>

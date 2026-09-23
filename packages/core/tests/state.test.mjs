@@ -2,8 +2,11 @@ process.env.ZSWARM_LOG = "0";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import fs from "node:fs";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -127,6 +130,75 @@ store.writeCursor(process.argv[3], process.argv[3]);
   const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
   for (let i = 0; i < workers; i++) {
     assert.equal(store.readCursor(`k${i}`), `k${i}`, `k${i} missing after all 80 workers exited 0`);
+  }
+});
+
+/**
+ * Deterministic filesystem interleaving: a contender observes a dead owner's
+ * lock, then a live replacement appears before reclaim. Generation-matched
+ * unlink must not remove the successor. Builtin interception schedules the
+ * replacement between the observation read and the matching reclaim check;
+ * it does not alter product lock code.
+ */
+test("a stale owner observation must not delete a replacement live owner lock", async () => {
+  const dir = fs.mkdtempSync(join(tmpdir(), "zswarm-lock-interleave-"));
+  const lock = join(dir, "cursors.lock");
+  const departed = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+  assert.equal(departed.status, 0);
+  assert.ok(departed.pid);
+  assert.throws(() => process.kill(departed.pid, 0), { code: "ESRCH" });
+  const live = spawn(process.execPath, ["-e", "process.stdin.resume()"], {
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+  const exited = once(live, "exit");
+  const originalRead = fs.readFileSync;
+  const originalRm = fs.rmSync;
+  let replaced = false;
+  let removedLiveOwner = false;
+  try {
+    process.kill(live.pid, 0);
+    fs.writeFileSync(lock, JSON.stringify({ pid: departed.pid, at: Date.now() }));
+    fs.readFileSync = function (path, ...args) {
+      const captured = originalRead.call(this, path, ...args);
+      if (String(path) === lock && !replaced) {
+        replaced = true;
+        originalRm(lock);
+        fs.writeFileSync(lock, JSON.stringify({ pid: live.pid, at: Date.now() }), {
+          flag: "wx",
+        });
+      }
+      return captured;
+    };
+    fs.rmSync = function (path, ...args) {
+      if (String(path) === lock) {
+        try {
+          if (JSON.parse(originalRead(lock, "utf8")).pid === live.pid) {
+            process.kill(live.pid, 0);
+            removedLiveOwner = true;
+          }
+        } catch (e) {
+          if (e.code !== "ENOENT") throw e;
+        }
+      }
+      return originalRm.call(this, path, ...args);
+    };
+    syncBuiltinESMExports();
+    let outcome;
+    try {
+      createStateStore({ dir, env: { ZSWARM_LOG: "0" } }).writeCursor("contender", "value");
+    } catch (error) {
+      outcome = error;
+    }
+    assert.equal(replaced, true, "interleaving must execute");
+    assert.equal(removedLiveOwner, false, "stale contender unlinked the new live owner lock");
+    assert.ok(outcome, "contender must wait/fail while another live owner holds the lock");
+  } finally {
+    fs.readFileSync = originalRead;
+    fs.rmSync = originalRm;
+    syncBuiltinESMExports();
+    live.stdin.end();
+    await exited;
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
