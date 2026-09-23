@@ -163,13 +163,25 @@ test("bus markers are per session and inherit a legacy flat file", () => {
 });
 
 // Same worker, but only after writeCursor has finished: a static import loads
-// doctor serve fixtures before the 80-child wave, and a parallel *.test.mjs
+// doctor/serve-bind fixtures before the 80-child wave, and a parallel *.test.mjs
 // worker also drops keys on macOS. Standalone:
 // node --import ./test-support/clean-env.mjs --test tests/doctor.mjs
+// node --import ./test-support/clean-env.mjs --test tests/serve-bind.mjs
 test("doctor fixtures after writeCursor completes", async (t) => {
   const { registerDoctorTests } = await import("./doctor.mjs");
   const queue = [];
   registerDoctorTests((name, fn) => {
+    queue.push([name, fn]);
+  });
+  for (const [name, fn] of queue) {
+    await t.test(name, fn);
+  }
+});
+
+test("serve-bind fixtures after writeCursor completes", async (t) => {
+  const { registerServeBindTests } = await import("./serve-bind.mjs");
+  const queue = [];
+  registerServeBindTests((name, fn) => {
     queue.push([name, fn]);
   });
   for (const [name, fn] of queue) {
