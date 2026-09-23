@@ -1416,6 +1416,50 @@ test("malformed inspect output cannot disclose an old raw task token", async (t)
   });
 });
 
+test("malformed helper output redacts a quoted token before truncating its closing quote", async (t) => {
+  const marker = "OLD_SECRET_FRAGMENT";
+  const oldToken = `alpha&${marker}-${"segment-".repeat(40)}`;
+  const oldAction = serveLogonCommand("node.exe", "cli.js", "127.0.0.1:9419", oldToken);
+  const input = baseInput(t, {
+    token: "review-token-ONLY",
+    env: { ZSWARM_SERVE_TOKEN: "review-token-ONLY" },
+    runPowerShell: async () => ({ code: 0, stdout: `not-json ${oldAction}`, stderr: "" }),
+  });
+  await assert.rejects(() => installServeLogon(input), (err) => {
+    const dumped = `${err.message}${JSON.stringify(err.details ?? {})}`;
+    assert.equal(dumped.includes(marker), false);
+    return true;
+  });
+});
+
+test("cancellation after retry sleep resolves keeps completed host findings at next guard", async (t) => {
+  const ac = new AbortController();
+  const harness = taskHarness();
+  const followed = followTaskServe(harness);
+  const input = baseInput(t, {
+    harness,
+    session: "crew",
+    signal: ac.signal,
+    timeoutMs: 2_000,
+    probeServe: followed.probeServe,
+    callServe: async () => ({
+      ok: false,
+      error: { code: "timeout", message: "partial host timeout", details: hostReport({ session: "crew" }).data },
+    }),
+    sleep: async () => {
+      ac.abort();
+    },
+  });
+  await assert.rejects(() => installServeLogon(input), (err) => {
+    assert.equal(err.code, "cancelled");
+    assert.equal(err.details?.installed, true);
+    assert.equal(err.details?.server?.serverId, "fixture-server");
+    assert.ok(err.details?.inspection?.checks.some((row) => row.id === "zellij_ipc" && row.state === "ok"));
+    assert.deepEqual(err.details?.sessions, ["crew"]);
+    return true;
+  });
+});
+
 test("same command configured with Highest or missing principal is corrected before reuse", async (t) => {
   for (const tweak of [
     (task) => {

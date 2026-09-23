@@ -544,7 +544,7 @@ function parseTaskJson(stdout: string, secrets: string[]): Record<string, unknow
   if (start === -1 || end < start) {
     throw new ZellijError(
       "zellij_failed",
-      `serve task helper returned no JSON (${scrubDiagnosticText(text.slice(0, 200) || "no output", secrets)})`,
+      `serve task helper returned no JSON (${scrubDiagnosticText(text || "no output", secrets).slice(0, 200)})`,
     );
   }
   try {
@@ -871,13 +871,13 @@ export async function installServeLogon(
   const assertRunnable = (phase: string, extra: Record<string, unknown> = {}): number => {
     if (input.signal?.aborted) {
       throw notReadyError("serve --install cancelled", {
-        ...partial({ phase, cause: "cancelled", ...extra }),
+        ...partial({ ...extra, phase, cause: "cancelled" }),
       }, secrets, "cancelled");
     }
     const left = remaining();
     if (left <= 0) {
       throw notReadyError(`serve --install timed out during ${phase}`, {
-        ...partial({ phase, cause: "timeout", ...extra }),
+        ...partial({ ...extra, phase, cause: "timeout" }),
       }, secrets, "timeout");
     }
     return Math.min(20_000, left);
@@ -1100,7 +1100,7 @@ export async function installServeLogon(
   };
 
   while (remaining() > 0 && probes < 64) {
-    assertRunnable("hello", { installed: true, principal });
+    assertRunnable("hello", known());
     probes += 1;
     const helloBudget = Math.max(1, Math.min(SERVE_HELLO_TIMEOUT_MS, remaining()));
     const hello = await probe(label, {
@@ -1149,7 +1149,7 @@ export async function installServeLogon(
       await waitRetry();
       continue;
     }
-    assertRunnable("host", { installed: true, principal, server: lastServer });
+    assertRunnable("host", known());
     const hostResult = await call(label, hostDoctorRequest(remaining(), explicitSession), {
       timeoutMs: Math.max(1, remaining()),
       token,
