@@ -1479,4 +1479,38 @@ test("register scripts parse on Windows PowerShell", {
     assert.equal(spawned.status, 0, `${action} parse failed: ${spawned.stdout}\n${spawned.stderr}`);
   }
 });
+
+for (const scenario of ["foreign-owner", "unverified-owner", "lookup-error"]) {
+  test(`clear helper never unregisters after ${scenario}`, { skip: process.platform !== "win32" }, () => {
+    const script = buildServeTaskScript("unregister");
+    const main = script.lastIndexOf("\n$identity = Get-ZswarmIdentity");
+    assert.ok(main > 0, "adapt the fixture injection point if the helper layout changes");
+    const mockTask =
+      scenario === "lookup-error"
+        ? "throw 'fixture: task inspection denied'"
+        : `return [pscustomobject]@{ Principal = [pscustomobject]@{ UserId = '${scenario === "foreign-owner" ? "S-1-5-21-8-8-8-8888" : ""}' } }`;
+    const mocks = `
+function Get-ZswarmIdentity { return @{ name = 'CORP\\sam'; sid = 'S-1-5-21-1-2-3-1001' } }
+function Get-ZswarmTask { ${mockTask} }
+function Stop-ScheduledTask { param($TaskName) $script:stops++ }
+function Unregister-ScheduledTask { param($TaskName, $Confirm) $script:unregisters++ }
+function Write-ZswarmJson { param($obj) }
+`;
+    const body = script.slice(0, main) + mocks + script.slice(main);
+    const wrapped = `$script:stops = 0; $script:unregisters = 0; $errorMessage = $null
+try { & { ${body} } } catch { $errorMessage = [string]$_.Exception.Message }
+@{ stops = $script:stops; unregisters = $script:unregisters; error = $errorMessage } | ConvertTo-Json -Compress
+`;
+    const spawned = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-EncodedCommand", encodePowerShellCommand(wrapped)],
+      { encoding: "utf8", windowsHide: true, timeout: 15_000 },
+    );
+    assert.equal(spawned.status, 0, `${spawned.stdout}\n${spawned.stderr}`);
+    const result = JSON.parse(String(spawned.stdout).trim());
+    assert.equal(result.stops, 0, spawned.stdout);
+    assert.equal(result.unregisters, 0, spawned.stdout);
+    assert.ok(result.error, "ownership/inspection failure must propagate");
+  });
+}
 });
