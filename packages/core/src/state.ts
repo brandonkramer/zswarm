@@ -160,79 +160,19 @@ export function createStateStore(options: StateStoreOptions = {}) {
    * mtime is older than the wait, so an in-flight create is not yanked out
    * from under the holder.
    *
-   * Observation alone is not a delete permit: reclaim only unlinks when the
-   * on-disk generation (pid+at, or still-ownerless for empty files) still
-   * matches the observation that was deemed stale. A successor that replaced
-   * the path must not be removed by an older observation.
+   * Ownership transition is rename-serialized: a cooperating reclaim/release
+   * never `rmSync`s the well-known lock path. It renames that path to a private
+   * tomb, then inspects the tomb. Only the rename winner can clear a given
+   * on-disk generation; a successor published at the well-known path after that
+   * rename is a different inode and is never deleted by the loser. A tomb whose
+   * generation does not match the observation is restored (or left in place on
+   * EEXIST) — fail closed, never destroy a possibly-live successor to keep
+   * opportunistic recovery.
    */
   function ownerObservationIsStale(owner: { pid: number; at: number }): boolean {
     if (owner.pid === process.pid) return true;
     if (!pidAlive(owner.pid)) return true;
     return Date.now() - owner.at >= LOCK_STALE_MS;
-  }
-
-  /** Unlink only when the lock content still matches the stale observation. */
-  function unlinkIfMatchingOwner(
-    lockPath: string,
-    expected: { pid: number; at: number },
-  ): boolean {
-    const until = Date.now() + 500;
-    while (true) {
-      const current = readLockOwner(lockPath);
-      if (
-        !current ||
-        current.pid !== expected.pid ||
-        current.at !== expected.at
-      ) {
-        return false;
-      }
-      try {
-        rmSync(lockPath, { force: true });
-        return true;
-      } catch (err) {
-        if (!lockBusy((err as NodeJS.ErrnoException).code) || Date.now() >= until) {
-          return false;
-        }
-        sleepSync(10);
-      }
-    }
-  }
-
-  /**
-   * Empty/malformed lock reclaim: only remove if the path is still ownerless
-   * (no valid pid record). A live replacement with a real owner is left alone.
-   */
-  function unlinkIfStillOwnerless(lockPath: string): boolean {
-    const until = Date.now() + 500;
-    while (true) {
-      if (readLockOwner(lockPath)) return false;
-      try {
-        // Confirm the path still exists and still has no owner before delete.
-        statSync(lockPath);
-        if (readLockOwner(lockPath)) return false;
-        rmSync(lockPath, { force: true });
-        return true;
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code === "ENOENT") return false;
-        if (!lockBusy(code) || Date.now() >= until) return false;
-        sleepSync(10);
-      }
-    }
-  }
-
-  function tryReclaimStaleLock(lockPath: string): boolean {
-    const owner = readLockOwner(lockPath);
-    if (owner) {
-      if (!ownerObservationIsStale(owner)) return false;
-      return unlinkIfMatchingOwner(lockPath, owner);
-    }
-    try {
-      if (Date.now() - statSync(lockPath).mtimeMs < LOCK_WAIT_MS) return false;
-    } catch {
-      return false;
-    }
-    return unlinkIfStillOwnerless(lockPath);
   }
 
   function lockBusy(code: string | undefined): boolean {
@@ -246,16 +186,143 @@ export function createStateStore(options: StateStoreOptions = {}) {
     );
   }
 
+  /** Private tomb path next to the well-known lock (same directory / volume). */
+  function lockTombPath(
+    lockPath: string,
+    kind: "owner" | "empty",
+    expected?: { pid: number; at: number },
+  ): string {
+    const tag =
+      kind === "owner" && expected
+        ? `${expected.pid}.${expected.at}`
+        : "empty";
+    return `${lockPath}.tomb.${process.pid}.${tag}.${process.hrtime.bigint()}`;
+  }
+
   /**
-   * Drop this process's lock file only when the on-disk generation still
-   * matches the stamp we published. Retry-unlink of whatever now sits at the
-   * path can delete a waiter that already recreated it with wx.
+   * Move the well-known lock to a private tomb. Only the rename winner owns
+   * that inode thereafter. Never `rmSync` the well-known path.
+   */
+  function renameLockToTomb(lockPath: string, tomb: string): boolean {
+    const until = Date.now() + 500;
+    while (true) {
+      try {
+        renameSync(lockPath, tomb);
+        return true;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return false;
+        if (!lockBusy(code) || Date.now() >= until) return false;
+        sleepSync(10);
+      }
+    }
+  }
+
+  /**
+   * After a tomb rename: destroy only a matching stale/owned generation.
+   * Mismatched tombs are restored to the well-known path when possible; on
+   * EEXIST the tomb is left in place (fail closed) rather than deleted.
+   */
+  function settleTomb(
+    lockPath: string,
+    tomb: string,
+    accept: (moved: { pid: number; at: number } | null) => boolean,
+  ): boolean {
+    const moved = readLockOwner(tomb);
+    if (accept(moved)) {
+      try {
+        rmSync(tomb, { force: true });
+      } catch {
+        // Tomb is private; a leftover here does not affect exclusivity.
+      }
+      return true;
+    }
+    try {
+      renameSync(tomb, lockPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EEXIST" || lockBusy(code)) {
+        // Another live claim occupies the well-known path. Do not destroy the
+        // tomb's possibly-live generation; leave it for operator cleanup.
+        return false;
+      }
+      if (code !== "ENOENT") {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Drop or reclaim a matching owner generation via rename-to-tomb. Cooperating
+   * writers never remove the well-known path with `rmSync`, so a successor
+   * published there after a final content check cannot be deleted by an older
+   * observation (the old check-then-unlink interval is not part of this protocol).
+   */
+  function reclaimMatchingOwner(
+    lockPath: string,
+    expected: { pid: number; at: number },
+  ): boolean {
+    const current = readLockOwner(lockPath);
+    if (
+      !current ||
+      current.pid !== expected.pid ||
+      current.at !== expected.at
+    ) {
+      return false;
+    }
+    const tomb = lockTombPath(lockPath, "owner", expected);
+    if (!renameLockToTomb(lockPath, tomb)) return false;
+    return settleTomb(
+      lockPath,
+      tomb,
+      (moved) =>
+        !!moved && moved.pid === expected.pid && moved.at === expected.at,
+    );
+  }
+
+  /**
+   * Empty/malformed lock reclaim: rename aside only when still ownerless.
+   * A tomb that gained a real owner record is restored (fail closed).
+   */
+  function reclaimIfStillOwnerless(lockPath: string): boolean {
+    if (readLockOwner(lockPath)) return false;
+    try {
+      statSync(lockPath);
+    } catch {
+      return false;
+    }
+    if (readLockOwner(lockPath)) return false;
+    const tomb = lockTombPath(lockPath, "empty");
+    if (!renameLockToTomb(lockPath, tomb)) return false;
+    return settleTomb(lockPath, tomb, (moved) => moved === null);
+  }
+
+  function tryReclaimStaleLock(lockPath: string): boolean {
+    const owner = readLockOwner(lockPath);
+    if (owner) {
+      if (!ownerObservationIsStale(owner)) return false;
+      return reclaimMatchingOwner(lockPath, owner);
+    }
+    try {
+      if (Date.now() - statSync(lockPath).mtimeMs < LOCK_WAIT_MS) return false;
+    } catch {
+      return false;
+    }
+    return reclaimIfStillOwnerless(lockPath);
+  }
+
+  /**
+   * Drop this process's lock only when the generation we published is still the
+   * inode at the well-known path. Release uses the same rename-to-tomb rule as
+   * reclaim so a waiter that already wx-created a successor cannot be removed
+   * by a late owner unlink of the shared name.
    */
   function unlinkOwnedLock(
     lockPath: string,
     stamp: { pid: number; at: number },
   ): void {
-    unlinkIfMatchingOwner(lockPath, stamp);
+    reclaimMatchingOwner(lockPath, stamp);
   }
 
   function withFileLock<T>(lockName: string, fn: () => T): T {
@@ -270,8 +337,10 @@ export function createStateStore(options: StateStoreOptions = {}) {
         // have an interval. The UTF-8 fast path keeps that interval in one
         // native writeFileSync rather than two JS turns (openSync then write).
         // Empty leftovers can still be stolen after LOCK_WAIT_MS if a crash
-        // or a still-empty file is old enough. Reclaim only deletes a matching
-        // observed generation (pid+at), never a successor at the same path.
+        // or a still-empty file is old enough. Stale reclaim/release clear the
+        // well-known path only by winning rename-to-tomb for a matching
+        // generation; they never `rmSync` that path (so a live successor at
+        // the name cannot be deleted by an older observation).
         writeFileSync(lockPath, JSON.stringify(stamp), {
           encoding: "utf8",
           flag: "wx",

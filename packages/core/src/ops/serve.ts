@@ -356,6 +356,8 @@ export async function startServe(
   assertStartupOpen("listen");
   return new Promise((resolve, reject) => {
     let settled = false;
+    let startupTimer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
     const sockets = new Set<Socket>();
     const server = makeServer((socket) => {
       socket.on("error", () => {
@@ -448,6 +450,17 @@ export async function startServe(
       }
     });
 
+    const clearStartupWatchers = (): void => {
+      if (startupTimer !== undefined) {
+        clearTimeout(startupTimer);
+        startupTimer = undefined;
+      }
+      if (onAbort && options.signal) {
+        options.signal.removeEventListener("abort", onAbort);
+        onAbort = undefined;
+      }
+    };
+
     const closeStartupListener = (): void => {
       for (const open of sockets) open.destroy();
       try {
@@ -460,8 +473,19 @@ export async function startServe(
     const rejectStartup = (err: unknown): void => {
       if (settled) return;
       settled = true;
+      clearStartupWatchers();
       closeStartupListener();
       reject(err);
+    };
+
+    const resolveStartup = (handle: { label: string; close: () => Promise<void> }): void => {
+      if (settled) {
+        closeStartupListener();
+        return;
+      }
+      settled = true;
+      clearStartupWatchers();
+      resolve(handle);
     };
 
     server.on("error", (err: NodeJS.ErrnoException) => {
@@ -480,6 +504,62 @@ export async function startServe(
         ),
       );
     });
+
+    // Active ownership while listen completion is pending: do not wait for the
+    // listening callback to observe cancel/expiry. Cleared on success so the
+    // startup budget is not a lifetime timer for a healthy server.
+    onAbort = () => {
+      rejectStartup(
+        new ZellijError("cancelled", "serve startup cancelled before listen completed", {
+          phase: "bind",
+          cause: "cancelled",
+          stage: "listening",
+          remedy: SERVE_BIND_REMEDY.cancelled,
+        }),
+      );
+    };
+    if (options.signal) {
+      if (options.signal.aborted) {
+        onAbort();
+        return;
+      }
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) {
+      rejectStartup(
+        new ZellijError(
+          "serve_auth",
+          "zswarm serve startup timed out before listen completed",
+          {
+            phase: "bind",
+            cause: "timeout",
+            stage: "listening",
+            remedy: SERVE_BIND_REMEDY.timeout,
+          },
+        ),
+      );
+      return;
+    }
+    startupTimer = setTimeout(() => {
+      // Re-read injected clocks so tests can advance `now` after listen starts.
+      if (now() >= deadline) {
+        rejectStartup(
+          new ZellijError(
+            "serve_auth",
+            "zswarm serve startup timed out before listen completed",
+            {
+              phase: "bind",
+              cause: "timeout",
+              stage: "listening",
+              remedy: SERVE_BIND_REMEDY.timeout,
+            },
+          ),
+        );
+      }
+    }, Math.max(1, remainingMs));
+    // Ensure the timer does not keep the process alive after success on Node.
+    startupTimer.unref?.();
 
     try {
       assertStartupOpen("listen");
@@ -524,8 +604,7 @@ export async function startServe(
       const addr = server.address();
       const actualPort =
         typeof addr === "object" && addr ? addr.port : port;
-      settled = true;
-      resolve({
+      resolveStartup({
         label: formatListenLabel(bindHost, actualPort),
         close: () =>
           new Promise((done, fail) => {

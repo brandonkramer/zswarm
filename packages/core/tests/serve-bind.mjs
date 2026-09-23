@@ -859,6 +859,122 @@ export function registerServeBindTests(test = nodeTest) {
       await close();
     }
   });
+
+  test("abort settles pending listen without waiting for the callback", async () => {
+    const ac = new AbortController();
+    let complete;
+    let closes = 0;
+    let observed;
+    const started = new Promise((resolve) => {
+      void startServe("127.0.0.1:9419", async () => ({ ok: true, data: {} }), {
+        token: "secret",
+        signal: ac.signal,
+        timeoutMs: 10_000,
+        createServer: () => {
+          const server = new EventEmitter();
+          server.address = () => ({ address: "127.0.0.1", family: "IPv4", port: 9419 });
+          server.listen = (_port, _host, callback) => {
+            complete = () => {
+              callback();
+              server.emit("listening");
+            };
+            resolve();
+            return server;
+          };
+          server.close = (cb) => {
+            closes += 1;
+            queueMicrotask(() => cb?.());
+            return server;
+          };
+          return server;
+        },
+      }).then(
+        (value) => {
+          observed = { ok: true, value };
+        },
+        (error) => {
+          observed = { ok: false, error };
+        },
+      );
+    });
+    await started;
+    ac.abort();
+    await new Promise((r) => setImmediate(r));
+    const beforeCallback = observed;
+    const closedBeforeCallback = closes;
+    complete();
+    await new Promise((r) => setImmediate(r));
+    assert.ok(beforeCallback, "startup remained pending after abort until listen callback");
+    assert.equal(beforeCallback.ok, false);
+    assert.match(beforeCallback.error.message, /cancel|abort/i);
+    assert.ok(closedBeforeCallback > 0, "abort must close the owned listener promptly");
+  });
+
+  test("expiry settles pending listen without waiting for the callback", async () => {
+    let now = 0;
+    let complete;
+    let closes = 0;
+    let observed;
+    const started = new Promise((resolve) => {
+      void startServe("127.0.0.1:9419", async () => ({ ok: true, data: {} }), {
+        token: "secret",
+        now: () => now,
+        timeoutMs: 50,
+        createServer: () => {
+          const server = new EventEmitter();
+          server.address = () => ({ address: "127.0.0.1", family: "IPv4", port: 9419 });
+          server.listen = (_port, _host, callback) => {
+            complete = () => {
+              callback();
+              server.emit("listening");
+            };
+            resolve();
+            return server;
+          };
+          server.close = (cb) => {
+            closes += 1;
+            queueMicrotask(() => cb?.());
+            return server;
+          };
+          return server;
+        },
+      }).then(
+        (value) => {
+          observed = { ok: true, value };
+        },
+        (error) => {
+          observed = { ok: false, error };
+        },
+      );
+    });
+    await started;
+    now = 51;
+    await new Promise((r) => setTimeout(r, 75));
+    const beforeCallback = observed;
+    const closedBeforeCallback = closes;
+    complete();
+    await new Promise((r) => setImmediate(r));
+    assert.ok(beforeCallback, "startup remained pending past expiry until listen callback");
+    assert.equal(beforeCallback.ok, false);
+    assert.match(beforeCallback.error.message, /timeout|timed out/i);
+    assert.ok(closedBeforeCallback > 0, "expiry must close the owned listener promptly");
+  });
+
+  test("healthy server survives real wall-clock passage beyond the startup timer", async () => {
+    const { label, close } = await startServe(
+      "127.0.0.1:0",
+      async () => ({ ok: true, data: { alive: true } }),
+      { token: "secret", timeoutMs: 40 },
+    );
+    try {
+      await new Promise((r) => setTimeout(r, 80));
+      const { callServe } = await import("../dist/index.js");
+      const reply = await callServe(label, { op: "ping" }, 2_000, "secret");
+      assert.deepEqual(reply, { ok: true, data: { alive: true } });
+    } finally {
+      await close();
+    }
+  });
 }
 
 function isStandaloneServeBindEntry() {

@@ -134,11 +134,18 @@ store.writeCursor(process.argv[3], process.argv[3]);
 });
 
 /**
- * Deterministic filesystem interleaving: a contender observes a dead owner's
- * lock, then a live replacement appears before reclaim. Generation-matched
- * unlink must not remove the successor. Builtin interception schedules the
- * replacement between the observation read and the matching reclaim check;
- * it does not alter product lock code.
+ * Deterministic filesystem interleaving under rename-to-tomb reclaim.
+ *
+ * The repair-01 check-then-`rmSync(well-known path)` interval is no longer a
+ * cooperating-writer step: reclaim/release rename the shared name to a private
+ * tomb, then delete only a matching tomb generation. A successor published at
+ * the well-known path is a different inode; the rename loser gets ENOENT and
+ * never removes it.
+ *
+ * This harness schedules a competing reclaim (rename stale aside + wx live
+ * owner) immediately before the contender's rename of the shared path — the
+ * analogue of the old "replacement after the final check" race — and asserts
+ * the live successor is restored/left intact, not destroyed.
  */
 test("a stale owner observation must not delete a replacement live owner lock", async () => {
   const dir = fs.mkdtempSync(join(tmpdir(), "zswarm-lock-interleave-"));
@@ -153,31 +160,38 @@ test("a stale owner observation must not delete a replacement live owner lock", 
   const exited = once(live, "exit");
   const originalRead = fs.readFileSync;
   const originalRm = fs.rmSync;
+  const originalRename = fs.renameSync;
   let replaced = false;
   let removedLiveOwner = false;
   try {
     process.kill(live.pid, 0);
     fs.writeFileSync(lock, JSON.stringify({ pid: departed.pid, at: Date.now() }));
-    fs.readFileSync = function (path, ...args) {
-      const captured = originalRead.call(this, path, ...args);
-      if (String(path) === lock && !replaced) {
-        replaced = true;
-        originalRm(lock);
+    fs.renameSync = function (from, to, ...args) {
+      if (
+        String(from) === lock &&
+        String(to).includes(".tomb.") &&
+        !replaced
+      ) {
+        assert.equal(JSON.parse(originalRead(lock, "utf8")).pid, departed.pid);
+        const competitorTomb = `${lock}.competitor-won`;
+        originalRename(lock, competitorTomb);
+        originalRm(competitorTomb, { force: true });
         fs.writeFileSync(lock, JSON.stringify({ pid: live.pid, at: Date.now() }), {
           flag: "wx",
         });
+        replaced = true;
       }
-      return captured;
+      return originalRename.call(this, from, to, ...args);
     };
     fs.rmSync = function (path, ...args) {
-      if (String(path) === lock) {
-        try {
-          if (JSON.parse(originalRead(lock, "utf8")).pid === live.pid) {
-            process.kill(live.pid, 0);
-            removedLiveOwner = true;
-          }
-        } catch (e) {
-          if (e.code !== "ENOENT") throw e;
+      try {
+        if (JSON.parse(originalRead(path, "utf8")).pid === live.pid) {
+          process.kill(live.pid, 0);
+          removedLiveOwner = true;
+        }
+      } catch (e) {
+        if (e.code !== "ENOENT" && e instanceof SyntaxError === false) {
+          // ignore non-JSON tombs / missing paths
         }
       }
       return originalRm.call(this, path, ...args);
@@ -192,14 +206,83 @@ test("a stale owner observation must not delete a replacement live owner lock", 
     assert.equal(replaced, true, "interleaving must execute");
     assert.equal(removedLiveOwner, false, "stale contender unlinked the new live owner lock");
     assert.ok(outcome, "contender must wait/fail while another live owner holds the lock");
+    assert.equal(
+      JSON.parse(originalRead(lock, "utf8")).pid,
+      live.pid,
+      "live successor must still own the well-known lock path",
+    );
   } finally {
     fs.readFileSync = originalRead;
     fs.rmSync = originalRm;
+    fs.renameSync = originalRename;
     syncBuiltinESMExports();
     live.stdin.end();
     await exited;
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/**
+ * Two reclaimers racing rename-to-tomb on the same stale generation: only one
+ * rename wins; the loser must not destroy the winner's subsequent wx claim.
+ */
+test("multiple reclaimers serialize on rename-to-tomb without deleting the winner", async () => {
+  const dir = fs.mkdtempSync(join(tmpdir(), "zswarm-lock-multireclaim-"));
+  const lock = join(dir, "cursors.lock");
+  const departed = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+  assert.equal(departed.status, 0);
+  assert.throws(() => process.kill(departed.pid, 0), { code: "ESRCH" });
+  fs.writeFileSync(lock, JSON.stringify({ pid: departed.pid, at: Date.now() }));
+
+  const worker = join(dir, "reclaim-worker.mjs");
+  writeFileSync(
+    worker,
+    `import { createStateStore } from ${JSON.stringify(pathToFileURL(DIST).href)};
+const store = createStateStore({ dir: process.argv[2], env: { ZSWARM_LOG: "0" } });
+try {
+  store.writeCursor(process.argv[3], process.argv[3]);
+  process.exit(0);
+} catch (err) {
+  process.stderr.write(String(err && err.message ? err.message : err));
+  process.exit(2);
+}
+`,
+  );
+
+  const results = await Promise.all(
+    ["a", "b", "c", "d"].map(
+      (key) =>
+        new Promise((resolve) => {
+          const child = spawn(process.execPath, [worker, dir, key], {
+            stdio: ["ignore", "ignore", "pipe"],
+          });
+          let err = "";
+          child.stderr.on("data", (chunk) => {
+            err += String(chunk);
+          });
+          child.on("exit", (code) => resolve({ key, code, err }));
+        }),
+    ),
+  );
+
+  const succeeded = results.filter((r) => r.code === 0);
+  const timedOut = results.filter((r) => r.code !== 0);
+  // With a live departed lock cleared by the first winner, every worker should
+  // eventually acquire in sequence — all four keys must land. If a reclaimer
+  // deleted a live successor, we would lose keys or see crashes.
+  assert.equal(succeeded.length + timedOut.length, 4);
+  const store = createStateStore({ dir, env: { ZSWARM_LOG: "0" } });
+  // Retry briefly: losers poll until LOCK_WAIT; all should finish with keys.
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    const keys = ["a", "b", "c", "d"].filter((k) => store.readCursor(k) === k);
+    if (keys.length === 4) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  for (const key of ["a", "b", "c", "d"]) {
+    assert.equal(store.readCursor(key), key, `${key} missing after multi-reclaim wave`);
+  }
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("bus markers are per session and inherit a legacy flat file", () => {
