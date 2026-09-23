@@ -895,19 +895,18 @@ test("final host success after deadline or cancel cannot become ready", async (t
   for (const variant of ["deadline", "cancel"]) {
     const ac = new AbortController();
     let now = 1000;
-    const server = await listenDoctor(t, { session: "crew" });
+    const harness = taskHarness();
+    const followed = followTaskServe(harness);
     const input = baseInput(t, {
-      listen: server.label,
-      token: server.token,
-      launchId: server.launchId,
+      harness,
       session: "crew",
       timeoutMs: 100,
-      env: { ZSWARM_SERVE_TOKEN: server.token },
       now: () => now,
       sleep: async (ms) => {
         now += ms;
       },
       signal: ac.signal,
+      probeServe: followed.probeServe,
       callServe: async () => {
         if (variant === "deadline") now += 200;
         else ac.abort();
@@ -927,13 +926,12 @@ test("final host success after deadline or cancel cannot become ready", async (t
 
 test("negative host envelopes with completed rows cannot become ready", async (t) => {
   for (const code of ["serve_unauthorized", "doctor_failed"]) {
-    const server = await listenDoctor(t, { session: "crew" });
+    const harness = taskHarness();
+    const followed = followTaskServe(harness);
     const input = baseInput(t, {
-      listen: server.label,
-      token: server.token,
-      launchId: server.launchId,
+      harness,
       session: "crew",
-      env: { ZSWARM_SERVE_TOKEN: server.token },
+      probeServe: followed.probeServe,
       callServe: async () => ({
         ok: false,
         error: { code, message: "host rejected inspection", details: hostReport({ session: "crew" }).data },
@@ -953,13 +951,12 @@ test("negative host envelopes with completed rows cannot become ready", async (t
 test("failed inherited host session cannot become ready without an explicit install session", async (t) => {
   const report = hostReport({ session: "missing-default", sessionMissing: true, live: [] });
   report.data.route.sessionOrigin = "inherited";
-  const server = await listenDoctor(t, { report });
+  const harness = taskHarness();
+  const followed = followTaskServe(harness);
   const input = baseInput(t, {
-    listen: server.label,
-    token: server.token,
-    launchId: server.launchId,
+    harness,
     session: null,
-    env: { ZSWARM_SERVE_TOKEN: server.token },
+    probeServe: followed.probeServe,
     callServe: async () => ({
       ok: false,
       error: { code: "doctor_failed", message: "session:session_missing", details: report.data },
@@ -1156,9 +1153,10 @@ test("task environment preserves configured server policy and the child context 
   assert.equal(denied.ok, false);
   assert.equal(denied.error.code, "policy_denied");
 
-  const server = await listenDoctor(t, { session: "crew" });
+  const harness = taskHarness();
+  const followed = followTaskServe(harness);
   const installEnv = {
-    ZSWARM_SERVE_TOKEN: server.token,
+    ZSWARM_SERVE_TOKEN: "s3cret-token",
     ZSWARM_ALLOW_CLOSE: "0",
     ZSWARM_ALLOW_SPAWN: "0",
     ZSWARM_ALLOW_PANES: "crew-*",
@@ -1166,12 +1164,14 @@ test("task environment preserves configured server policy and the child context 
     ZSWARM_ALLOW_WORKTREE_REMOVE: "0",
   };
   const input = baseInput(t, {
-    listen: server.label,
-    token: server.token,
-    launchId: server.launchId,
+    harness,
+    token: "s3cret-token",
     session: "crew",
     env: installEnv,
+    probeServe: followed.probeServe,
+    callServe: followed.callServe,
   });
+  delete input.launchId;
   const result = await installServeLogon(input);
   assert.equal(result.ready, true);
   assert.ok(input.harness.task.arguments.includes("ZSWARM_ALLOW_CLOSE=0"));
