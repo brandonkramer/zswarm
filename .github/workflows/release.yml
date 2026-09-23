@@ -81,6 +81,8 @@ jobs:
           # Push the version commit before npm mutate. Publishing first left
           # packages on the registry when a later master push made this SHA
           # non-fast-forward, and a failing follow-up CI never repaired git.
+          # Do not --follow-tags here: changeset publish creates tags only after
+          # a successful npm publish (below).
           git fetch origin master
           master=$(git rev-parse origin/master)
           head=$(git rev-parse HEAD)
@@ -91,8 +93,11 @@ jobs:
               echo "master=$master head=$head"
               exit 0
             fi
-            git push --follow-tags origin HEAD:master
+            git push origin HEAD:master
           fi
           # Publishes anything whose version is not on npm yet; a re-run after
           # a successful push therefore recovers a failed publish.
           pnpm release
+          # changeset publish tags the version commit after npm mutate. Push
+          # those tags now (and no-op the version commit if already on master).
+          git push --follow-tags origin HEAD:master
