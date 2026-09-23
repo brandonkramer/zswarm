@@ -273,6 +273,8 @@ async function dispatchOperation(
           token: env.ZSWARM_SERVE_TOKEN,
           now: clock.now,
           sleep: clock.sleep,
+          tailscaleStatus: deps.tailscaleStatus,
+          networkInterfaces: deps.networkInterfaces,
           ...deps.serveInstall,
         });
         return { ok: true, data: installed };

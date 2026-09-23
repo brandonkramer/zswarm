@@ -5,6 +5,18 @@ same tailnet: install `zswarm serve` as a current-user Interactive logon task
 on the already-logged-in desktop, keep **loopback + token** auth, and attach
 from the controller with **OpenSSH over Tailscale** (`ssh://`).
 
+**Optional direct bind:** instead of loopback, the host may bind
+`zswarm serve --listen` to a **verified local Tailscale IP** (from
+`tailscale ip -4` / `-6`). Controllers then use that address as a normal
+`--serve host:port` endpoint. Token auth remains mandatory; Tailnet membership
+does not replace it. Local address verification is **binding evidence only** —
+not proof of an individual peer's authorization or a firewall policy. Existing
+tailnet ACLs/grants and host network policy still decide reachability;
+administrators should restrict the selected TCP port to intended controllers.
+Tailscale encrypts the tailnet path; zswarm's JSONL protocol does not add a
+separate TLS layer. Binding a tailnet address alone does **not** authenticate
+traffic on arbitrary network paths.
+
 This is not Tailscale's integrated SSH server. Native Windows uses conventional
 [OpenSSH](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-overview)
 to the Windows host over the tailnet
@@ -33,7 +45,9 @@ On the Windows desktop that already owns a compatible Zellij crew:
   [New-ScheduledTaskPrincipal](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtaskprincipal))
 - Zellij ≥ 0.42 is on that account's PATH (or `ZSWARM_BIN`), with a live crew
   session.
-- Windows OpenSSH Server is reachable from the controller over the tailnet.
+- Windows OpenSSH Server is reachable from the controller over the tailnet
+  (default loopback+SSH recipe), **or** the host will bind a verified Tailscale
+  IP for direct TCP (see below).
 - A private `ZSWARM_SERVE_TOKEN` is loaded in **both** the desktop process that
   runs `--install` and the controller process that calls `--serve`. Do not put
   the token in the URI, argv, or shell history snippets you paste around.
@@ -41,8 +55,8 @@ On the Windows desktop that already owns a compatible Zellij crew:
 On the controller:
 
 - An SSH identity and host-key verification that already work
-  (`ssh user@crew-host`). zswarm does not disable `StrictHostKeyChecking` or
-  prompt for a password (`BatchMode`).
+  (`ssh user@crew-host`) when using the default `ssh://` recipe. Direct
+  Tailscale-IP endpoints skip SSH but still need the shared token.
 - The same private token in that process environment.
 
 ## What `ready` means
@@ -68,7 +82,7 @@ task, starts it, then waits on one deadline for:
 Missing/unready bus is advisory. Installation does **not** install, launch,
 nudge, or approve the bus.
 
-## Host (Windows desktop)
+## Host (Windows desktop) — default loopback
 
 Load the token privately, then:
 
@@ -111,8 +125,67 @@ administrators who can read that task can read the token. Rotate by running
 `--install` again with the new token (updates the owned task, then verifies the
 new launch identity). `zswarm serve --clear` **stops and unregisters** the owned
 `zswarm-serve` task; it will not remove a task owned by a different account.
+Clear remains usable when Tailscale is down or a previous Tailscale listen
+address was removed — it is ownership-controlled cleanup, not permission to
+open a listener.
+
+## Host — optional verified Tailscale bind
+
+Default listen remains loopback and does **not** require Tailscale to be
+installed. To bind the Tailscale address itself:
+
+1. Confirm Tailscale is **Running** and read the host's own address
+   (`tailscale ip -4` / `tailscale ip -6`). Do not invent a `100.*` value or
+   copy a peer's IP.
+2. Pass that **literal** address to `--listen`. Wildcards (`0.0.0.0` / `::`),
+   hostnames, MagicDNS names, and IPv4-mapped IPv6 forms are refused.
+3. zswarm runs a bounded read-only `tailscale status --json --peers=false`,
+   requires `BackendState: Running`, and checks exact membership in this node's
+   self/local Tailscale addresses **and** OS interface assignment. Peer
+   entries, subnet/exit routes, and prefix resemblance are not identity.
+4. Bind is exactly that address. Verification/bind failure never falls back to
+   `0.0.0.0`, `::`, loopback, SSH, or another transport.
+5. Userspace/proxy-only Tailscale without an OS-bindable address is **not**
+   supported in this mode — use loopback + managed SSH instead.
+6. Verification runs on **every** startup/restart (including each Windows
+   logon-task start). Installer-time proof is not a permanent permit. Address
+   or profile changes require restart/revalidation; zswarm does not continuously
+   monitor identity or automatically rebind after address loss. Startup
+   verification timeouts are not lifetime timeouts for a healthy server.
+7. Optional: `ZSWARM_TAILSCALE_BIN` points at a non-PATH Tailscale CLI. It is
+   persisted in the Windows task env with the same safe quoting rules as other
+   host keys and is never placed in token-bearing argv.
+
+Shell examples (replace the command substitutions with your real addresses):
+
+```bash
+# Unix host next to Zellij
+export ZSWARM_SERVE_TOKEN="$(cat ~/.zswarm-serve-token)"
+TS4="$(tailscale ip -4)"
+zswarm serve --listen "${TS4}:9419"
+# IPv6:
+TS6="$(tailscale ip -6)"
+zswarm serve --listen "[${TS6}]:9419"
+```
+
+```powershell
+# Windows desktop account — same explicit binding on the logon task
+$env:ZSWARM_SERVE_TOKEN = Get-Content $env:USERPROFILE\.zswarm-serve-token -Raw
+$ts4 = (tailscale ip -4).Trim()
+zswarm serve --install --listen "${ts4}:9419" --session crew --timeout-ms 30000
+```
+
+```json
+{ "op": "serve", "install": true, "listen": "<tailscale-ip>:9419", "session": "crew", "timeoutMs": 30000 }
+```
+
+Managed `ssh://` still forwards to **remote loopback** only. A server bound
+solely to its Tailscale IP is reached with a **direct** serve endpoint, not by
+widening `ssh://`. The default loopback + managed-SSH recipe remains available.
 
 ## Controller
+
+### Default: managed SSH to remote loopback
 
 Concise default: process-owned `ssh://` LocalForward. Authority port is **SSH**
 (omit it to honor `ssh_config` `Port`). `servePort` is the **remote loopback**
@@ -146,6 +219,22 @@ Then, in another terminal:
 zswarm --serve 127.0.0.1:9419 doctor --session crew --timeout-ms 10000
 ```
 
+### Direct Tailscale-IP endpoint
+
+When the host bound a verified Tailscale address, the controller uses that
+address directly (same private token). Controllers do **not** need a local
+Tailscale CLI for ordinary serve calls:
+
+```bash
+export ZSWARM_SERVE_TOKEN="$(cat ~/.zswarm-serve-token)"
+HOST_TS="$(…host Tailscale IPv4…)"   # from the host's `tailscale ip -4`, not guessed
+zswarm --serve "${HOST_TS}:9419" doctor --session crew --timeout-ms 10000
+zswarm --serve "${HOST_TS}:9419" status --session crew
+```
+
+Doctor stays inspect-only on direct endpoints. Optional Tailscale diagnostics on
+the controller remain optional and are not required for loopback/SSH clients.
+
 ## Limits and troubleshooting
 
 | Symptom | What it usually is |
@@ -154,9 +243,15 @@ zswarm --serve 127.0.0.1:9419 doctor --session crew --timeout-ms 10000
 | `warning` / empty `sessions` | Server listed sessions and found none. Start the crew on the desktop, then `--install --session …` or doctor. |
 | `ipc_failed` / wrong desktop | Listener is up but not the desktop IPC. Confirm the task principal is the logged-in account (`Interactive` / `Limited`), not SYSTEM. |
 | `session_missing` | Requested name is not live through the server. `zellij list-sessions` on that desktop. |
-| Unreachable serve / `serve_unreachable` | Task not running, port not bound, or SSH forward not to that loopback port. |
+| Unreachable serve / `serve_unreachable` | Task not running, port not bound, or SSH forward not to that loopback port (or wrong direct Tailscale IP). |
 | `serve_unauthorized` / token mismatch | Same token on install env and controller. Reinstall to rotate. |
 | `stale_listener` | Something else answered on the port without this launch identity. Install does **not** kill arbitrary node/port owners. `--clear` the **owned** task or free the port, then retry. |
 | `serve_not_ready` after register | Task remains. Retry `--install` or `zswarm doctor`. `--clear` only when you intend to remove it. |
+| Tailscale bind refused / verify phase | Address not in `tailscale ip`, daemon not Running, OS interface missing the address (userspace-only), wildcard/hostname input, or Self/root IP conflict. Fix Tailscale or use loopback + SSH. Restart serve after address/profile changes. |
+| Bind `EADDRNOTAVAIL` / `EADDRINUSE` | No fallback listen. Free the port or restore the Tailscale address, then restart so verification runs again. |
 
 Doctor troubleshooting: [doctor.md](doctor.md).
+
+Private TCP Tailscale Serve (loopback backend behind `tailscale serve`) is a
+separate follow-on; this guide does not configure Funnel, HTTPS gateways, or
+PROXY protocol.

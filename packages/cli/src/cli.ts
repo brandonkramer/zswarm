@@ -45,6 +45,7 @@ if (args.op === "serve" && args.install !== true && args.clear !== true) {
       {
         token: process.env.ZSWARM_SERVE_TOKEN,
         launchId: process.env.ZSWARM_SERVE_LAUNCH_ID,
+        env: process.env,
       },
     );
     process.stdout.write(

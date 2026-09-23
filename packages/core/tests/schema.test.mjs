@@ -131,6 +131,7 @@ test("cliUsage lists every flagged param", () => {
   for (const op of OP_NAMES) assert.ok(usage.includes(op));
   assert.ok(usage.includes("always requires a token"));
   assert.equal(usage.includes("off loopback"), false);
+  assert.ok(usage.includes("Tailscale IP") || usage.includes("local Tailscale"));
 });
 
 test("parseCliArgv finds the op when flags come first", () => {

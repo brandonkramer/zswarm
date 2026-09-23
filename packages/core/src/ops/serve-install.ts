@@ -30,6 +30,13 @@ import {
   type ProbeServeOptions,
   type ServeHelloData,
 } from "./serve.js";
+import {
+  authorizeServeListen,
+  SERVE_BIND_REMEDY,
+  SERVE_TAILSCALE_BIN_ENV,
+  type NetworkInterfacesFn,
+  type TailscaleStatusRunner,
+} from "./serve-bind.js";
 import type { OpsResult, ServeInstallDeps, ServePowerShellResult } from "./types.js";
 import { throwIfAborted } from "./util.js";
 
@@ -60,6 +67,8 @@ const HOST_ENV_KEYS = [
   "ZSWARM_ALLOW_SPAWN",
   "ZSWARM_ALLOW_CLOSE",
   "ZSWARM_ALLOW_WORKTREE_REMOVE",
+  /** Optional Tailscale CLI path; re-checked on every task startup, never a token. */
+  SERVE_TAILSCALE_BIN_ENV,
 ] as const;
 
 const CONTROLLER_ENV_KEYS = [
@@ -142,6 +151,9 @@ export type ServeInstallInput = ServeInstallDeps & {
   signal?: AbortSignal;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** Test seams for Tailscale listen verification (before task mutation). */
+  tailscaleStatus?: TailscaleStatusRunner;
+  networkInterfaces?: NetworkInterfacesFn;
 };
 
 export type ServeInstallSuccess = {
@@ -176,6 +188,7 @@ const REMEDY = {
     "This task requires an already logged-in interactive desktop session (LogonType Interactive, RunLevel Limited). It is not a headless boot/SYSTEM service.",
   token:
     "Set the same ZSWARM_SERVE_TOKEN on the server and this caller. The token is stored in the task action (readable by this user and administrators), not encrypted; reinstall to rotate.",
+  bind: SERVE_BIND_REMEDY.literal,
   uncertain:
     "Inspect the zswarm-serve task. The last mutation was interrupted before a confirmed reply; the task may or may not exist. Install/clear does not claim rollback.",
 } as const;
@@ -817,12 +830,6 @@ export async function installServeLogon(
   const remaining = () => remainingOf(deadline, now);
   const env = input.env ?? process.env;
   const { host, label } = parseListenAddress(input.listen);
-  if (!isLoopbackHost(host)) {
-    throw new ZellijError(
-      "serve_auth",
-      `zswarm serve only listens on loopback (127.0.0.1 / ::1); off-machine access is an SSH tunnel to 127.0.0.1 (${host} refused)`,
-    );
-  }
   const token = serveInstallToken(input);
   const secrets = [token];
   throwIfAborted(input.signal);
@@ -832,6 +839,31 @@ export async function installServeLogon(
       ready: false,
       running: false,
       phase: "inspect",
+      cause: "timeout",
+      listen: label,
+      task: SERVE_TASK_NAME,
+    }, secrets, "timeout");
+  }
+
+  // Non-loopback: verify Tailscale + OS ownership before any task mutation.
+  // Installer-time proof is not a permanent permit; every task startup revalidates via startServe.
+  if (!isLoopbackHost(host)) {
+    await authorizeServeListen(host, {
+      env,
+      signal: input.signal,
+      timeoutMs: remaining(),
+      now,
+      tailscaleStatus: input.tailscaleStatus,
+      networkInterfaces: input.networkInterfaces,
+    });
+  }
+  throwIfAborted(input.signal);
+  if (remaining() <= 0) {
+    throw notReadyError("serve --install timed out before task mutation", {
+      installed: false,
+      ready: false,
+      running: false,
+      phase: "verify",
       cause: "timeout",
       listen: label,
       task: SERVE_TASK_NAME,

@@ -25,12 +25,15 @@ export type DispatchDeps = {
   /**
    * Test seam for optional Tailscale `status --json`. Default runs the
    * `tailscale` CLI with a bounded timeout and output cap.
+   * Used by doctor (peer mapping) and by serve bind verification.
    */
   tailscaleStatus?: (input: {
     timeoutMs: number;
     signal?: AbortSignal;
     env: NodeJS.ProcessEnv;
   }) => Promise<{ code: number; stdout: string; stderr: string }>;
+  /** Test seam for OS interface address ownership during Tailscale serve bind. */
+  networkInterfaces?: () => NodeJS.Dict<import("node:os").NetworkInterfaceInfo[]>;
   /** Narrow injectables for Windows `serve --install` / `--clear`. */
   serveInstall?: ServeInstallDeps;
 };

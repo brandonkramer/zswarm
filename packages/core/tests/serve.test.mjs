@@ -320,15 +320,25 @@ test("startServe refuses a non-loopback bind even with a token", async () => {
       startServe("0.0.0.0:0", async () => ({ ok: true, data: {} }), {
         token: "secret",
       }),
-    /loopback/,
+    (err) => {
+      assert.equal(err.code, "serve_auth");
+      assert.match(err.message, /literal|Tailscale|refuses/i);
+      return true;
+    },
   );
   await assert.rejects(
     () =>
       installServeLogon({
         platform: "win32",
         listen: "0.0.0.0:9419",
+        token: "secret",
+        env: { ZSWARM_SERVE_TOKEN: "secret" },
       }),
-    /loopback/,
+    (err) => {
+      assert.equal(err.code, "serve_auth");
+      assert.match(err.message, /literal|Tailscale|refuses/i);
+      return true;
+    },
   );
 });
 

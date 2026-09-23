@@ -171,7 +171,20 @@ export {
   type ServeErrorDetails,
   type ServeHelloData,
   type ServePhase,
+  type StartServeOptions,
 } from "./ops/serve.js";
+export {
+  authorizeServeListen,
+  canonicalizeListenIp,
+  expandIPv6,
+  sameCanonicalIp,
+  SERVE_BIND_REMEDY,
+  SERVE_BIND_STATUS_MAX_BYTES,
+  SERVE_BIND_VERIFY_TIMEOUT_MS,
+  SERVE_TAILSCALE_BIN_ENV,
+  type ServeBindAuthorization,
+  type ServeBindDeps,
+} from "./ops/serve-bind.js";
 export {
   buildServeTaskScript,
   DEFAULT_SERVE_INSTALL_TIMEOUT_MS,

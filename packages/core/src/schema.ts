@@ -486,7 +486,7 @@ export const PARAMS: readonly ParamSpec[] = [
     type: "string",
     flags: ["--listen"],
     description:
-      "serve: bind address (default 127.0.0.1:9419). Reach it from another machine with ZSWARM_SERVE after an SSH tunnel",
+      "serve: bind address (default 127.0.0.1:9419). Loopback needs no Tailscale; a non-loopback literal must be a verified local Tailscale IP (see docs/tailscale.md). Reach via ZSWARM_SERVE / --serve (direct host:port or ssh:// to remote loopback)",
   },
   {
     name: "verbose",
@@ -558,9 +558,9 @@ export function cliUsage(): string {
     "",
     "Guards: writes refuse zswarm's own pane (--allow-self) and exited panes (--force). --expect requires the screen to contain a substring first.",
     "Bus: `zswarm bus --install` once per Zellij session. `--force` closes orphan bus panes and reloads; do not use it as a retry.",
-    "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE / --serve (host:port, tcp://, or ssh://user@host?servePort=9419) plus ZSWARM_SERVE_TOKEN. Serve binds loopback only and always requires a token. ssh:// does not start remote serve. Windows default recipe: `zswarm serve --install` (verified readiness) — see docs/tailscale.md.",
+    "Remote: ZSWARM_SSH (+ ZSWARM_TMP=auto or ZSWARM_SSH_MODE=interactive on Windows). Or run `zswarm serve --listen` next to Zellij and set ZSWARM_SERVE / --serve (host:port, tcp://, or ssh://user@host?servePort=9419) plus ZSWARM_SERVE_TOKEN. Serve defaults to loopback and always requires a token; an explicit local Tailscale IP is allowed only after host verification. ssh:// does not start remote serve. Windows default recipe: `zswarm serve --install` (verified readiness) — see docs/tailscale.md.",
     "Doctor: `zswarm doctor --session crew` inspects local, --ssh, and --serve routes without installs, pane changes, or plugin launch. See docs/doctor.md and docs/tailscale.md.",
-    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZSWARM_FROM, ZELLIJ_PANE_ID, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_SSH_BIN, ZSWARM_SSH_OPTS, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN, ZSWARM_CACHE_TTL_MS",
+    "Env: ZSWARM_BIN, ZSWARM_PATH, ZSWARM_SESSION, ZSWARM_SELF_PANE, ZSWARM_FROM, ZELLIJ_PANE_ID, ZELLIJ_SESSION_NAME, ZSWARM_BUS, ZSWARM_BUS_PLUGIN, ZSWARM_SSH, ZSWARM_SSH_BIN, ZSWARM_SSH_OPTS, ZSWARM_TMP, ZSWARM_SSH_MODE, ZSWARM_SERVE, ZSWARM_SERVE_TOKEN, ZSWARM_TAILSCALE_BIN, ZSWARM_CACHE_TTL_MS",
     "",
   );
   return lines.join("\n");

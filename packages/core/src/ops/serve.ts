@@ -1,8 +1,16 @@
-import { createServer, connect, type Socket } from "node:net";
+import { createServer, connect, type Server, type Socket } from "node:net";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { hostname } from "node:os";
 import { ZellijError } from "../errors.js";
+import {
+  authorizeServeListen,
+  SERVE_BIND_REMEDY,
+  SERVE_BIND_VERIFY_TIMEOUT_MS,
+  type NetworkInterfacesFn,
+  type ServeBindDeps,
+  type TailscaleStatusRunner,
+} from "./serve-bind.js";
 import type { OpsResult } from "./types.js";
 
 export const DEFAULT_SERVE_LISTEN = "127.0.0.1:9419";
@@ -179,13 +187,20 @@ export type ServeDispatch = (
   args: Record<string, unknown>,
 ) => Promise<OpsResult>;
 
-export type StartServeOptions = {
+export type StartServeOptions = ServeBindDeps & {
   token?: string;
   maxRequestBytes?: number;
   idleTimeoutMs?: number;
   maxConnections?: number;
   /** Additive hello field; omitted on ordinary foreground `serve --listen`. */
   launchId?: string;
+  /**
+   * Test seam for the TCP listener. Production uses `node:net` createServer.
+   * Bind failures must surface without falling back to another address.
+   */
+  createServer?: (
+    connectionListener?: (socket: Socket) => void,
+  ) => Pick<Server, "listen" | "close" | "on" | "address">;
 };
 
 function unauthorized(): OpsResult {
@@ -280,36 +295,38 @@ function handleServeControl(
   return { handled: false };
 }
 
-export function startServe(
+export async function startServe(
   listen: string | undefined,
   dispatch: ServeDispatch,
   options: StartServeOptions = {},
 ): Promise<{ label: string; close: () => Promise<void> }> {
   const { host, port } = parseListenAddress(listen);
-  if (!isLoopbackHost(host)) {
-    return Promise.reject(
-      new ZellijError(
-        "serve_auth",
-        `zswarm serve only listens on loopback (127.0.0.1 / ::1); off-machine access is an SSH tunnel to 127.0.0.1 (${host} refused)`,
-      ),
-    );
-  }
+  // Token and basic input before any Tailscale CLI / listen effects.
   const token = options.token?.trim() || undefined;
   if (!token) {
-    return Promise.reject(
-      new ZellijError(
-        "serve_auth",
-        "zswarm serve requires ZSWARM_SERVE_TOKEN; another local OS user can connect to 127.0.0.1",
-      ),
+    throw new ZellijError(
+      "serve_auth",
+      "zswarm serve requires ZSWARM_SERVE_TOKEN; another local OS user can connect to 127.0.0.1",
+      { remedy: SERVE_BIND_REMEDY.token },
     );
   }
+  const authorized = await authorizeServeListen(host, {
+    env: options.env,
+    signal: options.signal,
+    timeoutMs: options.timeoutMs ?? SERVE_BIND_VERIFY_TIMEOUT_MS,
+    now: options.now,
+    tailscaleStatus: options.tailscaleStatus,
+    networkInterfaces: options.networkInterfaces,
+  });
+  const bindHost = authorized.bindHost;
   const maxRequestBytes = options.maxRequestBytes ?? SERVE_MAX_REQUEST_BYTES;
   const idleTimeoutMs = options.idleTimeoutMs ?? SERVE_IDLE_TIMEOUT_MS;
   const maxConnections = options.maxConnections ?? SERVE_MAX_CONNECTIONS;
   const hello = helloData(randomUUID(), options.launchId);
+  const makeServer = options.createServer ?? createServer;
   return new Promise((resolve, reject) => {
     const sockets = new Set<Socket>();
-    const server = createServer((socket) => {
+    const server = makeServer((socket) => {
       socket.on("error", () => {
         socket.destroy();
       });
@@ -399,13 +416,29 @@ export function startServe(
         }
       }
     });
-    server.on("error", reject);
-    server.listen(port, host, () => {
+    server.on("error", (err: NodeJS.ErrnoException) => {
+      const code = typeof err.code === "string" ? err.code : "listen_failed";
+      reject(
+        new ZellijError(
+          "serve_auth",
+          `zswarm serve failed to bind ${formatListenLabel(bindHost, port)} (${code}); no fallback listen address`,
+          {
+            phase: "bind",
+            cause: code,
+            host: bindHost,
+            port,
+            remedy: SERVE_BIND_REMEDY.bind,
+          },
+        ),
+      );
+    });
+    // Exact verified address only — never 0.0.0.0 / :: / a different host.
+    server.listen(port, bindHost, () => {
       const addr = server.address();
       const actualPort =
         typeof addr === "object" && addr ? addr.port : port;
       resolve({
-        label: formatListenLabel(host, actualPort),
+        label: formatListenLabel(bindHost, actualPort),
         close: () =>
           new Promise((done, fail) => {
             for (const open of sockets) open.destroy();
@@ -415,6 +448,8 @@ export function startServe(
     });
   });
 }
+
+export type { NetworkInterfacesFn, TailscaleStatusRunner };
 
 /** Direct host:port / tcp:// only. ssh:// URIs are resolved by serve-tunnel. */
 export function parseServeTarget(raw: string): { host: string; port: number } {

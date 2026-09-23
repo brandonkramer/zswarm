@@ -46,14 +46,16 @@ op.
 [`zswarm serve --install`](../../../docs/tailscale.md) on the already-logged-in
 desktop (Interactive/Limited logon task, loopback + token), then
 `--serve 'ssh://user@host?servePort=9419'` from the controller (OpenSSH over
-the tailnet — not Tailscale SSH). That guide covers readiness, token storage,
-bus approval, and login/reboot limits.
+the tailnet — not Tailscale SSH). That guide also covers an **optional**
+verified Tailscale-IP bind for direct TCP. Readiness, token storage, bus
+approval, and login/reboot limits are documented there.
 
 ```bash
-# On the host, in the session that owns Zellij:
+# On the host, in the session that owns Zellij (default loopback):
 ZSWARM_SERVE_TOKEN=secret zswarm serve --listen 127.0.0.1:9419
 # Token is required on loopback too: another local OS user can connect to 127.0.0.1.
-# Non-loopback listen is refused; off-machine access is an SSH tunnel to 127.0.0.1.
+# Optional: bind a verified local Tailscale IP (see docs/tailscale.md):
+#   zswarm serve --listen "$(tailscale ip -4):9419"
 # Windows verified logon task: zswarm serve --install --listen 127.0.0.1:9419 --session crew --timeout-ms 30000
 # (Start-ScheduledTask is asynchronous; install waits for authenticated hello + host visibility.)
 
@@ -62,6 +64,8 @@ zswarm --serve 'ssh://user@host?servePort=9419' status --session crew
 # Or a manual LocalForward to an existing endpoint:
 ssh -fN -L 9419:127.0.0.1:9419 user@host
 ZSWARM_SERVE=127.0.0.1:9419 ZSWARM_SERVE_TOKEN=secret zswarm list
+# Direct endpoint when the host bound its Tailscale IP:
+# zswarm --serve '<host-tailscale-ip>:9419' status --session crew
 ```
 
 `ZSWARM_SSH` only forwards Zellij. Git worktrees, `diff`, and `checkpoint` stay
