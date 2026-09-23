@@ -13,9 +13,12 @@ to the Windows host over the tailnet
 Linux/macOS-CLI feature). If the Zellij crew actually runs in **WSL**, treat it
 as a Linux host (Unix sockets / `$TMPDIR`), not this Interactive logon task.
 
-`zswarm serve --install` and these docs do **not** install or change Tailscale,
-OpenSSH, tailnet ACLs, firewalls, or tasks on a live host. Tests use isolated
-fixtures.
+`zswarm serve --install` creates or updates the **owned** `zswarm-serve`
+Interactive logon task for the current Windows user, then waits until
+authenticated hello and host inspection prove this installation. It does
+**not** install or change Tailscale, OpenSSH, tailnet ACLs, or firewalls.
+Tests and PR validation use isolated fixtures; they do not operate a live
+human-host task or tailnet.
 
 ## Prerequisites
 
@@ -124,12 +127,19 @@ before exit; MCP reuses it until shutdown. There is no SSH fallback if serve is
 down. See [performance.md](performance.md) for lease/hello details and
 [doctor.md](doctor.md) for layered checks.
 
-Optional manual foreground forward (not the default; no automatic ControlMaster):
+Optional manual foreground forward (not the default; no automatic ControlMaster).
+Keep this `ssh -N` tunnel in its **own terminal**. While it stays open, run
+doctor/status from a **second terminal**:
 
 ```bash
 ssh -N -T -o ExitOnForwardFailure=yes \
   -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
   -L 127.0.0.1:9419:127.0.0.1:9419 user@crew-host
+```
+
+Then, in another terminal:
+
+```bash
 zswarm --serve 127.0.0.1:9419 doctor --session crew --timeout-ms 10000
 ```
 

@@ -9,8 +9,10 @@ import { encodePowerShellCommand } from "../zellij/ipc.js";
 import {
   coverHostReport,
   hostDoctorRequest,
+  isRequiredFailure,
   mergeHostReply,
   type DoctorCheck,
+  type DoctorReport,
 } from "./doctor.js";
 import {
   callServe,
@@ -18,6 +20,7 @@ import {
   parseListenAddress,
   probeServe,
   redactServeSecret,
+  SERVE_CORE_VERSION,
   SERVE_HELLO_TIMEOUT_MS,
   SERVE_LAUNCH_ID_ENV,
   SERVE_PROTOCOL,
@@ -27,13 +30,14 @@ import {
   type ProbeServeOptions,
   type ServeHelloData,
 } from "./serve.js";
-import type { OpsResult, ServeInstallDeps } from "./types.js";
+import type { OpsResult, ServeInstallDeps, ServePowerShellResult } from "./types.js";
 import { throwIfAborted } from "./util.js";
 
 /** Overall install/readiness deadline when `timeoutMs` is omitted. */
 export const DEFAULT_SERVE_INSTALL_TIMEOUT_MS = 30_000;
 export const SERVE_NOT_READY_CODE = "serve_not_ready";
 export const SERVE_TASK_OWNED_CODE = "serve_task_owned";
+export const SERVE_TASK_VERSION_ENV = "ZSWARM_CORE_VERSION";
 
 const HOST_ENV_KEYS = [
   "ZSWARM_BIN",
@@ -50,6 +54,12 @@ const HOST_ENV_KEYS = [
   "TEMP",
   "TMP",
   "PATH",
+  "ZSWARM_READONLY",
+  "ZSWARM_ALLOW_PANES",
+  "ZSWARM_DENY_PANES",
+  "ZSWARM_ALLOW_SPAWN",
+  "ZSWARM_ALLOW_CLOSE",
+  "ZSWARM_ALLOW_WORKTREE_REMOVE",
 ] as const;
 
 const CONTROLLER_ENV_KEYS = [
@@ -62,16 +72,44 @@ const CONTROLLER_ENV_KEYS = [
   "ZSWARM_REMOTE_SHELL",
 ] as const;
 
+const WELL_KNOWN_SIDS = new Set(["S-1-5-18", "S-1-5-19", "S-1-5-20"]);
+
 const PS_PREAMBLE = [
   "$ErrorActionPreference = 'Stop'",
   "$ProgressPreference = 'SilentlyContinue'",
   "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false",
   "function Get-ZswarmIdentity {",
   "  $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()",
-  "  if (-not $id -or [string]::IsNullOrWhiteSpace($id.Name)) {",
-  "    throw 'cannot resolve the current Windows account for the Interactive logon task'",
+  "  if (-not $id -or -not $id.User -or [string]::IsNullOrWhiteSpace($id.User.Value)) {",
+  "    throw 'cannot resolve the current Windows SID for the Interactive logon task'",
   "  }",
-  "  return $id.Name",
+  "  $name = [string]$id.Name",
+  "  if ([string]::IsNullOrWhiteSpace($name)) {",
+  "    throw 'cannot resolve the current Windows account name for the Interactive logon task'",
+  "  }",
+  "  return @{ name = $name; sid = [string]$id.User.Value }",
+  "}",
+  "function Resolve-ZswarmSid($account) {",
+  "  if ($null -eq $account) { return $null }",
+  "  $text = [string]$account",
+  "  if ([string]::IsNullOrWhiteSpace($text)) { return $null }",
+  "  if ($text -match '^S-\\d-') { return $text }",
+  "  try {",
+  "    $nt = New-Object System.Security.Principal.NTAccount($text)",
+  "    $sid = $nt.Translate([System.Security.Principal.SecurityIdentifier])",
+  "    if (-not $sid -or [string]::IsNullOrWhiteSpace($sid.Value)) { return $null }",
+  "    return [string]$sid.Value",
+  "  } catch {",
+  "    return $null",
+  "  }",
+  "}",
+  "function Assert-ZswarmCurrentOwner($task) {",
+  "  $identity = Get-ZswarmIdentity",
+  "  $existingSid = Resolve-ZswarmSid ([string]$task.Principal.UserId)",
+  "  if ([string]::IsNullOrWhiteSpace($existingSid) -or $existingSid -ne $identity.sid) {",
+  "    throw 'zswarm-serve is owned by a different or unverified Windows account'",
+  "  }",
+  "  return $identity",
   "}",
   "function Write-ZswarmJson($obj) {",
   "  $json = $obj | ConvertTo-Json -Compress -Depth 6",
@@ -88,7 +126,7 @@ export type ServeTaskAction = "inspect" | "register" | "start" | "stop" | "unreg
 export type ServePowerShellExec = (
   script: string,
   options: { timeoutMs: number; signal?: AbortSignal },
-) => Promise<{ code: number; stdout: string; stderr: string }>;
+) => Promise<ServePowerShellResult>;
 
 export type ServeCliLaunch = {
   execPath: string;
@@ -113,7 +151,7 @@ export type ServeInstallSuccess = {
   task: string;
   listen: string;
   command: string;
-  principal: { userId: string; logonType: string; runLevel: string };
+  principal: { userId: string; logonType: string; runLevel: string; userSid?: string };
   server: ServeHelloData;
   session: string | null;
   sessions: string[];
@@ -133,7 +171,7 @@ const REMEDY = {
   cli:
     "Cannot resolve a zswarm CLI launcher for the logon task. process.argv[1] in MCP is the MCP entrypoint, not the CLI. Set ZSWARM_SERVE_CLI to the CLI script (cli.js / zswarm.mjs), or run `zswarm serve --install` from the CLI.",
   owner:
-    "An existing zswarm-serve task belongs to a different Windows account. Install does not overwrite another user's task. Run --install as the desktop account that owns the crew, or --clear from that account.",
+    "An existing zswarm-serve task belongs to a different or unverified Windows account. Install does not overwrite another user's task. Run --install as the desktop account that owns the crew, or --clear from that account.",
   interactive:
     "This task requires an already logged-in interactive desktop session (LogonType Interactive, RunLevel Limited). It is not a headless boot/SYSTEM service.",
   token:
@@ -257,7 +295,7 @@ export function resolveServeCliLaunch(input: {
   );
 }
 
-/** Host Zellij/IPC env for the task child; controller routing is stripped. */
+/** Host Zellij/IPC + configured server policy; controller routing is stripped. */
 export function serveTaskChildEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {};
   for (const key of HOST_ENV_KEYS) {
@@ -269,27 +307,44 @@ export function serveTaskChildEnv(env: NodeJS.ProcessEnv): Record<string, string
   return out;
 }
 
-export function sameWindowsAccount(a: string, b: string): boolean {
-  const norm = (s: string) => s.trim().replace(/\//g, "\\").toLowerCase();
-  const na = norm(a);
-  const nb = norm(b);
-  if (!na || !nb) return false;
-  if (na === nb) return true;
-  const parts = (s: string) => {
-    const local = s.includes("@") ? s.slice(0, s.indexOf("@")) : s;
-    const bits = local.split("\\");
-    return { domain: bits.length > 1 ? bits[0]! : "", user: bits[bits.length - 1]! };
+/** Child env persisted in the task, including package version and optional launch id. */
+export function serveTaskLaunchEnv(
+  env: NodeJS.ProcessEnv,
+  launchId?: string,
+): Record<string, string> {
+  const out: Record<string, string> = {
+    ...serveTaskChildEnv(env),
+    [SERVE_TASK_VERSION_ENV]: SERVE_CORE_VERSION,
   };
-  const aa = parts(na);
-  const bb = parts(nb);
-  if (!aa.user || aa.user !== bb.user) return false;
-  if (!aa.domain || !bb.domain) return true;
-  return aa.domain === bb.domain;
+  const id = launchId?.trim();
+  if (id) out[SERVE_LAUNCH_ID_ENV] = id;
+  return out;
+}
+
+export function isWindowsSid(value: string): boolean {
+  return /^S-\d-\d+(-\d+)+$/i.test(value.trim());
+}
+
+/** Verified SID equality. Account-name / UPN resemblance is not identity. */
+export function sameWindowsSid(a: string, b: string): boolean {
+  const na = a.trim().toUpperCase();
+  const nb = b.trim().toUpperCase();
+  if (!na || !nb || !isWindowsSid(na) || !isWindowsSid(nb)) return false;
+  return na === nb;
+}
+
+/** @deprecated Use sameWindowsSid; names are not verified identity. */
+export function sameWindowsAccount(a: string, b: string): boolean {
+  return sameWindowsSid(a, b);
 }
 
 function privilegedAccount(userId: string): boolean {
   return /(?:^|\\)(system|local service|network service)$/i.test(userId.trim()) ||
     /^nt authority\\/i.test(userId.trim());
+}
+
+function privilegedSid(sid: string): boolean {
+  return WELL_KNOWN_SIDS.has(sid.trim().toUpperCase());
 }
 
 export function buildServeTaskScript(
@@ -303,19 +358,23 @@ export function buildServeTaskScript(
       "  $task = Get-ZswarmTask",
       "} catch {",
       "  if (Test-ZswarmMissing $_) {",
-      "    Write-ZswarmJson @{ exists = $false; currentUser = (Get-ZswarmIdentity) }",
+      "    $identity = Get-ZswarmIdentity",
+      "    Write-ZswarmJson @{ exists = $false; currentUser = $identity.name; currentSid = $identity.sid }",
       "    exit 0",
       "  }",
       "  throw",
       "}",
+      "$identity = Get-ZswarmIdentity",
       "$action = @($task.Actions)[0]",
       "$principal = $task.Principal",
       "Write-ZswarmJson @{",
       "  exists = $true",
-      "  currentUser = (Get-ZswarmIdentity)",
+      "  currentUser = $identity.name",
+      "  currentSid = $identity.sid",
       "  taskName = [string]$task.TaskName",
       "  state = [string]$task.State",
       "  userId = [string]$principal.UserId",
+      "  userSid = (Resolve-ZswarmSid ([string]$principal.UserId))",
       "  logonType = [string]$principal.LogonType",
       "  runLevel = [string]$principal.RunLevel",
       "  execute = [string]$action.Execute",
@@ -329,12 +388,19 @@ export function buildServeTaskScript(
     return [
       PS_PREAMBLE,
       `$cmd = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${commandB64}'))`,
-      "$userId = Get-ZswarmIdentity",
+      "try {",
+      "  $existing = Get-ZswarmTask",
+      "  $identity = Assert-ZswarmCurrentOwner $existing",
+      "} catch {",
+      "  if (-not (Test-ZswarmMissing $_)) { throw }",
+      "  $identity = Get-ZswarmIdentity",
+      "}",
+      "$userId = $identity.name",
       "$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/c ' + $cmd)",
       "$principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited",
       "$trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId",
       `Register-ScheduledTask -TaskName '${SERVE_TASK_NAME}' -Action $action -Principal $principal -Trigger $trigger -Force | Out-Null`,
-      "Write-ZswarmJson @{ registered = $true; userId = $userId; logonType = 'Interactive'; runLevel = 'Limited'; taskName = '" +
+      "Write-ZswarmJson @{ registered = $true; userId = $userId; userSid = $identity.sid; logonType = 'Interactive'; runLevel = 'Limited'; taskName = '" +
         SERVE_TASK_NAME +
         "' }",
     ].join("\n");
@@ -342,6 +408,12 @@ export function buildServeTaskScript(
   if (action === "start") {
     return [
       PS_PREAMBLE,
+      "try {",
+      "  $task = Get-ZswarmTask",
+      "  [void](Assert-ZswarmCurrentOwner $task)",
+      "} catch {",
+      "  throw",
+      "}",
       `Start-ScheduledTask -TaskName '${SERVE_TASK_NAME}'`,
       "Write-ZswarmJson @{ started = $true; taskName = '" + SERVE_TASK_NAME + "' }",
     ].join("\n");
@@ -350,6 +422,8 @@ export function buildServeTaskScript(
     return [
       PS_PREAMBLE,
       "try {",
+      "  $task = Get-ZswarmTask",
+      "  [void](Assert-ZswarmCurrentOwner $task)",
       `  Stop-ScheduledTask -TaskName '${SERVE_TASK_NAME}'`,
       "} catch {",
       "  if (-not (Test-ZswarmMissing $_)) { throw }",
@@ -359,27 +433,55 @@ export function buildServeTaskScript(
   }
   return [
     PS_PREAMBLE,
+    "$identity = Get-ZswarmIdentity",
+    "$stopped = $false",
+    "$stopFailed = $false",
+    "$stopError = $null",
     "try {",
-    `  Stop-ScheduledTask -TaskName '${SERVE_TASK_NAME}' -ErrorAction SilentlyContinue`,
-    "} catch { }",
+    "  $task = Get-ZswarmTask",
+    "  [void](Assert-ZswarmCurrentOwner $task)",
+    `  Stop-ScheduledTask -TaskName '${SERVE_TASK_NAME}'`,
+    "  $stopped = $true",
+    "} catch {",
+    "  if (Test-ZswarmMissing $_) {",
+    "    Write-ZswarmJson @{ cleared = $true; missing = $true; stopped = $false; taskName = '" +
+      SERVE_TASK_NAME +
+      "' }",
+    "    exit 0",
+    "  }",
+    "  $stopFailed = $true",
+    "  $stopError = [string]$_.Exception.Message",
+    "}",
     "try {",
     `  Unregister-ScheduledTask -TaskName '${SERVE_TASK_NAME}' -Confirm:$false`,
     "} catch {",
     "  if (Test-ZswarmMissing $_) {",
-    "    Write-ZswarmJson @{ cleared = $true; missing = $true; taskName = '" + SERVE_TASK_NAME + "' }",
+    "    Write-ZswarmJson @{ cleared = $true; missing = $true; stopped = $stopped; stopFailed = $stopFailed; stopError = $stopError; taskName = '" +
+      SERVE_TASK_NAME +
+      "' }",
     "    exit 0",
     "  }",
     "  throw",
     "}",
-    "Write-ZswarmJson @{ cleared = $true; taskName = '" + SERVE_TASK_NAME + "' }",
+    "Write-ZswarmJson @{ cleared = $true; stopped = $stopped; stopFailed = $stopFailed; stopError = $stopError; taskName = '" +
+      SERVE_TASK_NAME +
+      "' }",
   ].join("\n");
 }
 
 function runPowerShellDefault(
   script: string,
   options: { timeoutMs: number; signal?: AbortSignal },
-): Promise<{ code: number; stdout: string; stderr: string }> {
-  const timeout = Math.max(1, Math.floor(options.timeoutMs));
+): Promise<ServePowerShellResult> {
+  const timeout = Math.floor(options.timeoutMs);
+  if (timeout <= 0) {
+    return Promise.resolve({
+      code: 1,
+      stdout: "",
+      stderr: "no remaining budget",
+      timedOut: true,
+    });
+  }
   return new Promise((resolve) => {
     execFile(
       "powershell.exe",
@@ -397,30 +499,40 @@ function runPowerShellDefault(
         maxBuffer: 1024 * 1024,
       },
       (error, stdout, stderr) => {
+        const err = error as NodeJS.ErrnoException & { killed?: boolean } | null;
+        const aborted =
+          Boolean(options.signal?.aborted) ||
+          err?.name === "AbortError" ||
+          err?.code === "ABORT_ERR";
+        const timedOut = Boolean(err?.killed) && !aborted;
         const code =
-          error && typeof (error as { code?: unknown }).code === "number"
-            ? (error as { code: number }).code
-            : error
-              ? 1
-              : 0;
+          aborted || timedOut
+            ? 1
+            : error && typeof (error as { code?: unknown }).code === "number"
+              ? (error as { code: number }).code
+              : error
+                ? 1
+                : 0;
         resolve({
           code,
           stdout: String(stdout ?? ""),
           stderr: String(stderr ?? ""),
+          ...(aborted ? { aborted: true } : {}),
+          ...(timedOut ? { timedOut: true } : {}),
         });
       },
     );
   });
 }
 
-function parseTaskJson(stdout: string, token: string): Record<string, unknown> {
+function parseTaskJson(stdout: string, secrets: string[]): Record<string, unknown> {
   const text = stdout.trim();
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end < start) {
     throw new ZellijError(
       "zellij_failed",
-      `serve task helper returned no JSON (${redactServeSecret(text.slice(0, 200) || "no output", token)})`,
+      `serve task helper returned no JSON (${scrubDiagnosticText(text.slice(0, 200) || "no output", secrets)})`,
     );
   }
   try {
@@ -451,14 +563,39 @@ function serveInstallToken(input: { token?: string; env?: NodeJS.ProcessEnv }): 
   return secret;
 }
 
-function scrubSecrets<T>(value: T, token: string): T {
-  if (!token) return value;
-  if (typeof value === "string") return redactServeSecret(value, token) as T;
-  if (Array.isArray(value)) return value.map((item) => scrubSecrets(item, token)) as T;
+function tokenFromCommand(command: string): string[] {
+  const found: string[] = [];
+  const matches = command.matchAll(/ZSWARM_SERVE_TOKEN=([^"&\r\n]+)/g);
+  for (const match of matches) {
+    const value = match[1]?.trim();
+    if (value) found.push(value);
+  }
+  return found;
+}
+
+function scrubDiagnosticText(text: string, secrets: string[]): string {
+  let out = text;
+  for (const secret of secrets) {
+    if (!secret) continue;
+    out = redactServeSecret(out, secret);
+    const utf8 = Buffer.from(secret, "utf8").toString("base64");
+    if (utf8.length >= 4) out = out.split(utf8).join("***");
+    const utf16 = Buffer.from(secret, "utf16le").toString("base64");
+    if (utf16.length >= 4) out = out.split(utf16).join("***");
+  }
+  out = out.replace(/FromBase64String\('([^']*)'\)/g, "FromBase64String('***')");
+  out = out.replace(/-EncodedCommand\s+[A-Za-z0-9+/]+=*/g, "-EncodedCommand ***");
+  out = out.replace(/[A-Za-z0-9+/]{40,}={0,2}/g, "***");
+  return out;
+}
+
+function scrubSecrets<T>(value: T, secrets: string[]): T {
+  if (typeof value === "string") return scrubDiagnosticText(value, secrets) as T;
+  if (Array.isArray(value)) return value.map((item) => scrubSecrets(item, secrets)) as T;
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = scrubSecrets(nested, token);
+      out[key] = scrubSecrets(nested, secrets);
     }
     return out as T;
   }
@@ -475,8 +612,15 @@ function commandFromArguments(raw: string | undefined): string {
   return text;
 }
 
-function taskMatchesCommand(argumentsText: string | undefined, command: string): boolean {
-  return commandFromArguments(argumentsText) === command;
+export function serveCommandFingerprint(command: string): string {
+  return command
+    .replace(/set "ZSWARM_SERVE_LAUNCH_ID=[^"]*"&& /g, "")
+    .replace(/&& set "ZSWARM_SERVE_LAUNCH_ID=[^"]*"/g, "");
+}
+
+function launchIdFromCommand(command: string): string {
+  const match = command.match(/set "ZSWARM_SERVE_LAUNCH_ID=([^"]*)"/);
+  return match?.[1]?.trim() ?? "";
 }
 
 function asString(value: unknown): string {
@@ -494,8 +638,25 @@ function checkById(checks: DoctorCheck[], id: string): DoctorCheck | undefined {
   return checks.find((item) => item.id === id);
 }
 
-function evaluateHostReadiness(
+function hostReportFromMerged(
+  merged: { session?: string | null; sessionOrigin?: string },
   checks: DoctorCheck[],
+  explicitSession: string | null,
+): DoctorReport {
+  return {
+    route: {
+      transport: "local",
+      endpoint: "host",
+      session: merged.session ?? explicitSession,
+      sessionOrigin:
+        merged.sessionOrigin ?? (explicitSession ? "explicit" : "unresolved"),
+    },
+    checks,
+  };
+}
+
+function evaluateHostReadiness(
+  report: DoctorReport,
   explicitSession: string | null,
 ): {
   ready: boolean;
@@ -506,58 +667,27 @@ function evaluateHostReadiness(
   session: string | null;
   sessions: string[];
 } {
+  const checks = report.checks;
   const sessions = liveSessionsFrom(checks);
   const sessionRow = checkById(checks, "session");
   const sessionName =
     typeof sessionRow?.detail.session === "string" ? sessionRow.detail.session : explicitSession;
-
-  const failRow = (row: DoctorCheck | undefined, phase: string) =>
-    row
-      ? {
-          ready: false as const,
-          phase,
-          cause: row.code,
-          remedy: row.remedy ?? REMEDY.notReady,
-          session: sessionName,
-          sessions,
-        }
-      : null;
-
-  const binary = checkById(checks, "zellij_binary");
-  if (binary?.state === "fail") return failRow(binary, "host")!;
-  const ipc = checkById(checks, "zellij_ipc");
-  if (ipc?.state === "fail") {
+  const failed = checks.filter((item) => isRequiredFailure(report, item));
+  if (failed.length > 0) {
+    const row = failed[0]!;
     return {
       ready: false,
-      phase: "host",
-      cause: ipc.code,
-      remedy: ipc.remedy ?? REMEDY.ipc,
+      phase: row.id === "session" ? "session" : "host",
+      cause: row.code,
+      remedy: row.remedy ?? (row.id === "zellij_ipc" ? REMEDY.ipc : row.id === "session" ? REMEDY.session : REMEDY.notReady),
       session: sessionName,
       sessions,
     };
   }
-  const listed = checkById(checks, "zellij_sessions");
-  if (listed?.state === "fail") return failRow(listed, "host")!;
-  const hostRequest = checkById(checks, "host_request");
-  if (hostRequest?.state === "fail") return failRow(hostRequest, "host")!;
-
   if (explicitSession) {
-    const present =
-      sessionRow?.state === "ok" &&
-      (sessionRow.code === "session_present" || sessions.includes(explicitSession));
-    if (!present) {
-      return {
-        ready: false,
-        phase: "session",
-        cause: sessionRow?.code === "session_missing" ? "session_missing" : sessionRow?.code ?? "session_missing",
-        remedy: sessionRow?.remedy ?? REMEDY.session,
-        session: explicitSession,
-        sessions,
-      };
-    }
     return { ready: true, session: explicitSession, sessions };
   }
-
+  const listed = checkById(checks, "zellij_sessions");
   const empty = sessions.length === 0 || listed?.code === "sessions_none";
   if (empty) {
     return {
@@ -574,10 +704,10 @@ function evaluateHostReadiness(
 function notReadyError(
   message: string,
   details: Record<string, unknown>,
-  token: string,
+  secrets: string[],
   code = SERVE_NOT_READY_CODE,
 ): ZellijError {
-  return new ZellijError(code, message, scrubSecrets(details, token));
+  return new ZellijError(code, scrubDiagnosticText(message, secrets), scrubSecrets(details, secrets));
 }
 
 async function runTask(
@@ -586,7 +716,7 @@ async function runTask(
     run: ServePowerShellExec;
     timeoutMs: number;
     signal?: AbortSignal;
-    token: string;
+    secrets: string[];
     command?: string;
   },
 ): Promise<Record<string, unknown>> {
@@ -595,16 +725,38 @@ async function runTask(
     timeoutMs: input.timeoutMs,
     signal: input.signal,
   });
-  if (result.code !== 0) {
-    throw new ZellijError(
-      "zellij_failed",
-      `serve --${action === "unregister" ? "clear" : "install"} ${action} failed: ${redactServeSecret(
-        (result.stderr || result.stdout).trim() || "no output",
-        input.token,
-      )}`,
-    );
+  if (result.code === 0) {
+    try {
+      return parseTaskJson(result.stdout, input.secrets);
+    } catch (err) {
+      if (result.aborted || input.signal?.aborted) {
+        throw new ZellijError("cancelled", "operation cancelled");
+      }
+      if (result.timedOut) {
+        throw new ZellijError("timeout", `serve task ${action} timed out`);
+      }
+      throw err;
+    }
   }
-  return parseTaskJson(result.stdout, input.token);
+  if (result.aborted || input.signal?.aborted) {
+    throw new ZellijError("cancelled", "operation cancelled");
+  }
+  if (result.timedOut) {
+    throw new ZellijError("timeout", `serve task ${action} timed out`);
+  }
+  throw new ZellijError(
+    "zellij_failed",
+    `serve --${action === "unregister" ? "clear" : "install"} ${action} failed`,
+    scrubSecrets(
+      {
+        phase: action,
+        cause: "helper_failed",
+        exitCode: result.code,
+        stderr: scrubDiagnosticText((result.stderr || result.stdout).trim().slice(0, 400), input.secrets),
+      },
+      input.secrets,
+    ),
+  );
 }
 
 function remainingOf(deadline: number, now: () => number): number {
@@ -658,6 +810,7 @@ export async function installServeLogon(
     );
   }
   const token = serveInstallToken(input);
+  const secrets = [token];
   throwIfAborted(input.signal);
   if (remaining() <= 0) {
     throw notReadyError("serve --install timed out before task mutation", {
@@ -668,7 +821,7 @@ export async function installServeLogon(
       cause: "timeout",
       listen: label,
       task: SERVE_TASK_NAME,
-    }, token, "timeout");
+    }, secrets, "timeout");
   }
 
   const launch = resolveServeCliLaunch({
@@ -677,20 +830,13 @@ export async function installServeLogon(
     argv: input.argv,
     env,
   });
-  const launchId = (input.launchId ?? randomUUID()).trim();
-  const childEnv = {
-    ...serveTaskChildEnv(env),
-    [SERVE_LAUNCH_ID_ENV]: launchId,
-  };
-  const command = serveLogonCommand(launch.execPath, launch.scriptPath, label, token, childEnv);
-  const redactedCommand = redactServeSecret(command, token);
   const run = input.runPowerShell ?? runPowerShellDefault;
   const probe = input.probeServe ?? probeServe;
   const call = input.callServe ??
     ((target: string, args: Record<string, unknown>, options: CallServeOptions) =>
       callServe(target, args, options));
   const explicitSession = input.session?.trim() || null;
-  const psBound = () => Math.max(1, Math.min(20_000, remaining()));
+  const requestedLaunchId = input.launchId?.trim() || "";
 
   const partial = (extra: Record<string, unknown>): Record<string, unknown> =>
     scrubSecrets(
@@ -700,123 +846,187 @@ export async function installServeLogon(
         running: false,
         task: SERVE_TASK_NAME,
         listen: label,
-        command: redactedCommand,
         ...extra,
       },
-      token,
+      secrets,
     );
 
-  throwIfAborted(input.signal);
+  const assertRunnable = (phase: string, extra: Record<string, unknown> = {}): number => {
+    if (input.signal?.aborted) {
+      throw notReadyError("serve --install cancelled", {
+        ...partial({ phase, cause: "cancelled", ...extra }),
+      }, secrets, "cancelled");
+    }
+    const left = remaining();
+    if (left <= 0) {
+      throw notReadyError(`serve --install timed out during ${phase}`, {
+        ...partial({ phase, cause: "timeout", ...extra }),
+      }, secrets, "timeout");
+    }
+    return Math.min(20_000, left);
+  };
+
+  const rethrowKnown = (err: unknown, extra: Record<string, unknown>): never => {
+    if (err instanceof ZellijError && (err.code === "cancelled" || err.code === "timeout")) {
+      throw notReadyError(err.message, {
+        ...partial(extra),
+        ...(err.details ?? {}),
+        cause: err.code,
+        phase: typeof extra.phase === "string" ? extra.phase : err.code,
+      }, secrets, err.code);
+    }
+    throw err;
+  };
+
+  const inspectBudget = assertRunnable("inspect");
   const inspected = await runTask("inspect", {
     run,
-    timeoutMs: psBound(),
+    timeoutMs: inspectBudget,
     signal: input.signal,
-    token,
+    secrets,
   });
   const exists = inspected.exists === true;
-  const currentUser = asString(inspected.currentUser);
-  const existingUser = asString(inspected.userId);
-  if (exists && currentUser && existingUser && !sameWindowsAccount(currentUser, existingUser)) {
-    throw notReadyError(
-      `serve --install will not overwrite ${SERVE_TASK_NAME} owned by ${existingUser}`,
-      {
-        ...partial({
-          phase: "inspect",
-          cause: SERVE_TASK_OWNED_CODE,
-          remedy: REMEDY.owner,
-          principal: { userId: existingUser },
-          currentUser,
-        }),
-      },
-      token,
-      SERVE_TASK_OWNED_CODE,
-    );
-  }
-  if (exists && privilegedAccount(existingUser)) {
-    throw notReadyError(
-      `serve --install will not overwrite ${SERVE_TASK_NAME} owned by ${existingUser}`,
-      {
-        ...partial({
-          phase: "inspect",
-          cause: SERVE_TASK_OWNED_CODE,
-          remedy: REMEDY.owner,
-          principal: { userId: existingUser },
-        }),
-      },
-      token,
-      SERVE_TASK_OWNED_CODE,
-    );
-  }
+  const existingCommand = commandFromArguments(asString(inspected.arguments));
+  secrets.push(...tokenFromCommand(existingCommand));
+  const ownership = (() => {
+    const currentUser = asString(inspected.currentUser);
+    const currentSid = asString(inspected.currentSid);
+    const userId = asString(inspected.userId);
+    const userSid = asString(inspected.userSid);
+    if (!isWindowsSid(currentSid)) {
+      throw notReadyError(
+        "cannot verify the current Windows account SID for the Interactive logon task",
+        {
+          ...partial({
+            phase: "inspect",
+            cause: SERVE_TASK_OWNED_CODE,
+            remedy: REMEDY.owner,
+            currentUser,
+          }),
+        },
+        secrets,
+        SERVE_TASK_OWNED_CODE,
+      );
+    }
+    if (!exists) {
+      return { currentUser, currentSid, userId, userSid };
+    }
+    const verified = isWindowsSid(userSid) && sameWindowsSid(currentSid, userSid);
+    if (!verified || privilegedSid(userSid) || privilegedAccount(userId)) {
+      throw notReadyError(
+        `serve --install will not overwrite ${SERVE_TASK_NAME} owned by ${userId || "an unverified account"}`,
+        {
+          ...partial({
+            phase: "inspect",
+            cause: SERVE_TASK_OWNED_CODE,
+            remedy: REMEDY.owner,
+            principal: { userId, userSid },
+            currentUser,
+            currentSid,
+          }),
+        },
+        secrets,
+        SERVE_TASK_OWNED_CODE,
+      );
+    }
+    return { currentUser, currentSid, userId, userSid };
+  })();
 
   const execute = asString(inspected.execute);
   const alreadyRunning = exists && taskRunning(asString(inspected.state));
-  const matches =
+  const existingLaunchId = launchIdFromCommand(existingCommand);
+  const desiredBase = serveLogonCommand(
+    launch.execPath,
+    launch.scriptPath,
+    label,
+    token,
+    serveTaskLaunchEnv(env),
+  );
+  const configMatches =
     exists &&
     execute.toLowerCase() === "cmd.exe" &&
-    taskMatchesCommand(asString(inspected.arguments), command) &&
+    serveCommandFingerprint(existingCommand) === desiredBase &&
     (!asString(inspected.logonType) || asString(inspected.logonType).toLowerCase() === "interactive");
-  const needsUpdate = !exists || !matches;
-  let installed = exists && matches;
+  const reuseExistingLaunch =
+    configMatches &&
+    Boolean(existingLaunchId) &&
+    (!requestedLaunchId || requestedLaunchId === existingLaunchId);
+  const launchId = reuseExistingLaunch
+    ? existingLaunchId
+    : (requestedLaunchId || randomUUID());
+  const childEnv = serveTaskLaunchEnv(env, launchId);
+  const command = serveLogonCommand(launch.execPath, launch.scriptPath, label, token, childEnv);
+  const redactedCommand = redactServeSecret(command, token);
+  const needsUpdate = !reuseExistingLaunch;
+  let installed = exists && reuseExistingLaunch;
   let principal = {
-    userId: existingUser || currentUser,
+    userId: ownership.userId || ownership.currentUser,
+    userSid: ownership.userSid || ownership.currentSid,
     logonType: asString(inspected.logonType) || "Interactive",
     runLevel: asString(inspected.runLevel) || "Limited",
   };
 
-  if (needsUpdate) {
-    throwIfAborted(input.signal);
-    if (remaining() <= 0) {
-      throw notReadyError("serve --install timed out before registering the task", {
-        ...partial({ phase: "register", cause: "timeout", remedy: REMEDY.notReady }),
-      }, token, "timeout");
-    }
-    if (alreadyRunning) {
-      await runTask("stop", { run, timeoutMs: psBound(), signal: input.signal, token });
-    }
-    throwIfAborted(input.signal);
+  const mutate = async (
+    action: ServeTaskAction,
+    extra: Record<string, unknown>,
+    commandArg?: string,
+  ): Promise<Record<string, unknown>> => {
+    const budget = assertRunnable(action, extra);
     try {
-      const registered = await runTask("register", {
+      return await runTask(action, {
         run,
-        timeoutMs: psBound(),
+        timeoutMs: budget,
         signal: input.signal,
-        token,
-        command,
+        secrets,
+        command: commandArg,
       });
+    } catch (err) {
+      return rethrowKnown(err, extra);
+    }
+  };
+
+  if (needsUpdate) {
+    assertRunnable("register", { installed: false });
+    if (alreadyRunning) {
+      await mutate("stop", { phase: "stop", installed: false });
+    }
+    let registered: Record<string, unknown> | undefined;
+    try {
+      registered = await mutate(
+        "register",
+        { phase: "register", installed: false },
+        command,
+      );
       installed = true;
       principal = {
         userId: asString(registered.userId) || principal.userId,
+        userSid: asString(registered.userSid) || principal.userSid,
         logonType: asString(registered.logonType) || "Interactive",
         runLevel: asString(registered.runLevel) || "Limited",
       };
     } catch (err) {
-      if (err instanceof ZellijError && err.code === "cancelled") throw err;
+      if (err instanceof ZellijError && (err.code === "cancelled" || err.code === "timeout")) {
+        throw err;
+      }
       const message = err instanceof Error ? err.message : String(err);
       throw notReadyError(message, {
         ...partial({
           phase: "register",
           cause: "register_failed",
           stopped: alreadyRunning,
+          command: redactedCommand,
           remedy:
             "Task mutation was interrupted; inspect the zswarm-serve task. Install does not claim rollback.",
         }),
-      }, token, err instanceof ZellijError ? err.code : "zellij_failed");
+      }, secrets, err instanceof ZellijError ? err.code : "zellij_failed");
     }
-    throwIfAborted(input.signal);
-    if (remaining() <= 0) {
-      throw notReadyError("serve --install registered the task but timed out before starting it", {
-        ...partial({
-          installed: true,
-          phase: "start",
-          cause: "timeout",
-          principal,
-          remedy: REMEDY.notReady,
-        }),
-      }, token, "timeout");
-    }
+    assertRunnable("start", { installed: true, principal, command: redactedCommand });
     try {
-      await runTask("start", { run, timeoutMs: psBound(), signal: input.signal, token });
+      await mutate("start", { phase: "start", installed: true, principal, command: redactedCommand });
     } catch (err) {
-      if (err instanceof ZellijError && err.code === "cancelled") throw err;
+      if (err instanceof ZellijError && (err.code === "cancelled" || err.code === "timeout")) {
+        throw err;
+      }
       const message = err instanceof Error ? err.message : String(err);
       throw notReadyError(message, {
         ...partial({
@@ -824,24 +1034,14 @@ export async function installServeLogon(
           phase: "start",
           cause: "start_failed",
           principal,
+          command: redactedCommand,
           remedy: REMEDY.notReady,
         }),
-      }, token, err instanceof ZellijError ? err.code : "zellij_failed");
+      }, secrets, err instanceof ZellijError ? err.code : "zellij_failed");
     }
   } else if (!alreadyRunning) {
-    throwIfAborted(input.signal);
-    if (remaining() <= 0) {
-      throw notReadyError("serve --install timed out before starting the existing task", {
-        ...partial({
-          installed: true,
-          phase: "start",
-          cause: "timeout",
-          principal,
-          remedy: REMEDY.notReady,
-        }),
-      }, token, "timeout");
-    }
-    await runTask("start", { run, timeoutMs: psBound(), signal: input.signal, token });
+    assertRunnable("start", { installed: true, principal, command: redactedCommand });
+    await mutate("start", { phase: "start", installed: true, principal, command: redactedCommand });
     installed = true;
   }
 
@@ -856,6 +1056,7 @@ export async function installServeLogon(
     partial({
       installed: true,
       principal,
+      command: redactedCommand,
       phase: lastPhase,
       cause: lastCause,
       remedy: lastRemedy,
@@ -866,7 +1067,7 @@ export async function installServeLogon(
     });
 
   while (remaining() > 0 && probes < 64) {
-    throwIfAborted(input.signal);
+    assertRunnable("hello", { installed: true, principal });
     probes += 1;
     const helloBudget = Math.max(1, Math.min(SERVE_HELLO_TIMEOUT_MS, remaining()));
     const hello = await probe(label, {
@@ -876,7 +1077,7 @@ export async function installServeLogon(
     } satisfies ProbeServeOptions);
     if (!hello.ok) {
       if (hello.error.code === "cancelled") {
-        throw notReadyError("serve --install cancelled during hello", known(), token, "cancelled");
+        throw notReadyError("serve --install cancelled during hello", known(), secrets, "cancelled");
       }
       lastPhase = "hello";
       lastCause = hello.error.code;
@@ -915,27 +1116,54 @@ export async function installServeLogon(
       await sleep(Math.min(100, remaining()));
       continue;
     }
-    throwIfAborted(input.signal);
-    if (remaining() <= 0) break;
+    assertRunnable("host", { installed: true, principal, server: lastServer });
     const hostResult = await call(label, hostDoctorRequest(remaining(), explicitSession), {
       timeoutMs: Math.max(1, remaining()),
       token,
       signal: input.signal,
     });
+    const absorbHostRows = (result: OpsResult): ReturnType<typeof mergeHostReply> => {
+      const merged = mergeHostReply(result);
+      if (merged.checks.length) {
+        lastInspection = coverHostReport(merged.checks, explicitSession);
+        lastSessions = liveSessionsFrom(lastInspection);
+      }
+      return merged;
+    };
     if (!hostResult.ok && hostResult.error.code === "cancelled") {
-      throw notReadyError("serve --install cancelled during host inspection", known(), token, "cancelled");
+      absorbHostRows(hostResult);
+      throw notReadyError("serve --install cancelled during host inspection", known(), secrets, "cancelled");
     }
     if (!hostResult.ok && hostResult.error.code === "timeout") {
       lastPhase = "host";
       lastCause = "timeout";
       lastRemedy = REMEDY.notReady;
-      const mergedTimeout = mergeHostReply(hostResult);
-      lastInspection = mergedTimeout.checks.length ? coverHostReport(mergedTimeout.checks, explicitSession) : lastInspection;
+      absorbHostRows(hostResult);
       if (remaining() <= 0) break;
       await sleep(Math.min(100, remaining()));
       continue;
     }
-    const merged = mergeHostReply(hostResult);
+    if (!hostResult.ok) {
+      const merged = absorbHostRows(hostResult);
+      const checks = lastInspection ?? coverHostReport(merged.checks, explicitSession);
+      const report = hostReportFromMerged(merged, checks, explicitSession);
+      const verdict = evaluateHostReadiness(report, explicitSession);
+      lastInspection = checks;
+      lastPhase = verdict.phase ?? "host";
+      lastCause = verdict.cause ?? hostResult.error.code;
+      lastRemedy = verdict.remedy ?? hostResult.error.message;
+      throw notReadyError(
+        hostResult.error.message,
+        {
+          ...known(),
+          envelope: { code: hostResult.error.code, message: hostResult.error.message },
+          inspection: { checks },
+        },
+        secrets,
+        hostResult.error.code || SERVE_NOT_READY_CODE,
+      );
+    }
+    const merged = absorbHostRows(hostResult);
     if (merged.unsupported) {
       lastPhase = "host";
       lastCause = "doctor_unsupported";
@@ -956,8 +1184,17 @@ export async function installServeLogon(
     const checks = coverHostReport(merged.checks, explicitSession);
     lastInspection = checks;
     lastSessions = liveSessionsFrom(checks);
-    const verdict = evaluateHostReadiness(checks, explicitSession);
+    const verdict = evaluateHostReadiness(
+      hostReportFromMerged(merged, checks, explicitSession),
+      explicitSession,
+    );
     if (verdict.ready) {
+      assertRunnable("ready", {
+        installed: true,
+        principal,
+        server: lastServer,
+        inspection: { checks },
+      });
       const data: ServeInstallSuccess = {
         installed: true,
         ready: true,
@@ -972,7 +1209,7 @@ export async function installServeLogon(
         inspection: { checks },
       };
       if (verdict.warning) data.warning = verdict.warning;
-      return scrubSecrets(data, token);
+      return scrubSecrets(data, secrets);
     }
     lastPhase = verdict.phase ?? "host";
     lastCause = verdict.cause ?? SERVE_NOT_READY_CODE;
@@ -987,47 +1224,84 @@ export async function installServeLogon(
       throw notReadyError(
         `serve --install registered ${SERVE_TASK_NAME} but it is not ready (${lastCause})`,
         known(),
-        token,
+        secrets,
       );
     }
     if (remaining() <= 0) break;
     await sleep(Math.min(100, remaining()));
   }
 
-  throwIfAborted(input.signal);
+  if (input.signal?.aborted) {
+    throw notReadyError("serve --install cancelled", known(), secrets, "cancelled");
+  }
   const code = lastCause === "cancelled" ? "cancelled" : remaining() <= 0 || lastCause === "timeout" ? "timeout" : SERVE_NOT_READY_CODE;
   throw notReadyError(
     code === "timeout"
       ? "serve --install timed out waiting for authenticated readiness"
       : `serve --install registered ${SERVE_TASK_NAME} but it is not ready (${lastCause})`,
     known(),
-    token,
+    secrets,
     code === SERVE_NOT_READY_CODE ? SERVE_NOT_READY_CODE : code,
   );
 }
 
 export async function uninstallServeLogon(
   input: ServeInstallInput = {},
-): Promise<{ task: string; cleared: true; stopped?: boolean; missing?: boolean }> {
+): Promise<{ task: string; cleared: true; stopped?: boolean; missing?: boolean; stopFailed?: boolean }> {
   if ((input.platform ?? process.platform) !== "win32") {
     throw new ZellijError("usage", "serve --clear is Windows-only");
   }
   const timeoutMs = Math.max(1, Math.floor(input.timeoutMs ?? DEFAULT_SERVE_INSTALL_TIMEOUT_MS));
+  const now = input.now ?? Date.now;
+  const deadline = now() + timeoutMs;
+  const remaining = () => remainingOf(deadline, now);
   const token = input.token?.trim() || input.env?.ZSWARM_SERVE_TOKEN?.trim() || "none";
+  const secrets = token === "none" ? [] : [token];
   const run = input.runPowerShell ?? runPowerShellDefault;
-  throwIfAborted(input.signal);
+
+  const assertClear = (phase: string, extra: Record<string, unknown> = {}): number => {
+    if (input.signal?.aborted) {
+      throw notReadyError("serve --clear cancelled", {
+        installed: extra.installed ?? false,
+        ready: false,
+        task: SERVE_TASK_NAME,
+        phase,
+        cause: "cancelled",
+        ...extra,
+      }, secrets, "cancelled");
+    }
+    const left = remaining();
+    if (left <= 0) {
+      throw notReadyError("serve --clear timed out", {
+        installed: extra.installed ?? false,
+        ready: false,
+        task: SERVE_TASK_NAME,
+        phase,
+        cause: "timeout",
+        ...extra,
+      }, secrets, "timeout");
+    }
+    return Math.min(20_000, left);
+  };
+
+  const inspectBudget = assertClear("inspect");
   const inspected = await runTask("inspect", {
     run,
-    timeoutMs,
+    timeoutMs: inspectBudget,
     signal: input.signal,
-    token,
+    secrets,
   });
+  secrets.push(...tokenFromCommand(commandFromArguments(asString(inspected.arguments))));
+  assertClear("unregister", { installed: inspected.exists === true });
   if (inspected.exists === true) {
+    const currentSid = asString(inspected.currentSid);
+    const userSid = asString(inspected.userSid);
     const currentUser = asString(inspected.currentUser);
     const existingUser = asString(inspected.userId);
-    if (currentUser && existingUser && !sameWindowsAccount(currentUser, existingUser)) {
+    const verified = isWindowsSid(currentSid) && isWindowsSid(userSid) && sameWindowsSid(currentSid, userSid);
+    if (!verified || privilegedSid(userSid) || privilegedAccount(existingUser)) {
       throw notReadyError(
-        `serve --clear will not remove ${SERVE_TASK_NAME} owned by ${existingUser}`,
+        `serve --clear will not remove ${SERVE_TASK_NAME} owned by ${existingUser || "an unverified account"}`,
         {
           installed: true,
           ready: false,
@@ -1035,23 +1309,41 @@ export async function uninstallServeLogon(
           phase: "inspect",
           cause: SERVE_TASK_OWNED_CODE,
           remedy: REMEDY.owner,
-          principal: { userId: existingUser },
+          principal: { userId: existingUser, userSid },
+          currentUser,
+          currentSid,
         },
-        token,
+        secrets,
         SERVE_TASK_OWNED_CODE,
       );
     }
   }
-  const cleared = await runTask("unregister", {
-    run,
-    timeoutMs,
-    signal: input.signal,
-    token,
-  });
+  const unregisterBudget = assertClear("unregister", { installed: inspected.exists === true });
+  let cleared: Record<string, unknown>;
+  try {
+    cleared = await runTask("unregister", {
+      run,
+      timeoutMs: unregisterBudget,
+      signal: input.signal,
+      secrets,
+    });
+  } catch (err) {
+    if (err instanceof ZellijError && (err.code === "cancelled" || err.code === "timeout")) {
+      throw notReadyError(err.message, {
+        installed: inspected.exists === true,
+        ready: false,
+        task: SERVE_TASK_NAME,
+        phase: "unregister",
+        cause: err.code,
+      }, secrets, err.code);
+    }
+    throw err;
+  }
   return {
     task: SERVE_TASK_NAME,
     cleared: true,
-    stopped: inspected.exists === true,
+    stopped: cleared.stopped === true,
     ...(cleared.missing === true ? { missing: true } : {}),
+    ...(cleared.stopFailed === true ? { stopFailed: true } : {}),
   };
 }

@@ -18,6 +18,9 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Bound a wedged `node --test` so GitHub does not sit in "Run tests" for the
+    # default 6h job limit. This is a hang cap, not a per-assertion timeout.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

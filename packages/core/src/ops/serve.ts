@@ -40,9 +40,11 @@ export const SERVE_HELLO_CONTROL = "hello";
 export const SERVE_CAPABILITY_HELLO = "hello";
 /** Per-launch identity for Windows install verification. Additive hello field. */
 export const SERVE_LAUNCH_ID_ENV = "ZSWARM_SERVE_LAUNCH_ID";
+/** Package version baked into the Windows logon-task command so upgrades restart. */
+export const SERVE_CORE_VERSION = readCoreVersion();
 const SERVE_TOKEN_FIELD = "serveToken";
 
-const CORE_VERSION = readCoreVersion();
+const CORE_VERSION = SERVE_CORE_VERSION;
 
 function readCoreVersion(): string {
   const pkg = createRequire(import.meta.url)("../../package.json") as {

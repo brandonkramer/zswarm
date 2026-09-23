@@ -284,7 +284,8 @@ function reportHas(checks: DoctorCheck[], id: string): boolean {
   return checks.some((item) => item.id === id);
 }
 
-function isRequiredFailure(report: DoctorReport, item: DoctorCheck): boolean {
+/** Required-layer failure using accepted doctor semantics. Host install must reuse this. */
+export function isRequiredFailure(report: DoctorReport, item: DoctorCheck): boolean {
   if (item.state === "ok" || item.state === "warn") return false;
   if (item.id === "route") return item.state === "fail";
   if (item.id === "ssh") {

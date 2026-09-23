@@ -35,7 +35,13 @@ export type DispatchDeps = {
   serveInstall?: ServeInstallDeps;
 };
 
-export type ServePowerShellResult = { code: number; stdout: string; stderr: string };
+export type ServePowerShellResult = {
+  code: number;
+  stdout: string;
+  stderr: string;
+  aborted?: boolean;
+  timedOut?: boolean;
+};
 
 export type ServeInstallDeps = {
   platform?: NodeJS.Platform;
