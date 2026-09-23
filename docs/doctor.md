@@ -6,7 +6,8 @@ does not install, repair, or mutate a crew.
 
 Native Windows is **OpenSSH over Tailscale**. Tailscale's integrated SSH server
 is not required. The Windows desktop recipe (`serve --install`, token, `ssh://`
-attach) is in [Tailscale crew](tailscale.md).
+attach, optional verified Tailscale-IP bind, and private TCP Tailscale Serve) is
+in [Tailscale crew](tailscale.md).
 
 ## CLI and MCP
 
@@ -14,6 +15,7 @@ attach) is in [Tailscale crew](tailscale.md).
 zswarm doctor --session crew --timeout-ms 10000
 zswarm --serve 'ssh://Administrator@host?servePort=9419' doctor --session crew --timeout-ms 10000
 zswarm --serve 127.0.0.1:9419 doctor --session crew --timeout-ms 10000
+zswarm --serve 'tcp://crew-host:19419' doctor --session crew --timeout-ms 10000
 zswarm --ssh user@host doctor --session crew --timeout-ms 10000
 ```
 
@@ -21,6 +23,12 @@ MCP (same single `zswarm` tool):
 
 ```json
 { "op": "doctor", "serveAddress": "ssh://host?servePort=9419", "session": "crew", "timeoutMs": 10000 }
+```
+
+Private TCP Serve frontend (token in MCP env only):
+
+```json
+{ "op": "doctor", "serveAddress": "tcp://crew-host:19419", "session": "crew", "timeoutMs": 10000 }
 ```
 
 Routing matches every other op: `--local` / `--ssh` / `--serve` are exclusive;
@@ -226,7 +234,7 @@ manager, so another in-flight caller keeps its tunnel.
 
 | Symptom | What to do |
 | --- | --- |
-| `serve_connect` / dead tunnel | Start `zswarm serve --listen 127.0.0.1:9419` on the crew host, or `zswarm serve --install` on Windows ([Tailscale crew](tailscale.md)); check the SSH LocalForward |
+| `serve_connect` / dead tunnel | Start `zswarm serve --listen 127.0.0.1:9419` on the crew host, or `zswarm serve --install` on Windows ([Tailscale crew](tailscale.md)); check the SSH LocalForward, direct Tailscale-IP endpoint, or private `tailscale serve --tcp=…` frontend |
 | `serve_unauthorized` | Same `ZSWARM_SERVE_TOKEN` on host and controller |
 | `serve_hello_unsupported` | Upgrade zswarm serve (protocol 1 hello) |
 | `doctor_unsupported` | Upgrade zswarm serve so it implements `op=doctor` |

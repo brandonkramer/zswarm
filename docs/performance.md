@@ -8,8 +8,9 @@ scheduled desktop task.
 
 **Windows + Tailscale default:** verified `zswarm serve --install` on the
 logged-in desktop, then controller `ssh://` attach. See
-[Tailscale crew](tailscale.md) (native Windows uses OpenSSH over Tailscale, not
-the integrated Tailscale SSH server).
+[Tailscale crew](tailscale.md) for that path, optional verified Tailscale-IP
+bind, and private raw TCP Tailscale Serve (native Windows uses OpenSSH over
+Tailscale, not the integrated Tailscale SSH server).
 
 Set `ZSWARM_SERVE_TOKEN` to the same private value on the server and controller.
 On Windows, the documented install path waits for authenticated hello and host
@@ -40,7 +41,8 @@ zswarm --serve 'ssh://Administrator@host:22?servePort=9419' status --session cre
 # MCP: ZSWARM_SERVE='ssh://host?servePort=9419' and the same ZSWARM_SERVE_TOKEN.
 ```
 
-`host:port` and `tcp://host:port` still mean an already-open loopback endpoint.
+`host:port` and `tcp://host:port` still mean an already-open endpoint (loopback
+tunnel, direct Tailscale IP, or a private Tailscale Serve TCP frontend).
 `ssh://` is parsed separately: zswarm spawns foreground `ssh -N -T` with
 `-L 127.0.0.1:<ephemeral>:127.0.0.1:<servePort>`, `ExitOnForwardFailure`, and
 keepalives. Host-key verification stays on. An explicit URI authority port

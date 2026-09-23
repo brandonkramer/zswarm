@@ -47,8 +47,9 @@ op.
 desktop (Interactive/Limited logon task, loopback + token), then
 `--serve 'ssh://user@host?servePort=9419'` from the controller (OpenSSH over
 the tailnet — not Tailscale SSH). That guide also covers an **optional**
-verified Tailscale-IP bind for direct TCP. Readiness, token storage, bus
-approval, and login/reboot limits are documented there.
+verified Tailscale-IP bind for direct TCP, and **private raw TCP Tailscale
+Serve** (`tailscale serve --tcp=…` over a loopback backend). Readiness, token
+storage, bus approval, and login/reboot limits are documented there.
 
 ```bash
 # On the host, in the session that owns Zellij (default loopback):
@@ -66,6 +67,8 @@ ssh -fN -L 9419:127.0.0.1:9419 user@host
 ZSWARM_SERVE=127.0.0.1:9419 ZSWARM_SERVE_TOKEN=secret zswarm list
 # Direct endpoint when the host bound its Tailscale IP:
 # zswarm --serve '<host-tailscale-ip>:9419' status --session crew
+# Private TCP Tailscale Serve (frontend port; backend remains 127.0.0.1:9419):
+# zswarm --serve 'tcp://crew-host:19419' status --session crew
 ```
 
 `ZSWARM_SSH` only forwards Zellij. Git worktrees, `diff`, and `checkpoint` stay

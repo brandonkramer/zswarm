@@ -1,5 +1,17 @@
 # Tailscale crew (Windows desktop + Linux/macOS controller)
 
+Three supported ways to reach a crew host on the same tailnet (all keep
+**mandatory** `ZSWARM_SERVE_TOKEN` auth; Tailnet membership alone is never
+zswarm readiness):
+
+1. **Default:** loopback `zswarm serve` + process-owned OpenSSH `ssh://`
+   LocalForward (or a manual `-L` tunnel).
+2. **Optional direct bind:** `zswarm serve --listen` on a **verified local
+   Tailscale IP**; controllers use that address as ordinary `--serve host:port`.
+3. **Private TCP Tailscale Serve:** keep the backend on `127.0.0.1`, expose a
+   raw TCP frontend with `tailscale serve --tcp=…`, and point controllers at
+   `tcp://<host-MagicDNS-or-IP>:<frontend-port>`.
+
 Default path for a **native Windows** Zellij desktop and a controller on the
 same tailnet: install `zswarm serve` as a current-user Interactive logon task
 on the already-logged-in desktop, keep **loopback + token** auth, and attach
@@ -16,6 +28,11 @@ administrators should restrict the selected TCP port to intended controllers.
 Tailscale encrypts the tailnet path; zswarm's JSONL protocol does not add a
 separate TLS layer. Binding a tailnet address alone does **not** authenticate
 traffic on arbitrary network paths.
+
+**Private TCP Serve** (below) is the third path: useful when you want Tailscale
+to own the tailnet listener while the zswarm process stays on loopback (no
+SSH LocalForward, no direct Tailscale bind). It is **not** Funnel, HTTPS, or
+PROXY-protocol identity.
 
 This is not Tailscale's integrated SSH server. Native Windows uses conventional
 [OpenSSH](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-overview)
@@ -256,6 +273,169 @@ the controller remain optional and are not required for loopback/SSH clients.
 
 Doctor troubleshooting: [doctor.md](doctor.md).
 
-Private TCP Tailscale Serve (loopback backend behind `tailscale serve`) is a
-separate follow-on; this guide does not configure Funnel, HTTPS gateways, or
-PROXY protocol.
+## Host — private TCP Tailscale Serve (loopback backend)
+
+Use this when controllers should reach the crew over Tailscale's **private raw
+TCP** forwarder without SSH LocalForward and without binding zswarm itself to a
+Tailscale IP. The zswarm backend stays on **`127.0.0.1`**. Tailscale Serve
+([CLI reference](https://tailscale.com/docs/reference/tailscale-cli/serve),
+[feature overview](https://tailscale.com/docs/features/tailscale-serve))
+forwards encrypted tailnet TCP to that loopback listener. zswarm remains
+JSONL-over-TCP; it does **not** speak HTTP, infer callers from PROXY headers,
+or terminate TLS itself.
+
+Requires Tailscale client **≥ 1.52** (Serve/Funnel CLI redesign). Verify the
+flags below on the installed CLI; do not assume every historical syntax still
+works.
+
+### Ports and ownership
+
+Use **distinct** backend and frontend ports so a mis-typed controller URI
+cannot target the Tailscale listener as if it were the backend (example:
+backend `9419`, frontend `19419`). Host zswarm and the Tailscale forwarder have
+**separate lifetimes**:
+
+- An installed/ready Windows `zswarm-serve` task is **not** proof that
+  `tailscale serve --tcp=…` is configured.
+- A configured frontend is **not** proof the desktop crew / zswarm backend is
+  ready.
+- Controllers need network reachability to the frontend; they do **not** need a
+  local Tailscale CLI for ordinary `--serve` calls. The **host** manages its
+  own Tailscale CLI/daemon configuration.
+
+### Setup (host)
+
+Load the same private `ZSWARM_SERVE_TOKEN` out of band on host and controller
+(never in argv, URI, MCP `serveAddress`, or pasted examples that contain a real
+secret).
+
+```bash
+# Terminal 1 — loopback zswarm backend (foreground). Replace nothing here:
+export ZSWARM_SERVE_TOKEN="$(cat ~/.zswarm-serve-token)"
+zswarm serve --listen 127.0.0.1:9419
+```
+
+```powershell
+# Windows desktop account — verified install still targets loopback:
+$env:ZSWARM_SERVE_TOKEN = Get-Content $env:USERPROFILE\.zswarm-serve-token -Raw
+zswarm serve --install --listen 127.0.0.1:9419 --session crew --timeout-ms 30000
+```
+
+Inspect existing Serve mappings **before** changing anything. Do not overwrite
+an unrelated handler, and do not approve a prompt that enables **public**
+sharing / Funnel for this recipe:
+
+```bash
+tailscale serve status --json
+```
+
+Then enable **explicit private raw TCP** on an unused frontend port (example
+`19419` → loopback `9419`). Do **not** use default HTTPS, `--http`, `--https`,
+`--tls-terminated-tcp`, `--proxy-protocol`, or Tailscale Services / virtual-IP
+management for this path:
+
+```bash
+# Foreground (Ctrl+C stops this process's share; config may still need `off`)
+tailscale serve --tcp=19419 tcp://127.0.0.1:9419
+
+# Persistent until disabled with the matching port-specific off command:
+tailscale serve --bg --tcp=19419 tcp://127.0.0.1:9419
+```
+
+Validate the resulting private mapping and that Funnel is **not** enabled for
+the selected endpoint (`tailscale serve status` / `--json`). If the selected
+port already has an incompatible handler, decide explicitly — do **not** run
+`tailscale serve reset` or otherwise clear unrelated services.
+
+Disable only this forwarder with the **same flags** (target optional; original
+flags required):
+
+```bash
+tailscale serve --tcp=19419 off
+# If you used --bg when enabling:
+tailscale serve --bg --tcp=19419 off
+```
+
+Existing tailnet grants/ACLs and host policy must allow intended controllers to
+reach the frontend port. Private binding alone does not identify callers.
+
+### Controller
+
+Replace `crew-host` with the host's real MagicDNS name or Tailscale IP (not a
+placeholder sample, and not this controller's address):
+
+```bash
+export ZSWARM_SERVE_TOKEN="$(cat ~/.zswarm-serve-token)"
+zswarm --serve 'tcp://crew-host:19419' doctor --session crew --timeout-ms 10000
+zswarm --serve 'tcp://crew-host:19419' status --session crew
+# IPv4 literal:
+# zswarm --serve 'tcp://100.64.1.2:19419' doctor --session crew --timeout-ms 10000
+# Bracketed IPv6:
+# zswarm --serve 'tcp://[fd7a:115c:a1e0::1]:19419' status --session crew
+```
+
+```powershell
+$env:ZSWARM_SERVE_TOKEN = Get-Content $env:USERPROFILE\.zswarm-serve-token -Raw
+zswarm --serve 'tcp://crew-host:19419' doctor --session crew --timeout-ms 10000
+zswarm --serve 'tcp://crew-host:19419' status --session crew
+```
+
+MCP (token stays in the MCP server environment, not in the tool args):
+
+```json
+{ "op": "doctor", "serveAddress": "tcp://crew-host:19419", "session": "crew", "timeoutMs": 10000 }
+```
+
+Ordinary ops keep the same `serveAddress` / `ZSWARM_SERVE`.
+
+### Layered readiness
+
+1. **Local authenticated backend** on the host:
+   `zswarm --serve 127.0.0.1:9419 doctor --session crew` (same token).
+2. **Forwarding config** on the host: `tailscale serve status --json` shows the
+   intended private `--tcp` mapping and no Funnel for that endpoint.
+3. **Authenticated controller doctor** through the frontend:
+   `zswarm --serve 'tcp://crew-host:19419' doctor --session crew`.
+
+Separate failure layers (do not collapse them):
+
+| Layer | Typical symptom |
+| --- | --- |
+| Wrong / missing token | `serve_unauthorized` — TCP connected; hello/ops refused |
+| Backend down, frontend accepting | Connect may succeed; hello/doctor fails within the budget with connect/hello/request phase details — never a successful ready report |
+| Frontend missing / wrong port | `serve_unreachable` / `serve_connect` |
+| Desktop IPC / session | Host checks fail after hello (`ipc_failed`, `session_missing`, …) |
+| Hostname / address | DNS/IP wrong for the **host**; replace sample names |
+
+Cancellation and deadlines stay bounded. There is no SSH fallback and no
+mutation replay when a reply is lost after the request was sent (`uncertain`
+delivery).
+
+### Automated evidence vs live tailnet
+
+CI models the forwarding hop with an **in-process transparent TCP relay** over
+real loopback sockets (JSONL framing, token policy, uncertain delivery). That
+is protocol/transport compatibility evidence — **not** a live Tailscale
+daemon, ACL, Funnel, or Windows desktop validation. Live Serve setup remains
+an operator step on the host.
+
+This guide does **not** configure Funnel, public listeners, HTTPS gateways,
+`--tls-terminated-tcp`, or PROXY protocol for zswarm.
+
+## Troubleshooting — abandoned cursor/signal locks
+
+Cursor and signal state use exclusive lock files (`cursors.lock` /
+`signals.lock`) under the state directory (`ZSWARM_STATE_DIR`, default
+`~/.zswarm`). Contenders **fail closed**: they never rename or unlink a
+foreign, abandoned, or ownerless lock to recover it.
+
+If acquisition refuses an abandoned lock:
+
+1. Stop / quiesce **all** writers that use that state directory.
+2. Confirm the recorded owner process is gone and no writer holds the file.
+3. Remove **only** the affected lock file (preserve state data).
+4. Restart / retry.
+
+Do not delete cursors, signals, or other state files as part of lock recovery.
+Runtime errors already name the lock path; this note is the published operator
+procedure only.

@@ -187,6 +187,8 @@ zswarm --serve 'ssh://user@crew-host?servePort=9419' doctor --session crew --tim
 zswarm --serve 'ssh://user@crew-host?servePort=9419' status --session crew
 # Direct endpoint when the host bound its Tailscale IP:
 # zswarm --serve '<host-tailscale-ip>:9419' status --session crew
+# Private TCP Tailscale Serve frontend (backend stays 127.0.0.1:9419):
+# zswarm --serve 'tcp://crew-host:19419' doctor --session crew --timeout-ms 10000
 ```
 
 `file:` plugin URLs stay on the machine that owns Zellij. A client with `ZSWARM_SERVE` never sends a local wasm path across the tunnel.
@@ -223,7 +225,7 @@ zswarm --serve 'ssh://user@crew-host?servePort=9419' status --session crew
 
 For spawn lifecycle fields, file/stdin handoffs, guarded menu input, tab summaries, and routing diagnostics, see [Reliable crew operations](docs/crew-operations.md).
 
-For the Windows + Tailscale crew recipe (`serve --install`, OpenSSH over Tailscale, optional verified Tailscale-IP bind, token, doctor/status), see [Tailscale crew](docs/tailscale.md).
+For the Windows + Tailscale crew recipe (`serve --install`, OpenSSH over Tailscale, optional verified Tailscale-IP bind, private TCP Tailscale Serve, token, doctor/status), see [Tailscale crew](docs/tailscale.md).
 
 For layered inspect-only diagnostics (`zswarm doctor`), see [Doctor](docs/doctor.md).
 
